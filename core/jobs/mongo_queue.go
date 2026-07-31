@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/telemetryos/tos-tag/core/database"
 	"github.com/telemetryos/tos-tag/models"
@@ -39,6 +39,7 @@ func (q *MongoQueue) Enqueue(ctx context.Context, spec Spec) (Job, bool, error) 
 		WorkspaceID:            spec.WorkspaceID,
 		ChannelID:              spec.ChannelID,
 		RootThreadTS:           spec.RootThreadTS,
+		ReplyInChannel:         spec.ReplyInChannel,
 		SessionID:              string(spec.SessionID),
 		Generation:             spec.Generation,
 		ObservationID:          string(spec.ObservationID),
@@ -303,7 +304,7 @@ func fromModel(doc models.Job) Job {
 	}
 	return Job{
 		ID: types.JobID(doc.PublicID), OrganizationID: doc.OrganizationID, WorkspaceID: doc.WorkspaceID,
-		ChannelID: doc.ChannelID, RootThreadTS: doc.RootThreadTS, SessionID: types.SessionID(doc.SessionID),
+		ChannelID: doc.ChannelID, RootThreadTS: doc.RootThreadTS, ReplyInChannel: doc.ReplyInChannel, SessionID: types.SessionID(doc.SessionID),
 		Generation: doc.Generation, ObservationID: types.ObservationID(doc.ObservationID), IdempotencyKey: doc.IdempotencyKey,
 		Kind: doc.Kind, Input: doc.Input, State: State(doc.State), Attempt: doc.Attempt, MaxAttempts: doc.MaxAttempts,
 		AdmissionReservationID: doc.AdmissionReservationID,

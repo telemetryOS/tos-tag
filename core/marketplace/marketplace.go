@@ -39,6 +39,9 @@ type SkillSnapshot struct {
 	Name          string   `json:"name"`
 	Root          string   `json:"root"`
 	Files         []string `json:"files"`
+	SharedRoot    string   `json:"shared_root,omitempty"`
+	SharedFiles   []string `json:"shared_files,omitempty"`
+	SharedHash    string   `json:"shared_hash,omitempty"`
 	RequiresTools []string `json:"requires_tools,omitempty"`
 	Hash          string   `json:"hash"`
 }
@@ -163,6 +166,20 @@ type pluginMarketplace struct {
 }
 
 func LoadPluginMarketplace(root, catalogPath string) ([]SkillSnapshot, error) {
+	return loadPluginMarketplace(root, catalogPath, "")
+}
+
+// LoadPlugin loads every behavioral skill from exactly one named plugin. The
+// plugin may intentionally contain no skills, which supports an empty base
+// plugin without weakening fail-closed source and manifest validation.
+func LoadPlugin(root, catalogPath, pluginName string) ([]SkillSnapshot, error) {
+	if strings.TrimSpace(pluginName) == "" {
+		return nil, fmt.Errorf("plugin name is required")
+	}
+	return loadPluginMarketplace(root, catalogPath, pluginName)
+}
+
+func loadPluginMarketplace(root, catalogPath, selectedPlugin string) ([]SkillSnapshot, error) {
 	absolute, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -180,10 +197,15 @@ func LoadPluginMarketplace(root, catalogPath string) ([]SkillSnapshot, error) {
 		return nil, fmt.Errorf("plugin marketplace name and plugins are required")
 	}
 	var snapshots []SkillSnapshot
+	foundSelected := selectedPlugin == ""
 	for _, plugin := range catalog.Plugins {
 		if plugin.Name == "" || plugin.Source == "" {
 			return nil, fmt.Errorf("plugin name and source are required")
 		}
+		if selectedPlugin != "" && plugin.Name != selectedPlugin {
+			continue
+		}
+		foundSelected = true
 		pluginRoot, err := containedPath(absolute, plugin.Source)
 		if err != nil {
 			return nil, err
@@ -192,6 +214,10 @@ func LoadPluginMarketplace(root, catalogPath string) ([]SkillSnapshot, error) {
 		entries, err := os.ReadDir(skillsRoot)
 		if err != nil {
 			return nil, err
+		}
+		sharedFiles, sharedHash, err := snapshotSharedReferences(skillsRoot)
+		if err != nil {
+			return nil, fmt.Errorf("plugin %s shared references: %w", plugin.Name, err)
 		}
 		version := plugin.Version
 		if version == "" {
@@ -205,12 +231,23 @@ func LoadPluginMarketplace(root, catalogPath string) ([]SkillSnapshot, error) {
 			if err != nil {
 				return nil, err
 			}
-			snapshot, err := snapshotSkill(absolute, Catalog{ID: catalog.Name + "/" + plugin.Name, Version: version}, SkillEntry{Name: plugin.Name + "/" + entry.Name(), Path: relative})
+			// OpenCode discovers skills at .opencode/skills/<skill>/SKILL.md, so
+			// retain the plugin in MarketplaceID and keep the skill's runtime
+			// name flat. Combining plugins then fails closed on name collisions.
+			snapshot, err := snapshotSkill(absolute, Catalog{ID: catalog.Name + "/" + plugin.Name, Version: version}, SkillEntry{Name: entry.Name(), Path: relative})
 			if err != nil {
 				return nil, fmt.Errorf("plugin %s skill %s: %w", plugin.Name, entry.Name(), err)
 			}
+			if len(sharedFiles) > 0 {
+				snapshot.SharedRoot = skillsRoot
+				snapshot.SharedFiles = append([]string(nil), sharedFiles...)
+				snapshot.SharedHash = sharedHash
+			}
 			snapshots = append(snapshots, snapshot)
 		}
+	}
+	if !foundSelected {
+		return nil, fmt.Errorf("plugin %q is not present in marketplace %q", selectedPlugin, catalog.Name)
 	}
 	sort.Slice(snapshots, func(i, j int) bool {
 		if snapshots[i].MarketplaceID == snapshots[j].MarketplaceID {
@@ -219,6 +256,64 @@ func LoadPluginMarketplace(root, catalogPath string) ([]SkillSnapshot, error) {
 		return snapshots[i].MarketplaceID < snapshots[j].MarketplaceID
 	})
 	return snapshots, nil
+}
+
+func snapshotSharedReferences(skillsRoot string) ([]string, string, error) {
+	referencesRoot := filepath.Join(skillsRoot, ".references")
+	info, err := os.Lstat(referencesRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, "", nil
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, "", fmt.Errorf("%w: shared references must be a real directory", ErrUnsafeMarketplace)
+	}
+	var files []string
+	var total int64
+	err = filepath.WalkDir(referencesRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: shared reference symlink %s", ErrUnsafeMarketplace, path)
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 != 0 {
+			return fmt.Errorf("%w: executable shared reference %s", ErrUnsafeMarketplace, path)
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext != ".md" && ext != ".txt" && ext != ".json" && ext != ".yaml" && ext != ".yml" {
+			return fmt.Errorf("%w: unsupported shared reference %s", ErrUnsafeMarketplace, path)
+		}
+		relative, _ := filepath.Rel(skillsRoot, path)
+		files = append(files, filepath.ToSlash(relative))
+		total += info.Size()
+		if len(files) > maxSkillFiles || total > maxSkillBytes {
+			return fmt.Errorf("%w: shared references exceed size limits", ErrUnsafeMarketplace)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	sort.Strings(files)
+	hash := sha256.New()
+	for _, relative := range files {
+		data, err := readRootFile(skillsRoot, filepath.FromSlash(relative), maxSkillBytes)
+		if err != nil {
+			return nil, "", err
+		}
+		_, _ = hash.Write([]byte(relative))
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write(data)
+		_, _ = hash.Write([]byte{0})
+	}
+	return files, "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 type Registry struct{ snapshots []SkillSnapshot }

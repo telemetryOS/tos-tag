@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/telemetryos/tos-tag/core/marketplace"
@@ -22,6 +23,34 @@ func TestTelemetryOSAgentSkillsMarketplaceWhenAvailable(t *testing.T) {
 		t.Fatalf("loaded only %d behavioral skills", len(snapshots))
 	}
 	for _, snapshot := range snapshots {
+		for _, file := range snapshot.Files {
+			if filepath.Ext(file) == ".sh" {
+				t.Fatalf("executable leaked into behavioral snapshot: %s", file)
+			}
+		}
+	}
+}
+
+func TestConfiguredPluginPairWhenAvailable(t *testing.T) {
+	headlessRoot := filepath.Clean(filepath.Join("..", "..", "telemetryos-agent-skills"))
+	baseRoot := filepath.Clean(filepath.Join("..", "..", "tag-agent-skills"))
+	for _, root := range []string{headlessRoot, baseRoot} {
+		if _, err := os.Stat(root); errors.Is(err, os.ErrNotExist) {
+			t.Skipf("checkout not present: %s", root)
+		}
+	}
+	headless, err := marketplace.LoadPlugin(headlessRoot, filepath.Join(".claude-plugin", "marketplace.json"), "telemetryos-automation")
+	if err != nil || len(headless) < 10 {
+		t.Fatalf("headless skills=%d err=%v", len(headless), err)
+	}
+	base, err := marketplace.LoadPlugin(baseRoot, filepath.Join(".claude-plugin", "marketplace.json"), "base")
+	if err != nil || len(base) != 0 {
+		t.Fatalf("base skills=%d err=%v", len(base), err)
+	}
+	for _, snapshot := range headless {
+		if strings.Contains(snapshot.Name, "/") {
+			t.Fatalf("OpenCode skill name is not flat: %s", snapshot.Name)
+		}
 		for _, file := range snapshot.Files {
 			if filepath.Ext(file) == ".sh" {
 				t.Fatalf("executable leaked into behavioral snapshot: %s", file)

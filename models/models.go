@@ -4,7 +4,7 @@ package models
 import (
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 const (
@@ -15,7 +15,7 @@ const (
 	CollectionMessages              = "channel_messages"
 	CollectionChannelCounters       = "channel_receive_counters"
 	CollectionOrganizationCounts    = "organization_receive_counters"
-	CollectionDecisions             = "chat_gating_decisions"
+	CollectionDecisions             = "classifier_decisions"
 	CollectionContextPacks          = "context_pack_revisions"
 	CollectionSituationFacts        = "situation_facts"
 	CollectionRestrictedSignals     = "restricted_signals"
@@ -44,59 +44,59 @@ const (
 )
 
 type Observation struct {
-	ID                      primitive.ObjectID `bson:"_id,omitempty"`
-	PublicID                string             `bson:"public_id"`
-	OrganizationID          string             `bson:"organization_id"`
-	TeamID                  string             `bson:"team_id"`
-	ChannelID               string             `bson:"channel_id"`
-	EventID                 string             `bson:"event_id"`
-	EnvelopeID              string             `bson:"envelope_id"`
-	ReceivedSeq             int64              `bson:"received_seq"`
-	OrganizationReceivedSeq int64              `bson:"organization_received_seq"`
-	SlackEventTime          time.Time          `bson:"slack_event_time"`
-	ReceivedAt              time.Time          `bson:"received_at"`
-	MessageTS               string             `bson:"message_ts"`
-	RootThreadTS            string             `bson:"root_thread_ts"`
-	UserID                  string             `bson:"user_id,omitempty"`
-	BotID                   string             `bson:"bot_id,omitempty"`
-	Restricted              bool               `bson:"restricted"`
-	IsMention               bool               `bson:"is_mention"`
-	OriginTag               string             `bson:"origin_tag,omitempty"`
-	EventType               string             `bson:"event_type"`
-	Subtype                 string             `bson:"subtype,omitempty"`
-	Text                    string             `bson:"text,omitempty"`
-	MutationTargetTS        string             `bson:"mutation_target_ts,omitempty"`
-	ScopeState              string             `bson:"scope_state"`
-	DecisionState           string             `bson:"decision_state"`
-	DecisionLeaseOwner      string             `bson:"decision_lease_owner,omitempty"`
-	DecisionLeaseToken      string             `bson:"decision_lease_token,omitempty"`
-	DecisionLeaseExpiresAt  time.Time          `bson:"decision_lease_expires_at,omitempty"`
-	OutputProduced          bool               `bson:"output_produced"`
-	OutputJobID             string             `bson:"output_job_id,omitempty"`
-	OutputDeliveryID        string             `bson:"output_delivery_id,omitempty"`
-	CreatedAt               time.Time          `bson:"created_at"`
-	ExpiresAt               time.Time          `bson:"expires_at"`
-	Version                 int64              `bson:"version"`
+	ID                      bson.ObjectID `bson:"_id,omitempty"`
+	PublicID                string        `bson:"public_id"`
+	OrganizationID          string        `bson:"organization_id"`
+	TeamID                  string        `bson:"team_id"`
+	ChannelID               string        `bson:"channel_id"`
+	EventID                 string        `bson:"event_id"`
+	EnvelopeID              string        `bson:"envelope_id"`
+	ReceivedSeq             int64         `bson:"received_seq"`
+	OrganizationReceivedSeq int64         `bson:"organization_received_seq"`
+	SlackEventTime          time.Time     `bson:"slack_event_time"`
+	ReceivedAt              time.Time     `bson:"received_at"`
+	MessageTS               string        `bson:"message_ts"`
+	RootThreadTS            string        `bson:"root_thread_ts"`
+	UserID                  string        `bson:"user_id,omitempty"`
+	BotID                   string        `bson:"bot_id,omitempty"`
+	Restricted              bool          `bson:"restricted"`
+	IsMention               bool          `bson:"is_mention"`
+	OriginTag               string        `bson:"origin_tag,omitempty"`
+	EventType               string        `bson:"event_type"`
+	Subtype                 string        `bson:"subtype,omitempty"`
+	Text                    string        `bson:"text,omitempty"`
+	MutationTargetTS        string        `bson:"mutation_target_ts,omitempty"`
+	ScopeState              string        `bson:"scope_state"`
+	DecisionState           string        `bson:"decision_state"`
+	DecisionLeaseOwner      string        `bson:"decision_lease_owner,omitempty"`
+	DecisionLeaseToken      string        `bson:"decision_lease_token,omitempty"`
+	DecisionLeaseExpiresAt  time.Time     `bson:"decision_lease_expires_at,omitempty"`
+	OutputProduced          bool          `bson:"output_produced"`
+	OutputJobID             string        `bson:"output_job_id,omitempty"`
+	OutputDeliveryID        string        `bson:"output_delivery_id,omitempty"`
+	CreatedAt               time.Time     `bson:"created_at"`
+	ExpiresAt               time.Time     `bson:"expires_at"`
+	Version                 int64         `bson:"version"`
 }
 
 type ChannelMessage struct {
-	ID                primitive.ObjectID `bson:"_id,omitempty"`
-	OrganizationID    string             `bson:"organization_id"`
-	TeamID            string             `bson:"team_id"`
-	ChannelID         string             `bson:"channel_id"`
-	MessageTS         string             `bson:"message_ts"`
-	RootThreadTS      string             `bson:"root_thread_ts"`
-	AuthorID          string             `bson:"author_id,omitempty"`
-	Text              string             `bson:"text,omitempty"`
-	Deleted           bool               `bson:"deleted"`
-	Restricted        bool               `bson:"restricted"`
-	SourceEventID     string             `bson:"source_event_id"`
-	SourceEventAt     time.Time          `bson:"source_event_at"`
-	SourceEventRank   int                `bson:"source_event_rank"`
-	ProjectionVersion int64              `bson:"projection_version"`
-	OriginalAt        time.Time          `bson:"original_at"`
-	UpdatedAt         time.Time          `bson:"updated_at"`
-	ExpiresAt         time.Time          `bson:"expires_at"`
+	ID                bson.ObjectID `bson:"_id,omitempty"`
+	OrganizationID    string        `bson:"organization_id"`
+	TeamID            string        `bson:"team_id"`
+	ChannelID         string        `bson:"channel_id"`
+	MessageTS         string        `bson:"message_ts"`
+	RootThreadTS      string        `bson:"root_thread_ts"`
+	AuthorID          string        `bson:"author_id,omitempty"`
+	Text              string        `bson:"text,omitempty"`
+	Deleted           bool          `bson:"deleted"`
+	Restricted        bool          `bson:"restricted"`
+	SourceEventID     string        `bson:"source_event_id"`
+	SourceEventAt     time.Time     `bson:"source_event_at"`
+	SourceEventRank   int           `bson:"source_event_rank"`
+	ProjectionVersion int64         `bson:"projection_version"`
+	OriginalAt        time.Time     `bson:"original_at"`
+	UpdatedAt         time.Time     `bson:"updated_at"`
+	ExpiresAt         time.Time     `bson:"expires_at"`
 }
 
 type Counter struct {
@@ -106,110 +106,110 @@ type Counter struct {
 }
 
 type Organization struct {
-	ID                  primitive.ObjectID `bson:"_id,omitempty"`
-	PublicID            string             `bson:"public_id"`
-	Name                string             `bson:"name"`
-	EnrollmentMode      string             `bson:"enrollment_mode"`
-	KillSwitch          bool               `bson:"kill_switch"`
-	DefaultModelProfile string             `bson:"default_model_profile,omitempty"`
-	CreatedAt           time.Time          `bson:"created_at"`
-	UpdatedAt           time.Time          `bson:"updated_at"`
-	Version             int64              `bson:"version"`
+	ID                  bson.ObjectID `bson:"_id,omitempty"`
+	PublicID            string        `bson:"public_id"`
+	Name                string        `bson:"name"`
+	EnrollmentMode      string        `bson:"enrollment_mode"`
+	KillSwitch          bool          `bson:"kill_switch"`
+	DefaultModelProfile string        `bson:"default_model_profile,omitempty"`
+	CreatedAt           time.Time     `bson:"created_at"`
+	UpdatedAt           time.Time     `bson:"updated_at"`
+	Version             int64         `bson:"version"`
 }
 
 type Workspace struct {
-	ID             primitive.ObjectID `bson:"_id,omitempty"`
-	PublicID       string             `bson:"public_id"`
-	OrganizationID string             `bson:"organization_id"`
-	TeamID         string             `bson:"team_id"`
-	Name           string             `bson:"name"`
-	Enabled        bool               `bson:"enabled"`
-	CreatedAt      time.Time          `bson:"created_at"`
-	UpdatedAt      time.Time          `bson:"updated_at"`
-	Version        int64              `bson:"version"`
+	ID             bson.ObjectID `bson:"_id,omitempty"`
+	PublicID       string        `bson:"public_id"`
+	OrganizationID string        `bson:"organization_id"`
+	TeamID         string        `bson:"team_id"`
+	Name           string        `bson:"name"`
+	Enabled        bool          `bson:"enabled"`
+	CreatedAt      time.Time     `bson:"created_at"`
+	UpdatedAt      time.Time     `bson:"updated_at"`
+	Version        int64         `bson:"version"`
 }
 
 type Channel struct {
-	ID                    primitive.ObjectID `bson:"_id,omitempty"`
-	PublicID              string             `bson:"public_id"`
-	OrganizationID        string             `bson:"organization_id"`
-	TeamID                string             `bson:"team_id"`
-	ChannelID             string             `bson:"channel_id"`
-	Name                  string             `bson:"name"`
-	Enrolled              bool               `bson:"enrolled"`
-	Restricted            bool               `bson:"restricted"`
-	ParticipationMode     string             `bson:"participation_mode"`
-	KillSwitch            bool               `bson:"kill_switch"`
-	CooldownSeconds       int                `bson:"cooldown_seconds"`
-	MaxResponsesPerHour   int                `bson:"max_responses_per_hour"`
-	MaxConcurrentJobs     int                `bson:"max_concurrent_jobs"`
-	DefaultModelProfile   string             `bson:"default_model_profile,omitempty"`
-	MembershipRevision    string             `bson:"membership_revision"`
-	MembershipRefreshedAt time.Time          `bson:"membership_refreshed_at"`
-	CreatedAt             time.Time          `bson:"created_at"`
-	UpdatedAt             time.Time          `bson:"updated_at"`
-	Version               int64              `bson:"version"`
+	ID                    bson.ObjectID `bson:"_id,omitempty"`
+	PublicID              string        `bson:"public_id"`
+	OrganizationID        string        `bson:"organization_id"`
+	TeamID                string        `bson:"team_id"`
+	ChannelID             string        `bson:"channel_id"`
+	Name                  string        `bson:"name"`
+	Enrolled              bool          `bson:"enrolled"`
+	Restricted            bool          `bson:"restricted"`
+	ParticipationMode     string        `bson:"participation_mode"`
+	KillSwitch            bool          `bson:"kill_switch"`
+	CooldownSeconds       int           `bson:"cooldown_seconds"`
+	MaxResponsesPerHour   int           `bson:"max_responses_per_hour"`
+	MaxConcurrentJobs     int           `bson:"max_concurrent_jobs"`
+	DefaultModelProfile   string        `bson:"default_model_profile,omitempty"`
+	MembershipRevision    string        `bson:"membership_revision"`
+	MembershipRefreshedAt time.Time     `bson:"membership_refreshed_at"`
+	CreatedAt             time.Time     `bson:"created_at"`
+	UpdatedAt             time.Time     `bson:"updated_at"`
+	Version               int64         `bson:"version"`
 }
 
 type ContextPack struct {
-	ID                  primitive.ObjectID `bson:"_id,omitempty"`
-	PublicID            string             `bson:"public_id"`
-	OrganizationID      string             `bson:"organization_id"`
-	TargetObservationID string             `bson:"target_observation_id"`
-	Revision            int64              `bson:"revision"`
-	Payload             any                `bson:"payload"`
-	SourceIDs           []string           `bson:"source_ids"`
-	CreatedAt           time.Time          `bson:"created_at"`
-	ExpiresAt           time.Time          `bson:"expires_at"`
+	ID                  bson.ObjectID `bson:"_id,omitempty"`
+	PublicID            string        `bson:"public_id"`
+	OrganizationID      string        `bson:"organization_id"`
+	TargetObservationID string        `bson:"target_observation_id"`
+	Revision            int64         `bson:"revision"`
+	Payload             any           `bson:"payload"`
+	SourceIDs           []string      `bson:"source_ids"`
+	CreatedAt           time.Time     `bson:"created_at"`
+	ExpiresAt           time.Time     `bson:"expires_at"`
 }
 
 type SituationFact struct {
-	ID              primitive.ObjectID `bson:"_id,omitempty"`
-	PublicID        string             `bson:"public_id"`
-	OrganizationID  string             `bson:"organization_id"`
-	Kind            string             `bson:"kind"`
-	Status          string             `bson:"status"`
-	Summary         string             `bson:"summary,omitempty"`
-	SourceIDs       []string           `bson:"source_ids"`
-	ChannelID       string             `bson:"channel_id"`
-	MessageTS       string             `bson:"message_ts"`
-	SourceExpiresAt time.Time          `bson:"source_expires_at"`
-	UpdatedAt       time.Time          `bson:"updated_at"`
-	ExpiresAt       time.Time          `bson:"expires_at"`
+	ID              bson.ObjectID `bson:"_id,omitempty"`
+	PublicID        string        `bson:"public_id"`
+	OrganizationID  string        `bson:"organization_id"`
+	Kind            string        `bson:"kind"`
+	Status          string        `bson:"status"`
+	Summary         string        `bson:"summary,omitempty"`
+	SourceIDs       []string      `bson:"source_ids"`
+	ChannelID       string        `bson:"channel_id"`
+	MessageTS       string        `bson:"message_ts"`
+	SourceExpiresAt time.Time     `bson:"source_expires_at"`
+	UpdatedAt       time.Time     `bson:"updated_at"`
+	ExpiresAt       time.Time     `bson:"expires_at"`
 }
 
 type RestrictedSignal struct {
-	ID             primitive.ObjectID `bson:"_id,omitempty"`
-	PublicID       string             `bson:"public_id"`
-	OrganizationID string             `bson:"organization_id"`
-	Kind           string             `bson:"kind"`
-	Active         bool               `bson:"active"`
-	SourceID       string             `bson:"source_id"`
-	ChannelID      string             `bson:"channel_id"`
-	MessageTS      string             `bson:"message_ts"`
-	CreatedAt      time.Time          `bson:"created_at"`
-	ExpiresAt      time.Time          `bson:"expires_at"`
+	ID             bson.ObjectID `bson:"_id,omitempty"`
+	PublicID       string        `bson:"public_id"`
+	OrganizationID string        `bson:"organization_id"`
+	Kind           string        `bson:"kind"`
+	Active         bool          `bson:"active"`
+	SourceID       string        `bson:"source_id"`
+	ChannelID      string        `bson:"channel_id"`
+	MessageTS      string        `bson:"message_ts"`
+	CreatedAt      time.Time     `bson:"created_at"`
+	ExpiresAt      time.Time     `bson:"expires_at"`
 }
 
 type Summary struct {
-	ID             primitive.ObjectID `bson:"_id,omitempty"`
-	PublicID       string             `bson:"public_id"`
-	OrganizationID string             `bson:"organization_id"`
-	ChannelID      string             `bson:"channel_id,omitempty"`
-	Text           string             `bson:"text"`
-	SourceIDs      []string           `bson:"source_ids"`
-	CreatedAt      time.Time          `bson:"created_at"`
-	ExpiresAt      time.Time          `bson:"expires_at"`
+	ID             bson.ObjectID `bson:"_id,omitempty"`
+	PublicID       string        `bson:"public_id"`
+	OrganizationID string        `bson:"organization_id"`
+	ChannelID      string        `bson:"channel_id,omitempty"`
+	Text           string        `bson:"text"`
+	SourceIDs      []string      `bson:"source_ids"`
+	CreatedAt      time.Time     `bson:"created_at"`
+	ExpiresAt      time.Time     `bson:"expires_at"`
 }
 
 type SourceDerivation struct {
-	ID                primitive.ObjectID `bson:"_id,omitempty"`
-	OrganizationID    string             `bson:"organization_id"`
-	SourceID          string             `bson:"source_id"`
-	DerivedCollection string             `bson:"derived_collection"`
-	DerivedID         string             `bson:"derived_id"`
-	CreatedAt         time.Time          `bson:"created_at"`
-	ExpiresAt         time.Time          `bson:"expires_at"`
+	ID                bson.ObjectID `bson:"_id,omitempty"`
+	OrganizationID    string        `bson:"organization_id"`
+	SourceID          string        `bson:"source_id"`
+	DerivedCollection string        `bson:"derived_collection"`
+	DerivedID         string        `bson:"derived_id"`
+	CreatedAt         time.Time     `bson:"created_at"`
+	ExpiresAt         time.Time     `bson:"expires_at"`
 }
 
 type ProjectorWatermark struct {
@@ -228,82 +228,83 @@ type Lease struct {
 }
 
 type Job struct {
-	ID                     primitive.ObjectID `bson:"_id,omitempty"`
-	PublicID               string             `bson:"public_id"`
-	OrganizationID         string             `bson:"organization_id"`
-	WorkspaceID            string             `bson:"workspace_id"`
-	ChannelID              string             `bson:"channel_id"`
-	RootThreadTS           string             `bson:"root_thread_ts"`
-	SessionID              string             `bson:"session_id"`
-	Generation             int64              `bson:"generation"`
-	ObservationID          string             `bson:"observation_id,omitempty"`
-	IdempotencyKey         string             `bson:"idempotency_key"`
-	Kind                   string             `bson:"kind"`
-	Input                  string             `bson:"input"`
-	State                  string             `bson:"state"`
-	Attempt                int                `bson:"attempt"`
-	MaxAttempts            int                `bson:"max_attempts"`
-	AdmissionReservationID string             `bson:"admission_reservation_id,omitempty"`
-	ResolvedModel          any                `bson:"resolved_model,omitempty"`
-	RouteTrace             any                `bson:"route_trace,omitempty"`
-	SteeringEpoch          int64              `bson:"steering_epoch"`
-	Lease                  Lease              `bson:"lease"`
-	Result                 any                `bson:"result,omitempty"`
-	FailureReason          string             `bson:"failure_reason,omitempty"`
-	AvailableAt            time.Time          `bson:"available_at"`
-	CreatedAt              time.Time          `bson:"created_at"`
-	UpdatedAt              time.Time          `bson:"updated_at"`
-	ExpiresAt              time.Time          `bson:"expires_at"`
-	Version                int64              `bson:"version"`
+	ID                     bson.ObjectID `bson:"_id,omitempty"`
+	PublicID               string        `bson:"public_id"`
+	OrganizationID         string        `bson:"organization_id"`
+	WorkspaceID            string        `bson:"workspace_id"`
+	ChannelID              string        `bson:"channel_id"`
+	RootThreadTS           string        `bson:"root_thread_ts"`
+	ReplyInChannel         bool          `bson:"reply_in_channel,omitempty"`
+	SessionID              string        `bson:"session_id"`
+	Generation             int64         `bson:"generation"`
+	ObservationID          string        `bson:"observation_id,omitempty"`
+	IdempotencyKey         string        `bson:"idempotency_key"`
+	Kind                   string        `bson:"kind"`
+	Input                  string        `bson:"input"`
+	State                  string        `bson:"state"`
+	Attempt                int           `bson:"attempt"`
+	MaxAttempts            int           `bson:"max_attempts"`
+	AdmissionReservationID string        `bson:"admission_reservation_id,omitempty"`
+	ResolvedModel          any           `bson:"resolved_model,omitempty"`
+	RouteTrace             any           `bson:"route_trace,omitempty"`
+	SteeringEpoch          int64         `bson:"steering_epoch"`
+	Lease                  Lease         `bson:"lease"`
+	Result                 any           `bson:"result,omitempty"`
+	FailureReason          string        `bson:"failure_reason,omitempty"`
+	AvailableAt            time.Time     `bson:"available_at"`
+	CreatedAt              time.Time     `bson:"created_at"`
+	UpdatedAt              time.Time     `bson:"updated_at"`
+	ExpiresAt              time.Time     `bson:"expires_at"`
+	Version                int64         `bson:"version"`
 }
 
 type Session struct {
-	ID                primitive.ObjectID `bson:"_id,omitempty"`
-	PublicID          string             `bson:"public_id"`
-	OrganizationID    string             `bson:"organization_id"`
-	TeamID            string             `bson:"team_id"`
-	ChannelID         string             `bson:"channel_id"`
-	RootThreadTS      string             `bson:"root_thread_ts"`
-	CurrentGeneration int64              `bson:"current_generation"`
-	CreatedAt         time.Time          `bson:"created_at"`
-	UpdatedAt         time.Time          `bson:"updated_at"`
-	Version           int64              `bson:"version"`
+	ID                bson.ObjectID `bson:"_id,omitempty"`
+	PublicID          string        `bson:"public_id"`
+	OrganizationID    string        `bson:"organization_id"`
+	TeamID            string        `bson:"team_id"`
+	ChannelID         string        `bson:"channel_id"`
+	RootThreadTS      string        `bson:"root_thread_ts"`
+	CurrentGeneration int64         `bson:"current_generation"`
+	CreatedAt         time.Time     `bson:"created_at"`
+	UpdatedAt         time.Time     `bson:"updated_at"`
+	Version           int64         `bson:"version"`
 }
 
 type Delivery struct {
-	ID             primitive.ObjectID `bson:"_id,omitempty"`
-	PublicID       string             `bson:"public_id"`
-	OrganizationID string             `bson:"organization_id"`
-	JobID          string             `bson:"job_id"`
-	IdempotencyKey string             `bson:"idempotency_key"`
-	TeamID         string             `bson:"team_id"`
-	ChannelID      string             `bson:"channel_id"`
-	ThreadTS       string             `bson:"thread_ts,omitempty"`
-	Result         any                `bson:"result"`
-	Status         string             `bson:"status"`
-	Attempt        int                `bson:"attempt"`
-	MaxAttempts    int                `bson:"max_attempts"`
-	RetryAt        time.Time          `bson:"retry_at"`
-	Lease          Lease              `bson:"lease"`
-	SlackMessageTS string             `bson:"slack_message_ts,omitempty"`
-	FailureReason  string             `bson:"failure_reason,omitempty"`
-	CreatedAt      time.Time          `bson:"created_at"`
-	UpdatedAt      time.Time          `bson:"updated_at"`
-	ExpiresAt      time.Time          `bson:"expires_at"`
-	Version        int64              `bson:"version"`
-	WriterActive   bool               `bson:"writer_active"`
+	ID             bson.ObjectID `bson:"_id,omitempty"`
+	PublicID       string        `bson:"public_id"`
+	OrganizationID string        `bson:"organization_id"`
+	JobID          string        `bson:"job_id"`
+	IdempotencyKey string        `bson:"idempotency_key"`
+	TeamID         string        `bson:"team_id"`
+	ChannelID      string        `bson:"channel_id"`
+	ThreadTS       string        `bson:"thread_ts,omitempty"`
+	Result         any           `bson:"result"`
+	Status         string        `bson:"status"`
+	Attempt        int           `bson:"attempt"`
+	MaxAttempts    int           `bson:"max_attempts"`
+	RetryAt        time.Time     `bson:"retry_at"`
+	Lease          Lease         `bson:"lease"`
+	SlackMessageTS string        `bson:"slack_message_ts,omitempty"`
+	FailureReason  string        `bson:"failure_reason,omitempty"`
+	CreatedAt      time.Time     `bson:"created_at"`
+	UpdatedAt      time.Time     `bson:"updated_at"`
+	ExpiresAt      time.Time     `bson:"expires_at"`
+	Version        int64         `bson:"version"`
+	WriterActive   bool          `bson:"writer_active"`
 }
 
-type GatingDecision struct {
-	ID                    primitive.ObjectID `bson:"_id,omitempty"`
-	PublicID              string             `bson:"public_id"`
-	OrganizationID        string             `bson:"organization_id"`
-	ObservationID         string             `bson:"observation_id"`
-	DecisionRevision      int64              `bson:"decision_revision"`
-	ContextPackRevisionID string             `bson:"context_pack_revision_id"`
-	OrganizationWatermark int64              `bson:"organization_watermark"`
-	Predicted             any                `bson:"predicted"`
-	Effective             any                `bson:"effective"`
-	Shadowed              bool               `bson:"shadowed"`
-	CreatedAt             time.Time          `bson:"created_at"`
+type ClassificationDecision struct {
+	ID                    bson.ObjectID `bson:"_id,omitempty"`
+	PublicID              string        `bson:"public_id"`
+	OrganizationID        string        `bson:"organization_id"`
+	ObservationID         string        `bson:"observation_id"`
+	DecisionRevision      int64         `bson:"decision_revision"`
+	ContextPackRevisionID string        `bson:"context_pack_revision_id"`
+	OrganizationWatermark int64         `bson:"organization_watermark"`
+	Predicted             any           `bson:"predicted"`
+	Effective             any           `bson:"effective"`
+	Shadowed              bool          `bson:"shadowed"`
+	CreatedAt             time.Time     `bson:"created_at"`
 }

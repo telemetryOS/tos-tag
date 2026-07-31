@@ -5,20 +5,98 @@ features:
   bot_user:
     display_name: tos-tag
     always_online: true
+  agent_view:
+    agent_description: Cross-channel AI teammate for investigation, planning, and durable agent work.
+    suggested_prompts:
+      - title: Summarize this context
+        message: Summarize the current Slack context and identify unresolved decisions.
+      - title: Investigate an issue
+        message: Investigate this issue using the Slack context I can access and propose next steps.
+      - title: Plan a task
+        message: Turn this request into a safe, evidence-backed execution plan.
 oauth_config:
   scopes:
     bot:
       - app_mentions:read
+      - assistant:write
+      - bookmarks:read
+      - bookmarks:write
+      - canvases:read
+      - canvases:write
       - channels:history
+      - channels:join
+      - channels:manage
       - channels:read
+      - channels:write.invites
+      - channels:write.topic
       - chat:write
+      - chat:write.customize
+      - chat:write.public
+      - conversations.connect:manage
+      - conversations.connect:read
+      - conversations.connect:write
+      - emoji:read
+      - files:read
+      - files:write
       - groups:history
       - groups:read
       - im:history
+      - im:read
+      - im:write
+      - links:write
+      - lists:read
+      - lists:write
+      - mcp:connect
+      - metadata.message:read
       - mpim:history
+      - mpim:read
+      - pins:read
+      - pins:write
+      - reactions:read
+      - reactions:write
+      - reminders:read
+      - reminders:write
+      - search:read.files
+      - search:read.public
+      - search:read.users
+      - team.preferences:read
+      - team:read
+      - usergroups:read
+      - usergroups:write
+      - users.profile:read
+      - users:read
+      - users:read.email
+      - users:write
+    user:
+      - canvases:read
+      - canvases:write
+      - channels:history
+      - channels:read
+      - chat:write
+      - files:read
+      - files:write
+      - groups:history
+      - groups:read
+      - im:history
+      - im:read
+      - mpim:history
+      - mpim:read
+      - reactions:read
+      - reactions:write
+      - search:read.files
+      - search:read.im
+      - search:read.mpim
+      - search:read.private
+      - search:read.public
+      - search:read.users
+      - users.profile:read
+      - users:read
+      - users:read.email
 settings:
   event_subscriptions:
     bot_events:
+      - app_context_changed
+      - app_home_opened
       - app_mention
       - message.channels
       - message.groups
@@ -28,4 +106,4 @@ settings:
     is_enabled: true
   org_deploy_enabled: false
   socket_mode_enabled: true
-  token_rotation_enabled: true
+  token_rotation_enabled: false

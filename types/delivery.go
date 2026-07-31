@@ -62,3 +62,16 @@ type SlackDeliveryResult struct {
 	DeliveredAt time.Time `json:"delivered_at"`
 	Duplicate   bool      `json:"duplicate"`
 }
+
+type SlackReactionRequest struct {
+	IdempotencyKey string `json:"idempotency_key"`
+	TeamID         string `json:"team_id"`
+	ChannelID      string `json:"channel_id"`
+	MessageTS      string `json:"message_ts"`
+	Emoji          string `json:"emoji"`
+}
+
+type SlackReactionResult struct {
+	AppliedAt time.Time `json:"applied_at"`
+	Duplicate bool      `json:"duplicate"`
+}

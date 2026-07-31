@@ -1,0 +1,60 @@
+ARG NODE_VERSION=24.7.0
+ARG GH_VERSION=2.96.0
+
+FROM node:${NODE_VERSION}-bookworm-slim@sha256:0104d9447ea3ddf7373643be7f9915fc7b7c896e41d0d33229338e457217cd78 AS node-tools
+ARG OPENCODE_VERSION=1.18.10
+ARG PNPM_VERSION=11.18.0
+RUN npm install --global "opencode-ai@${OPENCODE_VERSION}" "pnpm@${PNPM_VERSION}"
+
+FROM golang:1.26.5@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647
+
+ARG GH_VERSION
+ARG USER_ID=10001
+ARG GROUP_ID=10001
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        bash \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        jq \
+        make \
+        openssh-client \
+        ripgrep \
+        tini \
+        unzip \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=node-tools /usr/local/ /usr/local/
+
+RUN architecture="$(dpkg --print-architecture)" \
+    && archive="gh_${GH_VERSION}_linux_${architecture}.tar.gz" \
+    && curl --fail --show-error --location --output "/tmp/${archive}" "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${archive}" \
+    && curl --fail --show-error --location --output /tmp/gh-checksums.txt "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_checksums.txt" \
+    && grep " ${archive}$" /tmp/gh-checksums.txt | sed "s#${archive}#/tmp/${archive}#" | sha256sum --check --strict \
+    && tar --extract --gzip --file "/tmp/${archive}" --strip-components=2 --directory /usr/local/bin "gh_${GH_VERSION}_linux_${architecture}/bin/gh" \
+    && rm -f "/tmp/${archive}" /tmp/gh-checksums.txt \
+    && groupadd --gid "${GROUP_ID}" tag \
+    && useradd --create-home --uid "${USER_ID}" --gid "${GROUP_ID}" --shell /bin/bash tag \
+    && install -d -o tag -g tag -m 0750 /workspace /home/tag/.config /home/tag/.cache /home/tag/.local/state \
+    && chown -R tag:tag /home/tag /workspace
+
+COPY container/bootstrap-workspace.sh /usr/local/bin/bootstrap-workspace
+COPY container/run-tag.sh /usr/local/bin/run-tag-container
+COPY container/workspace-AGENTS.md /usr/local/share/tos-tag/workspace-AGENTS.md
+RUN chmod 0755 /usr/local/bin/bootstrap-workspace /usr/local/bin/run-tag-container \
+    && chmod 0644 /usr/local/share/tos-tag/workspace-AGENTS.md
+
+ENV HOME=/home/tag \
+    GOPATH=/home/tag/go \
+    PATH=/home/tag/go/bin:/home/tag/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin \
+    TAG_WORKSPACE_ROOT=/workspace \
+    TAG_AION_DEVELOPER_PATH=/workspace/code
+
+USER tag:tag
+WORKDIR /workspace
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["sleep", "infinity"]

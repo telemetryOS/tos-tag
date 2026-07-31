@@ -7,9 +7,9 @@ import (
 	"github.com/telemetryos/tos-tag/core/database"
 	"github.com/telemetryos/tos-tag/models"
 	"github.com/telemetryos/tos-tag/types"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 type Store interface {
@@ -28,7 +28,7 @@ func (s *MongoStore) Save(ctx context.Context, pack types.ContextPackRevision, r
 		sourceIDs = append(sourceIDs, source.ID)
 	}
 	doc := models.ContextPack{PublicID: string(pack.ID), OrganizationID: pack.OrganizationID, TargetObservationID: pack.TargetObservationID, Revision: revision, Payload: pack, SourceIDs: sourceIDs, CreatedAt: pack.CreatedAt, ExpiresAt: pack.ExpiresAt}
-	_, err := s.db.Collection(models.CollectionContextPacks).UpdateOne(ctx, bson.M{"organization_id": pack.OrganizationID, "target_observation_id": pack.TargetObservationID, "revision": revision}, bson.M{"$setOnInsert": doc}, options.Update().SetUpsert(true))
+	_, err := s.db.Collection(models.CollectionContextPacks).UpdateOne(ctx, bson.M{"organization_id": pack.OrganizationID, "target_observation_id": pack.TargetObservationID, "revision": revision}, bson.M{"$setOnInsert": doc}, options.UpdateOne().SetUpsert(true))
 	return err
 }
 func (s *MongoStore) Get(ctx context.Context, org, target string, revision int64) (types.ContextPackRevision, error) {

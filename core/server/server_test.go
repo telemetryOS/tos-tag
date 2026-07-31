@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/telemetryos/tos-tag/core/audit"
-	"github.com/telemetryos/tos-tag/core/chatgating"
+	"github.com/telemetryos/tos-tag/core/classifier"
 	"github.com/telemetryos/tos-tag/core/config"
 	"github.com/telemetryos/tos-tag/core/deliveries"
 	"github.com/telemetryos/tos-tag/core/jobs"
@@ -40,7 +40,7 @@ func newTestServer(t *testing.T, authenticated bool) (*Server, *slack.StubIngres
 	}
 	srv, err := New(Dependencies{
 		Config: &cfg, Ingress: ingress, Transport: slack.NewStubDelivery(), Jobs: jobs.NewMemoryQueue(nil),
-		Deliveries: deliveries.NewMemoryQueue(nil), Decisions: chatgating.NewMemoryDecisionStore(), Version: "test", Audit: auditLog,
+		Deliveries: deliveries.NewMemoryQueue(nil), Decisions: classifier.NewMemoryDecisionStore(), Version: "test", Audit: auditLog,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -112,6 +112,24 @@ func TestManagementRequiresBearerWhenEnabled(t *testing.T) {
 	}
 	if strings.Contains(response.Body.String(), "admin-test-token") {
 		t.Fatal("status leaked the admin token")
+	}
+}
+
+func TestStatusSupportsLiveModeWithoutStubAdapters(t *testing.T) {
+	cfg := config.DefaultConfiguration
+	cfg.Slack.Mode = "socket_mode"
+	cfg.Slack.LiveEnabled = true
+	srv, err := New(Dependencies{
+		Config: &cfg, Jobs: jobs.NewMemoryQueue(nil), Deliveries: deliveries.NewMemoryQueue(nil),
+		Decisions: classifier.NewMemoryDecisionStore(), Version: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/.status", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("live status = %d: %s", response.Code, response.Body.String())
 	}
 }
 

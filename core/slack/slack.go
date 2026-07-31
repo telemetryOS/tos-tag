@@ -1,5 +1,5 @@
-// Package slack defines the credential-free project boundary for Slack ingress
-// and delivery. The current initiative intentionally ships only the stub.
+// Package slack defines the project boundary for stubbed or live Slack ingress
+// and delivery. Credentials remain confined to the live control-plane adapter.
 package slack
 
 import (
@@ -28,4 +28,5 @@ type Ingress interface {
 
 type Delivery interface {
 	Send(context.Context, types.SlackDeliveryRequest) (types.SlackDeliveryResult, error)
+	React(context.Context, types.SlackReactionRequest) (types.SlackReactionResult, error)
 }

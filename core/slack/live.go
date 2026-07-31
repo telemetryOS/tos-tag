@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/RobertWHurst/blackbox"
 	slackapi "github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
@@ -19,16 +20,18 @@ import (
 )
 
 type LiveOptions struct {
-	OrganizationID string
-	TeamID         string
-	AppToken       string
-	BotToken       string
-	BotUserID      string
+	OrganizationID    string
+	AppID             string
+	TeamID            string
+	AppLevelToken     string
+	BotUserOAuthToken string
+	BotUserID         string
+	Logger            *blackbox.Logger
 }
 
 type LiveIngress struct {
 	options LiveOptions
-	client  *socketmode.Client
+	client  socketModeTransport
 
 	mu      sync.Mutex
 	cancel  context.CancelFunc
@@ -36,8 +39,31 @@ type LiveIngress struct {
 	started bool
 }
 
+type socketModeTransport interface {
+	RunContext(context.Context) error
+	AckCtx(context.Context, string, any) error
+	EventsChannel() <-chan socketmode.Event
+}
+
+type managedSocketModeTransport struct {
+	client *socketmode.Client
+}
+
+func (t managedSocketModeTransport) RunContext(ctx context.Context) error {
+	return t.client.RunContext(ctx)
+}
+
+func (t managedSocketModeTransport) AckCtx(ctx context.Context, envelopeID string, payload any) error {
+	return t.client.AckCtx(ctx, envelopeID, payload)
+}
+
+func (t managedSocketModeTransport) EventsChannel() <-chan socketmode.Event {
+	return t.client.Events
+}
+
 type deliveryAPI interface {
 	PostMessageContext(context.Context, string, ...slackapi.MsgOption) (string, string, error)
+	AddReactionContext(context.Context, string, slackapi.ItemRef) error
 	GetConversationHistoryContext(context.Context, *slackapi.GetConversationHistoryParameters) (*slackapi.GetConversationHistoryResponse, error)
 	GetConversationRepliesContext(context.Context, *slackapi.GetConversationRepliesParameters) ([]slackapi.Message, bool, string, error)
 }
@@ -46,20 +72,25 @@ type LiveDelivery struct {
 	teamID   string
 	api      deliveryAPI
 	renderer *deliveries.Renderer
+	logger   *blackbox.Logger
 }
 
 // NewLive constructs the production adapters without opening a connection.
 // Start is the only method that initiates Socket Mode network activity.
 func NewLive(options LiveOptions, renderer *deliveries.Renderer) (*LiveIngress, *LiveDelivery, error) {
-	if options.OrganizationID == "" || options.TeamID == "" || !strings.HasPrefix(options.AppToken, "xapp-") || !strings.HasPrefix(options.BotToken, "xoxb-") {
+	if options.OrganizationID == "" || !strings.HasPrefix(options.AppID, "A") || options.TeamID == "" || !strings.HasPrefix(options.AppLevelToken, "xapp-") || !strings.HasPrefix(options.BotUserOAuthToken, "xoxb-") {
 		return nil, nil, errors.New("invalid live Slack options")
 	}
 	if renderer == nil {
 		return nil, nil, errors.New("Slack renderer is required")
 	}
-	api := slackapi.New(options.BotToken, slackapi.OptionAppLevelToken(options.AppToken))
-	client := socketmode.New(api)
-	return &LiveIngress{options: options, client: client}, &LiveDelivery{teamID: options.TeamID, api: api, renderer: renderer}, nil
+	api := slackapi.New(options.BotUserOAuthToken, slackapi.OptionAppLevelToken(options.AppLevelToken))
+	client := managedSocketModeTransport{client: socketmode.New(api)}
+	if options.Logger == nil {
+		options.Logger = blackbox.New()
+	}
+	options.Logger = options.Logger.WithCtx(blackbox.Ctx{"component": "slack", "slack_app_id": options.AppID, "slack_team_id": options.TeamID})
+	return &LiveIngress{options: options, client: client}, &LiveDelivery{teamID: options.TeamID, api: api, renderer: renderer, logger: options.Logger}, nil
 }
 
 func (s *LiveIngress) Start(parent context.Context, handler Handler) error {
@@ -81,6 +112,8 @@ func (s *LiveIngress) Start(parent context.Context, handler Handler) error {
 
 func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 	defer close(s.done)
+	s.options.Logger.Info("Slack Socket Mode loop started")
+	defer s.options.Logger.Info("Slack Socket Mode loop stopped")
 	runDone := make(chan error, 1)
 	go func() { runDone <- s.client.RunContext(ctx) }()
 	for {
@@ -88,27 +121,104 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 		case <-ctx.Done():
 			<-runDone
 			return
-		case <-runDone:
+		case err := <-runDone:
+			if ctx.Err() == nil {
+				s.options.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Error("Slack Socket Mode client exited unexpectedly")
+			}
 			return
-		case event := <-s.client.Events:
-			if event.Type != socketmode.EventTypeEventsAPI || event.Request == nil {
+		case event, open := <-s.client.EventsChannel():
+			if !open {
+				s.options.Logger.Warn("Slack Socket Mode event stream closed")
+				return
+			}
+			requestContext := blackbox.Ctx{"socket_event_type": string(event.Type)}
+			if event.Request != nil {
+				requestContext["envelope_id"] = event.Request.EnvelopeID
+				requestContext["retry_attempt"] = event.Request.RetryAttempt
+				requestContext["retry_reason"] = event.Request.RetryReason
+			}
+			eventLogger := s.options.Logger.WithCtx(requestContext)
+			switch event.Type {
+			case socketmode.EventTypeConnecting:
+				eventLogger.Info("Slack Socket Mode connecting")
+				continue
+			case socketmode.EventTypeConnected:
+				connectionCount := 0
+				if connected, ok := event.Data.(*socketmode.ConnectedEvent); ok {
+					connectionCount = connected.ConnectionCount
+				}
+				eventLogger.WithCtx(blackbox.Ctx{"connection_count": connectionCount, "reconnected": connectionCount > 0}).Info("Slack Socket Mode transport connected")
+				continue
+			case socketmode.EventTypeHello:
+				if event.Request == nil {
+					eventLogger.Error("Slack Socket Mode hello missing request metadata")
+					continue
+				}
+				actualAppID := event.Request.ConnectionInfo.AppID
+				if actualAppID != s.options.AppID {
+					eventLogger.WithCtx(blackbox.Ctx{"actual_slack_app_id": actualAppID}).Error("Slack App-Level Token belongs to a different app")
+					s.cancel()
+					continue
+				}
+				eventLogger.Info("Slack Socket Mode hello verified")
+				continue
+			case socketmode.EventTypeInvalidAuth, socketmode.EventTypeConnectionError, socketmode.EventTypeIncomingError, socketmode.EventTypeErrorWriteFailed, socketmode.EventTypeErrorBadMessage:
+				eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", event.Data)}).Error("Slack Socket Mode transport error")
+				continue
+			case socketmode.EventTypeEventsAPI:
+				eventLogger.Info("Slack Events API envelope received")
+			default:
+				eventLogger.Debug("Slack Socket Mode event ignored by Events API ingress")
 				continue
 			}
+			if event.Request == nil {
+				eventLogger.Error("Slack Events API envelope missing request metadata")
+				continue
+			}
+			started := time.Now()
 			normalized, eligible, err := NormalizeEventsAPI(s.options.OrganizationID, s.options.BotUserID, event.Request.EnvelopeID, event.Data)
 			if err != nil {
+				eventLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err)}).Error("Slack Events API normalization failed")
 				continue
 			}
 			if !eligible {
-				_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, nil)
+				if ackErr := s.client.AckCtx(ctx, event.Request.EnvelopeID, nil); ackErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", ackErr)}).Error("Slack ineligible envelope acknowledgement failed")
+				} else {
+					eventLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds()}).Info("Slack ineligible envelope acknowledged")
+				}
 				continue
 			}
-			if _, err := handler(ctx, normalized); err != nil {
+			envelopeLogger := eventLogger.WithCtx(slackEnvelopeLogContext(normalized))
+			envelopeLogger.Info("Slack event normalized")
+			accepted, err := handler(ctx, normalized)
+			if err != nil {
 				// Deliberately do not acknowledge: Slack may retry after a
 				// persistence or admission failure.
+				envelopeLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err)}).Error("Slack event rejected; acknowledgement withheld")
 				continue
 			}
-			_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, nil)
+			if ackErr := s.client.AckCtx(ctx, event.Request.EnvelopeID, nil); ackErr != nil {
+				envelopeLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "duplicate": accepted.Duplicate, "error_type": fmt.Sprintf("%T", ackErr)}).Error("Slack event persisted but acknowledgement failed")
+				continue
+			}
+			envelopeLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "duplicate": accepted.Duplicate}).Info("Slack event durably accepted and acknowledged")
 		}
+	}
+}
+
+func slackEnvelopeLogContext(envelope types.SlackEnvelope) blackbox.Ctx {
+	return blackbox.Ctx{
+		"organization_id": envelope.OrganizationID,
+		"event_id":        envelope.EventID,
+		"channel_id":      envelope.ChannelID,
+		"message_ts":      envelope.MessageTS,
+		"thread_ts":       envelope.ThreadTS,
+		"event_kind":      string(envelope.Kind),
+		"event_subtype":   envelope.Subtype,
+		"is_mention":      envelope.IsMention,
+		"is_bot_event":    envelope.BotID != "",
+		"text_bytes":      len(envelope.Text),
 	}
 }
 
@@ -135,8 +245,14 @@ func NormalizeEventsAPI(organizationID, botUserID, envelopeID string, data any) 
 	if !ok || event.Type != slackevents.CallbackEvent {
 		return types.SlackEnvelope{}, false, nil
 	}
-	callback, ok := event.Data.(slackevents.EventsAPICallbackEvent)
-	if !ok {
+	var callback *slackevents.EventsAPICallbackEvent
+	switch value := event.Data.(type) {
+	case *slackevents.EventsAPICallbackEvent:
+		callback = value
+	case slackevents.EventsAPICallbackEvent:
+		callback = &value
+	}
+	if callback == nil {
 		return types.SlackEnvelope{}, false, errors.New("Slack callback payload is malformed")
 	}
 	base := types.SlackEnvelope{
@@ -152,10 +268,12 @@ func NormalizeEventsAPI(organizationID, botUserID, envelopeID string, data any) 
 		base.ChannelID, base.MessageTS, base.ThreadTS = inner.Channel, inner.TimeStamp, inner.ThreadTimeStamp
 		base.UserID, base.BotID, base.Text = inner.User, inner.BotID, inner.Text
 		base.Kind, base.IsMention = types.SlackEventMessage, true
+		base.EventID = canonicalMessageEventID(base.EventID, base.TeamID, base.ChannelID, base.MessageTS)
 		return base, true, nil
 	case *slackevents.MessageEvent:
 		base.ChannelID, base.MessageTS, base.ThreadTS = inner.Channel, inner.TimeStamp, inner.ThreadTimeStamp
 		base.UserID, base.BotID, base.Text, base.Subtype = inner.User, inner.BotID, inner.Text, inner.SubType
+		base.Restricted = inner.ChannelType == slackevents.ChannelTypeGroup || inner.ChannelType == slackevents.ChannelTypeIM || inner.ChannelType == slackevents.ChannelTypeMPIM
 		base.Kind = types.SlackEventMessage
 		switch inner.SubType {
 		case "message_changed":
@@ -168,6 +286,9 @@ func NormalizeEventsAPI(organizationID, botUserID, envelopeID string, data any) 
 			base.Kind, base.TargetTS, base.MessageTS, base.Text = types.SlackEventDelete, inner.DeletedTimeStamp, inner.DeletedTimeStamp, ""
 		}
 		base.IsMention = botUserID != "" && strings.Contains(base.Text, "<@"+botUserID+">")
+		if base.Kind == types.SlackEventMessage {
+			base.EventID = canonicalMessageEventID(base.EventID, base.TeamID, base.ChannelID, base.MessageTS)
+		}
 		if base.EventTime.IsZero() {
 			base.EventTime = slackTimestamp(base.MessageTS)
 		}
@@ -177,18 +298,43 @@ func NormalizeEventsAPI(organizationID, botUserID, envelopeID string, data any) 
 	}
 }
 
+// canonicalMessageEventID coalesces Slack's app_mention and message callbacks
+// for the same message while preserving Slack's callback ID as a fallback.
+// Mutation callbacks keep their own callback IDs so every edit/delete remains
+// independently observable.
+func canonicalMessageEventID(fallback, teamID, channelID, messageTS string) string {
+	if teamID == "" || channelID == "" || messageTS == "" {
+		return fallback
+	}
+	return "message/" + teamID + "/" + channelID + "/" + messageTS
+}
+
 func (d *LiveDelivery) Send(ctx context.Context, request types.SlackDeliveryRequest) (types.SlackDeliveryResult, error) {
+	started := time.Now()
+	logger := d.logger
+	if logger == nil {
+		logger = blackbox.New()
+	}
+	requestLogger := logger.WithCtx(blackbox.Ctx{
+		"delivery_id": request.ID, "channel_id": request.Destination.ChannelID,
+		"thread_ts": request.Destination.ThreadTS, "segment_count": len(request.Result.Segments),
+	})
+	requestLogger.Info("Slack delivery requested")
 	if request.Destination.TeamID != d.teamID {
+		requestLogger.Warn("Slack delivery denied for mismatched workspace")
 		return types.SlackDeliveryResult{}, errors.New("Slack destination team does not match the configured installation")
 	}
 	payloads, err := d.renderer.Render(request.Result)
 	if err != nil {
+		requestLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Error("Slack delivery rendering failed")
 		return types.SlackDeliveryResult{}, err
 	}
 	existing, err := d.deliveryParts(ctx, request)
 	if err != nil {
+		requestLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Error("Slack delivery reconciliation failed")
 		return types.SlackDeliveryResult{}, fmt.Errorf("reconcile Slack delivery: %w", err)
 	}
+	requestLogger.WithCtx(blackbox.Ctx{"payload_count": len(payloads), "reconciled_part_count": len(existing)}).Info("Slack delivery reconciliation completed")
 	var firstTimestamp string
 	for _, timestamp := range existing {
 		if firstTimestamp == "" || timestamp < firstTimestamp {
@@ -199,17 +345,13 @@ func (d *LiveDelivery) Send(ctx context.Context, request types.SlackDeliveryRequ
 		if _, alreadyDelivered := existing[index+1]; alreadyDelivered {
 			continue
 		}
-		encoded, err := json.Marshal(payload.Blocks)
+		blocks, err := slackBlocksFromRendered(payload.Blocks)
 		if err != nil {
 			return types.SlackDeliveryResult{}, err
 		}
-		var blocks slackapi.Blocks
-		if err := json.Unmarshal(encoded, &blocks); err != nil {
-			return types.SlackDeliveryResult{}, fmt.Errorf("convert rendered Slack blocks: %w", err)
-		}
 		options := []slackapi.MsgOption{
 			slackapi.MsgOptionText(payload.Text, false),
-			slackapi.MsgOptionBlocks(blocks.BlockSet...),
+			slackapi.MsgOptionBlocks(blocks...),
 			slackapi.MsgOptionMetadata(slackapi.SlackMetadata{EventType: "tos_tag_delivery", EventPayload: map[string]any{"delivery_id": string(request.ID), "part": index + 1}}),
 		}
 		if request.Destination.ThreadTS != "" {
@@ -217,13 +359,84 @@ func (d *LiveDelivery) Send(ctx context.Context, request types.SlackDeliveryRequ
 		}
 		_, timestamp, err := d.api.PostMessageContext(ctx, request.Destination.ChannelID, options...)
 		if err != nil {
+			requestLogger.WithCtx(blackbox.Ctx{"part": index + 1, "error_type": fmt.Sprintf("%T", err)}).Error("Slack delivery part failed")
 			return types.SlackDeliveryResult{}, err
 		}
+		requestLogger.WithCtx(blackbox.Ctx{"part": index + 1, "message_ts": timestamp}).Info("Slack delivery part accepted")
 		if firstTimestamp == "" {
 			firstTimestamp = timestamp
 		}
 	}
-	return types.SlackDeliveryResult{MessageTS: firstTimestamp, DeliveredAt: time.Now().UTC(), Duplicate: len(existing) == len(payloads)}, nil
+	result := types.SlackDeliveryResult{MessageTS: firstTimestamp, DeliveredAt: time.Now().UTC(), Duplicate: len(existing) == len(payloads)}
+	requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "duplicate": result.Duplicate, "message_ts": result.MessageTS}).Info("Slack delivery completed")
+	return result, nil
+}
+
+func (d *LiveDelivery) React(ctx context.Context, request types.SlackReactionRequest) (types.SlackReactionResult, error) {
+	started := time.Now()
+	logger := d.logger
+	if logger == nil {
+		logger = blackbox.New()
+	}
+	requestLogger := logger.WithCtx(blackbox.Ctx{
+		"reaction_idempotency_key": request.IdempotencyKey,
+		"channel_id":               request.ChannelID,
+		"message_ts":               request.MessageTS,
+		"emoji":                    request.Emoji,
+	})
+	requestLogger.Info("Slack reaction requested")
+	if request.TeamID != d.teamID {
+		requestLogger.Warn("Slack reaction denied for mismatched workspace")
+		return types.SlackReactionResult{}, errors.New("Slack reaction team does not match the configured installation")
+	}
+	if request.ChannelID == "" || request.MessageTS == "" || !validReactionName(request.Emoji) {
+		return types.SlackReactionResult{}, errors.New("invalid Slack reaction request")
+	}
+	err := d.api.AddReactionContext(ctx, request.Emoji, slackapi.ItemRef{Channel: request.ChannelID, Timestamp: request.MessageTS})
+	duplicate := false
+	if err != nil {
+		var slackError slackapi.SlackErrorResponse
+		if errors.As(err, &slackError) && slackError.Err == "already_reacted" {
+			duplicate = true
+		} else {
+			requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err)}).Error("Slack reaction failed")
+			return types.SlackReactionResult{}, err
+		}
+	}
+	result := types.SlackReactionResult{AppliedAt: time.Now().UTC(), Duplicate: duplicate}
+	requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "duplicate": duplicate}).Info("Slack reaction completed")
+	return result, nil
+}
+
+func validReactionName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' && character != '-' && character != '+' {
+			return false
+		}
+	}
+	return true
+}
+
+// slackBlocksFromRendered preserves the renderer's validated JSON exactly.
+// Decoding through slackapi.Blocks and then encoding again can introduce zero
+// values such as an empty table-column alignment, which Slack rejects.
+func slackBlocksFromRendered(rendered []map[string]any) ([]slackapi.Block, error) {
+	blocks := make([]slackapi.Block, 0, len(rendered))
+	for index, value := range rendered {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("encode rendered Slack block %d: %w", index, err)
+		}
+		block, err := slackapi.BlockFromJSON(string(encoded))
+		if err != nil {
+			return nil, fmt.Errorf("convert rendered Slack block %d: %w", index, err)
+		}
+		blocks = append(blocks, block)
+	}
+	return blocks, nil
 }
 
 // deliveryParts finds previously accepted parts by immutable Slack metadata.

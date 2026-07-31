@@ -46,6 +46,7 @@ type Spec struct {
 	WorkspaceID            string
 	ChannelID              string
 	RootThreadTS           string
+	ReplyInChannel         bool
 	SessionID              types.SessionID
 	Generation             int64
 	ObservationID          types.ObservationID
@@ -65,6 +66,7 @@ type Job struct {
 	WorkspaceID            string              `json:"workspace_id"`
 	ChannelID              string              `json:"channel_id"`
 	RootThreadTS           string              `json:"root_thread_ts"`
+	ReplyInChannel         bool                `json:"reply_in_channel,omitempty"`
 	SessionID              types.SessionID     `json:"session_id"`
 	Generation             int64               `json:"generation"`
 	ObservationID          types.ObservationID `json:"observation_id,omitempty"`

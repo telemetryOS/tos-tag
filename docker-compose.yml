@@ -1,9 +1,9 @@
 services:
   mongo:
-    image: mongo:8.0
+    image: mongo:8.0.28@sha256:5351bff2b5d1563e3fa603a74b9be85ef9323e10aeb0b45cea933a93876e77fd
     restart: unless-stopped
     ports:
-      - "127.0.0.1:27017:27017"
+      - "127.0.0.1:27018:27017"
     volumes:
       - tos-tag-mongo:/data/db
     healthcheck:
@@ -12,5 +12,49 @@ services:
       timeout: 3s
       retries: 20
 
+  workspace:
+    profiles: ["workspace"]
+    image: tos-tag-dev:local
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    working_dir: /workspace
+    environment:
+      HOME: /home/tag
+      TAG_WORKSPACE_ROOT: /workspace
+      TAG_AION_DEVELOPER_PATH: /workspace/code
+    volumes:
+      - tos-tag-workspace:/workspace
+      - tos-tag-home:/home/tag
+    command: ["sleep", "infinity"]
+
+  tag:
+    profiles: ["stack"]
+    image: tos-tag-dev:local
+    restart: unless-stopped
+    working_dir: /workspace/projects/tos-tag
+    environment:
+      HOME: /home/tag
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - tos-tag-workspace:/workspace
+      - tos-tag-home:/home/tag
+      - type: bind
+        source: ./runtime.env
+        target: /run/secrets/tos-tag-runtime.env
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      mongo:
+        condition: service_healthy
+    command: ["run-tag-container"]
+
 volumes:
   tos-tag-mongo:
+    name: tos-tag-mongo
+  tos-tag-workspace:
+    name: tos-tag-workspace
+  tos-tag-home:
+    name: tos-tag-home

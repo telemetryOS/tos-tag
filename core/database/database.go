@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/RobertWHurst/blackbox"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.opentelemetry.io/contrib/instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.opentelemetry.io/contrib/instrumentation/go.mongodb.org/mongo-driver/v2/mongo/otelmongo"
 
 	"github.com/telemetryos/tos-tag/core/config"
 	"github.com/telemetryos/tos-tag/models"
@@ -40,7 +40,7 @@ func (d *Database) Connect(ctx context.Context) error {
 	if d.cfg.Telemetry.OtelEnabled {
 		opts.SetMonitor(otelmongo.NewMonitor(otelmongo.WithCommandAttributeDisabled(true)))
 	}
-	client, err := mongo.Connect(connectCtx, opts)
+	client, err := mongo.Connect(opts)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
@@ -102,12 +102,14 @@ func (d *Database) EnsureIndexes(ctx context.Context) error {
 }
 
 func RequiredIndexes() []IndexSpec {
-	unique := func(name string) *options.IndexOptions { return options.Index().SetName(name).SetUnique(true) }
-	named := func(name string) *options.IndexOptions { return options.Index().SetName(name) }
-	partialUnique := func(name string, filter bson.M) *options.IndexOptions {
+	unique := func(name string) *options.IndexOptionsBuilder { return options.Index().SetName(name).SetUnique(true) }
+	named := func(name string) *options.IndexOptionsBuilder { return options.Index().SetName(name) }
+	partialUnique := func(name string, filter bson.M) *options.IndexOptionsBuilder {
 		return options.Index().SetName(name).SetUnique(true).SetPartialFilterExpression(filter)
 	}
-	ttl := func(name string) *options.IndexOptions { return options.Index().SetName(name).SetExpireAfterSeconds(0) }
+	ttl := func(name string) *options.IndexOptionsBuilder {
+		return options.Index().SetName(name).SetExpireAfterSeconds(0)
+	}
 	return []IndexSpec{
 		{models.CollectionOrganizations, mongo.IndexModel{Keys: bson.D{{Key: "public_id", Value: 1}}, Options: unique("organization_public_unique")}},
 		{models.CollectionWorkspaces, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "team_id", Value: 1}}, Options: unique("workspace_team_unique")}},

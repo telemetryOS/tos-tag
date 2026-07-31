@@ -2,10 +2,13 @@
 
 An open-source, model-agnostic Slack agent control plane for teams.
 
-> **Status:** the pre-live system is code-complete and locally tested with
-> Slack stubbed. Observation, cross-channel context, decisions, jobs, disposable
-> OpenCode, marketplace tools, approvals, routines, reconciliation, management,
-> and an anonymous real-provider smoke all pass. Live Slack validation remains.
+> **Status:** the pre-live system is code-complete and locally tested, and the
+> dedicated development installation has now passed live Socket Mode ingestion,
+> message/edit/delete/thread handling, a mention-only threaded reply, native
+> Block Kit delivery, duplicate-delivery reconciliation, desktop table
+> accessibility, and a controlled observe-only shadow sample. Private/Slack
+> Connect audience semantics, natural Slack-requested refresh timing, mobile/web
+> accessibility, and longer organic shadow precision evaluation remain.
 > See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
 tos-tag is designed to follow every eligible communication in every Slack
@@ -42,9 +45,9 @@ intended to behave more like a persistent teammate:
   `#support`, including reconsidering a recent unanswered question when the
   alert arrives slightly later.
 - It supports revisioned per-channel notes and per-channel prompt directives.
-- It never copies Slack, repository, or connector credentials into OpenCode;
-  credentialed models use an explicitly configured external OpenCode/provider
-  boundary.
+- It never copies Slack, classifier, repository, or connector credentials into
+  OpenCode. The control plane holds the direct OpenAI classifier key; admitted
+  agent work uses the separately configured OpenCode/provider boundary.
 - It leaves durable receipts explaining its decisions and actions.
 
 ## Core interaction model
@@ -54,7 +57,7 @@ flowchart LR
     S["Slack message"] --> O["Durable channel observation"]
     O --> I["Organization intelligence timeline"]
     I --> C["Bounded 100k context pack"]
-    C --> D["Tool-free chat gate"]
+    C --> D["Direct OpenAI classifier"]
     D -->|"stay silent"| R["Decision receipt"]
     D -->|"react"| Q["Durable Slack delivery"]
     D -->|"reply or work"| J["Durable job"]
@@ -65,10 +68,13 @@ flowchart LR
 ```
 
 Every message is processed, but not every message starts a model session. The
-system uses deterministic rules first, then a tool-free chat-gating model over
-bounded local and cross-channel context. The gate selects an action and evidence
-IDs, not final prose. A full OpenCode job starts only after the decision is
-admitted by policy and budget.
+system uses deterministic rules first, then one stateless, tool-free OpenAI
+Responses API classification over bounded local and cross-channel context. The
+classifier selects silence/action, channel-versus-thread placement, an
+allowlisted Slack acknowledgement reaction, evidence IDs, and the model profile
+and reasoning effort for admitted work—not final prose. A full OpenCode job with
+the injected skills and agent harness starts only after policy and budget admit
+that decision.
 
 Silence is the default for social chatter, repetition, already-answered
 questions, and low-confidence interventions. Direct mentions and replies in an
@@ -104,7 +110,7 @@ authorized channels through a bounded search tool only when both the requester
 and the complete destination audience may receive that content. They do not
 share one mutable model session or receive a wholesale workspace transcript.
 
-All observed messages remain retrieval candidates. For each gating decision,
+All observed messages remain retrieval candidates. For each classification,
 tos-tag builds a fresh immutable pack from the target thread, target-channel
 history, an organization-wide recent timeline, related cross-channel evidence,
 active incident facts, and rolling summaries. The initial cap is 100k input
@@ -116,18 +122,28 @@ Each channel can be configured independently:
 
 | Mode | Behavior |
 | --- | --- |
-| `observe` | Process and index eligible events without proactive speech |
+| `observe` | Process and index eligible events without speech; when global shadow mode is enabled, also record assist-style predictions while enforcing silence |
 | `mention` | Respond only to direct triggers |
 | `assist` | Offer high-confidence, low-frequency ambient help |
 | `proactive` | Run channel-specific alerts, suggestions, and routines within budgets |
 
-The gate can choose `reply_in_thread` or `reply_in_channel`. Thread replies are
+The classifier can choose `reply_in_thread` or `reply_in_channel`. Thread replies are
 the quiet default for answering one message. A top-level channel response needs
 higher confidence and must be broadly useful, such as a confirmed incident.
 
-Live ambient behavior should be deployed in shadow mode first: tos-tag records
-what it would have done while only mentions receive responses. Operators can
-review its precision before enabling `assist` or `proactive` mode.
+Live ambient behavior should be deployed in shadow mode first. An `observe`
+channel with global shadow mode enabled records the assist-style prediction it
+would have made, but the effective decision remains `silent` and cannot create
+a job or delivery. Operators can review that precision before enabling
+`assist` or `proactive` mode; outside this evaluation path, `observe` remains an
+absolute no-speech policy.
+
+After shadow precision has been reviewed, `TAG__CLASSIFIER__MODE=live` enables the
+effective decisions of channels explicitly configured as `assist` or
+`proactive`. It does not expand channel enrollment or override organization,
+workspace, channel, membership, kill-switch, cooldown, budget, or concurrency
+policy. `observe` remains silent and `mention` still requires a direct mention
+or an active tos-tag thread.
 
 ## Dynamic model routing
 
@@ -138,9 +154,10 @@ Illustrative configuration:
 
 | Context | Profile | Intended behavior |
 | --- | --- | --- |
+| Deployment default | `chatgpt-luna-max` | OpenAI `gpt-5.6-luna` with `max` reasoning effort |
+| Ambient classifier | direct OpenAI | Configurable `gpt-5.6-luna` with `max` effort; no OpenCode session or tools |
 | `#alerts` | `alerts-fast` | Low-latency incident triage with moderate compute |
 | `#product` | `product-deep` | Higher-cost, deep product reasoning |
-| Organization chat gating | `chat-gating` | Tool-free structured classification over the bounded 100k context pack |
 | Security review skill | `security-deep` | Bounded high-reasoning override for one step |
 
 A stable agent principal remains the same even when the selected model changes.
@@ -239,7 +256,7 @@ Ambient observation never implicitly authorizes an external write.
 | Slack | `slack-go/slack`, Events API through Socket Mode, Web API for output |
 | State and queues | MongoDB with leases, idempotency keys, and compare-and-swap transitions |
 | Agent harness | Headless OpenCode HTTP/SSE server inside each worker |
-| Chat gating | Dedicated no-tools structured model over immutable context packs capped initially at 100k input tokens |
+| Classifier | Direct, stateless OpenAI Responses API call with strict structured output over immutable context packs capped initially at 100k input tokens |
 | Management UI | Go `html/template`, `go:embed`, Navaros/plain `net/http`, small JavaScript/SSE layer |
 | Workers | Clean disposable process groups for the single-user local experiment; Docker or stronger isolation required for untrusted/multi-tenant deployment |
 | Tool protocol | Typed project tools and reviewed MCP adapters behind a gateway |
@@ -267,7 +284,7 @@ server-rendered pages and redacted JSON APIs for:
   effective-prompt inspection;
 - per-channel source-linked notes and authorized conversational-search testing;
 - organization situation-board and context-pack inspection, including source
-  channels, token partitions, disclosure classes, and gating reply mode;
+  channels, token partitions, disclosure classes, and classifier reply mode;
 - separate skill and tool marketplaces, compatibility reports, immutable
   snapshots, dependency resolution, and worker previews;
 - routines and approvals;
@@ -310,7 +327,7 @@ slice:
   and deterministic behavioral evaluation commands.
 - `core/*` — Mongo-backed observations, sessions, jobs, deliveries, admission,
   routes, notes/directives, encrypted secret references, live/stub Slack,
-  cross-channel context/gating, OpenCode workers, policy/approval/tool/
+  cross-channel context/classification, OpenCode workers, policy/approval/tool/
   marketplace controls, search, audit, usage, retention, and management HTTP.
 
 The implemented package layout and intended hardened deployment shape are defined in
@@ -336,9 +353,9 @@ The implemented package layout and intended hardened deployment shape are define
 
 - Add the OpenCode harness, dynamic model routing, secret-minimized worker
   isolation, and an explicitly allowlisted read-only skill set.
-- Stub/eval gating is deterministic. OpenCode-enabled deployments use a
-  separately isolated, tool-free model gate over the bounded context pack and
-  route it through the same phase-aware model policy.
+- Stub/eval classification is deterministic. Live ambient classification uses
+  the direct OpenAI Responses API, never creates an OpenCode session, and may
+  select only an enabled agent model profile for admitted full-agent work.
 - The separate tool marketplace injects only explicit tool IDs and their
   read-only `SKILL.md` instructions. A job-scoped custom OpenCode tool reaches
   reviewed helpers through a lease-fenced loopback gateway.
@@ -365,6 +382,149 @@ The implemented package layout and intended hardened deployment shape are define
   capability, approval, secret, result, and receipt boundaries; no
   repository-specific GitHub helper is embedded in this repository.
 
+## Reproducible container workspace
+
+The recommended development layout runs MongoDB, the tos-tag Go control plane,
+and OpenCode in Compose-managed containers. GitHub, Aion, OpenCode, package
+caches, skill repositories, and every checkout survive container replacement in
+named volumes. The only host prerequisites are:
+
+- Docker CLI/Engine with the `docker compose` subcommand (tested with Docker
+  `29.7.0` and Compose `5.3.1`);
+- a Git client for the initial clone of this repository; and
+- a GitHub account that can read the private `telemetryOS` repositories.
+
+The development image pins the toolchain used to reproduce this environment:
+
+| Dependency | Pinned version | Purpose / source |
+| --- | ---: | --- |
+| Go | `1.26.5` | Build and run tos-tag and install Aion |
+| MongoDB | `8.0.28` | Durable tos-tag authority in a separate Compose service |
+| OpenCode | `1.18.10` | Headless agent loop, installed from `opencode-ai` |
+| Aion | `v2.0.5` (`2b186d2`) | Built from its authenticated, commit-verified source checkout during bootstrap |
+| GitHub CLI | `2.96.0` | GitHub authentication, cloning, PRs, and repository operations |
+| Node.js | `24.7.0` | OpenCode and Node-based repository tooling |
+| pnpm | `11.18.0` | Aion-managed frontend dependency installation |
+| Git, Bash, Make, `rg`, `jq` | image package versions | Repository and agent support tooling |
+
+Dependency sources of truth are intentionally checked in: application modules
+in `go.mod`/`go.sum`, container tools and base-image digests in
+`Dockerfile.dev`, MongoDB and persistent volumes in `docker-compose.yml`, and
+repository/Aion pins in `container/bootstrap-workspace.sh`. Update those files
+and this table together when changing the environment.
+
+The Make targets route Compose through `container/docker-compose.sh`. Normally
+that delegates directly to `docker compose`. If a Colima installation has
+inherited an unavailable Docker Desktop credential helper, it preserves the
+global Docker configuration and uses the checked-in empty registry config only
+for this stack's public base images.
+
+The bootstrap owns this persistent layout:
+
+```text
+/workspace/
+  AGENTS.md                         default umbrella agent guidance
+  projects/tos-tag/                 this control-plane repository
+  skills/telemetryos-agent-skills/  headless TelemetryOS plugin source
+  skills/tag-agent-skills/          tos-tag base plugin and helper source
+  tools/Aion/                       pinned authenticated Aion CLI source
+  code/                             Aion developer_path and managed repos
+  state/logs/                       retained redacted control-plane logs
+  state/workers/                    disposable OpenCode worker roots
+/home/tag/                           gh, Aion, OpenCode, Go, npm, and pnpm state
+```
+
+The source repositories are
+[telemetryOS/tos-tag](https://github.com/telemetryOS/tos-tag),
+[telemetryOS/telemetryos-agent-skills](https://github.com/telemetryOS/telemetryos-agent-skills),
+[telemetryOS/tag-agent-skills](https://github.com/telemetryOS/tag-agent-skills),
+and [telemetryOS/Aion](https://github.com/telemetryOS/Aion). `/workspace/code`
+is an umbrella directory containing all repositories managed by the TelemetryOS
+Aion profile; it is deliberately not another monorepo.
+
+The corresponding named volumes are `tos-tag-workspace`, `tos-tag-home`, and
+`tos-tag-mongo`. Do not use `docker compose down --volumes` unless intentionally
+deleting all checkouts, authentication state, and database data.
+
+### First installation
+
+Clone this repository, then build the pinned development image:
+
+```text
+git clone git@github.com:telemetryOS/tos-tag.git
+cd tos-tag
+make container-build
+```
+
+Authenticate GitHub once inside the persistent container home. The bootstrap
+rewrites Aion's SSH repository URLs to authenticated HTTPS, so no private SSH
+key is copied into the image or volume:
+
+```text
+docker compose run --rm workspace gh auth login --web
+make container-bootstrap
+```
+
+`make container-bootstrap` performs these idempotent operations:
+
+1. creates `/workspace/AGENTS.md` from the checked-in default without
+   overwriting an existing file;
+2. configures Aion's `developer_path` as `/workspace/code`;
+3. clones `telemetryOS/tos-tag`, `telemetryOS/telemetryos-agent-skills`, and
+   `telemetryOS/tag-agent-skills` into the paths above;
+4. checks out and builds `telemetryOS/Aion` at the pinned version; and
+5. runs `aion sync`, which clones every Aion-managed repository and installs
+   its declared Go/Node dependencies. Dirty repositories are preserved.
+
+The full Aion sync is intentionally explicit because it is network- and
+disk-intensive. To refresh the three control-plane repositories and the entire
+Aion workspace later, run:
+
+```text
+docker compose run --rm workspace bootstrap-workspace --sync --update
+```
+
+### Start the stack and OpenCode
+
+Copy `runtime.env.example` to the gitignored, owner-readable `runtime.env` and
+add only the credentials needed for the selected live features. The file is
+mounted read-only and sourced inside the Go-process container; Compose config
+and image metadata therefore contain its path, not expanded secret values. The
+launcher overrides host-only addresses and marketplace paths with their
+container equivalents.
+
+```text
+cp runtime.env.example runtime.env
+make container-up
+make container-opencode
+```
+
+`make container-up` starts MongoDB, a long-running operator workspace, and the
+tos-tag Go process. The API remains bound to `127.0.0.1:8090`. Run
+`opencode auth login` from the operator workspace when a provider needs login;
+that state survives in `tos-tag-home`.
+
+The operator OpenCode shell starts in `/workspace` and sees its default
+`AGENTS.md` plus all persistent checkouts. Slack-triggered OpenCode sessions are
+still separate, disposable, default-deny workers. The durable operator
+workspace is not silently mounted into those jobs, and worker state is never an
+authority for jobs, conversations, policy, or receipts.
+
+Useful maintenance commands:
+
+```text
+make container-shell
+docker compose exec workspace aion status all
+docker compose exec workspace aion sync
+docker compose logs -f tag mongo
+docker compose restart tag
+```
+
+The environment deliberately does not mount the host Docker socket. Aion can
+sync, inspect, and prepare repositories inside the container, while
+Docker-backed `aion start` components require a separately reviewed nested
+runtime rather than broad host-daemon access.
+
 ## Run locally without Slack
 
 The API requires MongoDB, but does not require Slack, OpenCode, a model
@@ -375,29 +535,117 @@ docker compose up -d mongo
 go run ./cmd/api
 ```
 
+The Compose profile publishes its project-owned MongoDB on
+`127.0.0.1:27018`; `runtime.env.example` points there so a separate local
+MongoDB can continue using the conventional `27017` port.
+
 Open `http://127.0.0.1:8090/admin/` to inspect the management sections and
 inject a normalized Slack fixture. The UI obtains a CSRF token before each
 mutation. On non-loopback listeners, bearer authentication and
 `TAG__AUTH__ADMIN_TOKEN` are mandatory. The operator client supports `status`,
 `jobs`, `deliveries`, `decisions`, and `inject FILE`.
 
-Optional pre-live features are explicit:
+## Run locally with Slack
 
+Live Slack testing is opt-in and starts with one dedicated development workspace
+and explicitly enrolled test channels. Create the app from
+`slack-app-manifest.yaml`, then collect:
+
+- Slack's *App-Level Token* (`xapp-...`) with `connections:write`;
+- Slack's *Bot User OAuth Token* (`xoxb-...`);
+- optionally, Slack's *User OAuth Token* (`xoxp-...`) for future explicitly
+  enabled user-authorized features (the current runtime does not use it);
+- the Slack App ID, plus the `team_id` and bot `user_id` returned by
+  `auth.test`; and
+- a stable internal tos-tag organization ID such as `org-tos-tag-dev`.
+
+The development manifest intentionally disables Slack token rotation because
+the current adapter accepts a long-lived `xoxb-...` token and does not yet store
+or refresh rotating credentials. Implement refresh-token lifecycle support
+before enabling rotation. Rotate the development App-Level, Bot User OAuth, and
+User OAuth tokens before any production deployment, then update the local
+gitignored `runtime.env` without copying token values into logs or Compose
+configuration output.
+
+The development installation deliberately requests a broad future-agent grant:
+native Agent view, channel and DM/MPIM context, files, reactions, pins,
+bookmarks, canvases, lists, user metadata, public real-time search, Slack
+Connect, and matching user-consented private search scopes. This avoids repeated
+web-based permission edits during exploration. The grant does not authorize
+tos-tag behavior: runtime organization/channel enrollment, requester and
+destination scope, explicit tool policy, approvals, and kill switches remain
+authoritative. Production installations should narrow scopes to measured use.
+
+Slack app lifecycle can be driven from the terminal with the official Slack
+CLI after the one-time `slack login` authorization. The CLI is optional; the
+checked-in manifest remains the source of truth.
+
+Copy `runtime.env.example` to the gitignored `runtime.env`, set
+`TAG__SLACK__MODE=socket_mode`, set `TAG__SLACK__LIVE_ENABLED=true`, and fill
+the Slack identity fields plus `TAG__SLACK__APP_LEVEL_TOKEN` and
+`TAG__SLACK__BOT_USER_OAUTH_TOKEN`. `TAG__SLACK__USER_OAUTH_TOKEN` is optional
+and currently unused. Set `TAG__CLASSIFIER__OPENAI_API_KEY`, keep
+`TAG__CLASSIFIER__MODE=shadow`, and keep `TAG__OPENCODE__ENABLED=false` for the
+first classifier/transport test. Never commit,
+print, or paste the tokens into an issue, prompt, log, or artifact.
+
+For live debugging, set `TAG__LOGGING__LEVEL=debug` and
+`TAG__LOGGING__USE_JSON=true`. Slack transport, normalization,
+acknowledgement, persistence, classification, reactions, jobs, deliveries, and management actions
+emit correlated metadata and timing without logging tokens, raw envelopes, or
+message text. Set `TAG__LOGGING__FILE_PATH` to retain the same structured JSONL
+stream in private local storage, such as a dated file under `../.testruns/`.
+
+Start MongoDB and the credentialed local process:
+
+```text
+docker compose up -d mongo
+make run-live
+```
+
+In `http://127.0.0.1:8090/admin/`, create the organization with enrollment mode
+`allowlist`, enable the workspace by its Slack `team_id`, and enroll one channel
+with fresh `membership_refreshed_at`, positive `max_responses_per_hour`, and
+positive `max_concurrent_jobs`. Begin in `observe`; after confirming message,
+edit, and delete ingestion, change only the test channel to `mention` and send a
+direct mention. Do not enable ambient speech until the shadow evaluation and
+operator approval gates pass.
+
+Optional features are explicit:
+
+- `TAG__CLASSIFIER__PROVIDER=openai` sends the immutable 100k-bounded context
+  directly to the configurable Responses API endpoint using
+  `TAG__CLASSIFIER__MODEL=gpt-5.6-luna` and
+  `TAG__CLASSIFIER__REASONING_EFFORT=max`; the response is strict structured
+  output and cannot call tools;
 - set `TAG__OPENCODE__ENABLED=true` and keep
   `TAG__OPENCODE__MODE=local_worker` to provision one clean, disposable
   `opencode serve` process per harness session;
-- configure `TAG__MARKETPLACES__SKILL_ROOT` for a Claude-compatible behavioral
-  plugin marketplace and `TAG__MARKETPLACES__TOOL_ROOT` for the separate tool
-  catalog;
+- the local live template automatically selects all behavioral skills from
+  `telemetryos-automation` in sibling `telemetryos-agent-skills` and `base` in
+  sibling `tag-agent-skills`; each source is configured by root, Claude
+  marketplace manifest, and exact plugin name, and a missing source fails
+  startup;
+- configure `TAG__MARKETPLACES__SKILL_ROOT` only for an additional legacy
+  Claude-compatible behavioral marketplace and
+  `TAG__MARKETPLACES__TOOL_ROOT` for the separate reviewed tool catalog;
 - set `TAG__MARKETPLACES__INJECTED_SKILLS` to the explicit behavioral skill
-  allowlist; configuring a marketplace alone does not inject its entire catalog;
+  allowlist from that additional marketplace; the selected headless and base
+  plugins are injected in full automatically;
 - set `TAG__MARKETPLACES__INJECTED_TOOLS` and
   `TAG__MARKETPLACES__TOOLS_ENABLED=true` to inject only that reviewed tool
   subset; write/admin/destructive operations create independent single-use
   approvals in the management UI;
 - enable the write-only keystore only with a base64-encoded 32-byte master key
   supplied through `TAG__KEYSTORE__MASTER_KEY`; and
-- keep `TAG__SLACK__MODE=stub` until the live Slack initiative begins.
+- keep `TAG__SLACK__MODE=stub` for normal local tests and any run that does not
+  explicitly exercise the live Slack transport.
+
+Plugin manifests, hooks, agents, and Bash helpers are not executable OpenCode
+configuration. tos-tag reads only validated behavioral skill files and mounts
+them read-only. Helper scripts stay in their owning skill repository until a
+separate reviewed tool manifest makes an exact operation available through the
+job-scoped capability gateway.
 
 The verification chain is:
 
@@ -430,9 +678,9 @@ external systems. Security boundaries are architectural requirements:
 - Cross-channel search intersects agent, requester, complete destination
   audience, organization, active bot authority, and job scope before querying;
   private-channel names and result counts do not leak.
-- Gating may receive a content-free restricted incident signal for broader
-  awareness, but the final response model receives only evidence releasable to
-  the destination audience.
+- A private channel's messages are usable only when that same channel is the
+  destination. Every other private channel is excluded before context/search
+  queries, including content-free derived awareness.
 - Channel directives are versioned instructions; channel notes remain reference
   data, require human activation when agent-authored, and cannot grant authority.
 - Gateway capabilities are fenced by the live attempt lease and steering epoch;

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -56,6 +57,12 @@ func NewLocalWithDependencies(baseDir, path string, revoker CapabilityRevoker, r
 	manager, err := NewLocal(baseDir, path)
 	if err != nil {
 		return nil, err
+	}
+	if revoker != nil {
+		value := reflect.ValueOf(revoker)
+		if value.Kind() == reflect.Pointer && value.IsNil() {
+			revoker = nil
+		}
 	}
 	manager.revoker = revoker
 	manager.usage = recorder
@@ -277,9 +284,13 @@ func (m *Local) owns(workspace Workspace) error {
 }
 
 func materializeSkills(snapshots []marketplace.SkillSnapshot, target string) error {
+	sharedDigests := make(map[string]string)
 	for _, snapshot := range snapshots {
 		if snapshot.Name == "" || snapshot.Root == "" {
 			return ErrUnsafeSpec
+		}
+		if err := materializeSharedReferences(snapshot, target, sharedDigests); err != nil {
+			return err
 		}
 		destination := filepath.Join(target, snapshot.Name)
 		rel, relErr := filepath.Rel(target, destination)
@@ -351,29 +362,107 @@ func materializeSkills(snapshots []marketplace.SkillSnapshot, target string) err
 		if snapshot.Hash != "sha256:"+hex.EncodeToString(hash.Sum(nil)) {
 			return fmt.Errorf("%w: skill snapshot hash changed", ErrUnsafeSpec)
 		}
-		permissionRoot, err := os.OpenRoot(destination)
+	}
+	return makeTreeReadOnly(target)
+}
+
+func materializeSharedReferences(snapshot marketplace.SkillSnapshot, target string, materialized map[string]string) error {
+	hasRoot := snapshot.SharedRoot != ""
+	hasFiles := len(snapshot.SharedFiles) > 0
+	hasHash := snapshot.SharedHash != ""
+	if !hasRoot && !hasFiles && !hasHash {
+		return nil
+	}
+	if !hasRoot || !hasFiles || !hasHash {
+		return ErrUnsafeSpec
+	}
+	sourceRoot, err := os.OpenRoot(snapshot.SharedRoot)
+	if err != nil {
+		return err
+	}
+	defer sourceRoot.Close()
+	destinationRoot, err := os.OpenRoot(target)
+	if err != nil {
+		return err
+	}
+	defer destinationRoot.Close()
+
+	hash := sha256.New()
+	seen := make(map[string]struct{}, len(snapshot.SharedFiles))
+	for _, relative := range snapshot.SharedFiles {
+		cleanRelative := filepath.Clean(relative)
+		if relative == "" || filepath.IsAbs(relative) || cleanRelative != relative || !strings.HasPrefix(filepath.ToSlash(cleanRelative), ".references/") {
+			return ErrUnsafeSpec
+		}
+		if _, ok := seen[cleanRelative]; ok {
+			return ErrUnsafeSpec
+		}
+		seen[cleanRelative] = struct{}{}
+		input, err := sourceRoot.Open(cleanRelative)
 		if err != nil {
 			return err
 		}
-		if err := filepath.WalkDir(destination, func(path string, entry os.DirEntry, err error) error {
-			if err != nil {
-				return err
+		data, readErr := io.ReadAll(io.LimitReader(input, (4<<20)+1))
+		closeErr := input.Close()
+		if readErr != nil || closeErr != nil || len(data) > 4<<20 {
+			return ErrUnsafeSpec
+		}
+		canonical := filepath.ToSlash(cleanRelative)
+		_, _ = hash.Write([]byte(canonical))
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write(data)
+		_, _ = hash.Write([]byte{0})
+
+		fileHash := sha256.Sum256(data)
+		digest := hex.EncodeToString(fileHash[:])
+		if previous, ok := materialized[canonical]; ok {
+			if previous != digest {
+				return fmt.Errorf("%w: shared reference collision at %s", ErrUnsafeSpec, canonical)
 			}
-			relative, err := filepath.Rel(destination, path)
-			if err != nil {
-				return err
-			}
-			if entry.IsDir() {
-				return permissionRoot.Chmod(relative, 0o500)
-			}
-			return permissionRoot.Chmod(relative, 0o400)
-		}); err != nil {
-			_ = permissionRoot.Close()
+			continue
+		}
+		if err := destinationRoot.MkdirAll(filepath.Dir(cleanRelative), 0o700); err != nil {
 			return err
 		}
-		_ = permissionRoot.Close()
+		output, err := destinationRoot.OpenFile(cleanRelative, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o400)
+		if err != nil {
+			return err
+		}
+		_, writeErr := output.Write(data)
+		closeErr = output.Close()
+		if writeErr != nil {
+			return writeErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		materialized[canonical] = digest
+	}
+	if snapshot.SharedHash != "sha256:"+hex.EncodeToString(hash.Sum(nil)) {
+		return fmt.Errorf("%w: shared reference snapshot hash changed", ErrUnsafeSpec)
 	}
 	return nil
+}
+
+func makeTreeReadOnly(target string) error {
+	permissionRoot, err := os.OpenRoot(target)
+	if err != nil {
+		return err
+	}
+	defer permissionRoot.Close()
+	return filepath.WalkDir(target, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(target, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return permissionRoot.Chmod(relative, 0o500)
+		}
+		return permissionRoot.Chmod(relative, 0o400)
+	})
 }
 
 func isForbiddenEnvironment(name string) bool {

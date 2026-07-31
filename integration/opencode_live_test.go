@@ -11,14 +11,11 @@ import (
 
 	"github.com/telemetryos/tos-tag/core/approvals"
 	"github.com/telemetryos/tos-tag/core/audit"
-	"github.com/telemetryos/tos-tag/core/chatgating"
 	"github.com/telemetryos/tos-tag/core/harness"
 	"github.com/telemetryos/tos-tag/core/jobs"
 	"github.com/telemetryos/tos-tag/core/keystore"
-	"github.com/telemetryos/tos-tag/core/modelrouter"
 	toolruntime "github.com/telemetryos/tos-tag/core/tools"
 	"github.com/telemetryos/tos-tag/core/workers"
-	"github.com/telemetryos/tos-tag/types"
 )
 
 // This opt-in test exercises the same disposable headless OpenCode server used
@@ -91,48 +88,6 @@ func TestHeadlessOpenCodeProviderRoute(t *testing.T) {
 	}
 	if !routeSeen {
 		t.Fatal("OpenCode did not report the requested provider/model route")
-	}
-}
-
-func TestHeadlessOpenCodeGatingClassifier(t *testing.T) {
-	if os.Getenv("TOS_TAG_INTEGRATION_OPENCODE") != "1" {
-		t.Skip("set TOS_TAG_INTEGRATION_OPENCODE=1")
-	}
-	executable, err := exec.LookPath("opencode")
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager, err := workers.NewLocal(t.TempDir(), filepath.Dir(executable)+":/usr/local/bin:/usr/bin:/bin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapter, err := harness.NewWorkerOpenCode(harness.WorkerOpenCodeOptions{Manager: manager, Command: executable, Timeout: 2 * time.Minute})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer adapter.Close(context.Background())
-	model := os.Getenv("TOS_TAG_INTEGRATION_OPENCODE_MODEL")
-	if model == "" {
-		model = "opencode/north-mini-code-free"
-	}
-	provider, modelID, _ := strings.Cut(model, "/")
-	router, err := modelrouter.NewRegistry([]types.ModelProfile{{ID: "gate", ProviderID: provider, ModelID: modelID, RequiredCapabilities: []string{"structured"}, AllowedDataClasses: []string{"internal"}, MaxInputTokens: 200000, MaxOutputTokens: 4096, Enabled: true}}, nil, nil, "gate", "test/v1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	classifier, err := chatgating.NewHarnessClassifier(adapter, router)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	pack := types.ContextPackRevision{OrganizationID: "org", TotalTokens: 1000, Sources: []types.ContextSource{{ID: "alerts/100.1", ChannelID: "alerts", Partition: types.PartitionEvidence, Text: "Active production outage", DisclosureClass: types.DisclosureDestinationSafe}}}
-	decision, err := classifier.Decide(ctx, chatgating.Target{ObservationID: "observation", Envelope: types.SlackEnvelope{OrganizationID: "org", TeamID: "team", ChannelID: "support", Text: "Is the system down?"}, Mode: types.ModeAssist}, pack)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if decision.Outcome == types.OutcomeSilent || len(decision.ReleasableEvidenceIDs) == 0 || decision.ReleasableEvidenceIDs[0] != "alerts/100.1" {
-		t.Fatalf("unexpected gating decision %#v", decision)
 	}
 }
 

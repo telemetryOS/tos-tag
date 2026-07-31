@@ -427,12 +427,16 @@ Slack WebSocket
 
 Socket Mode requires two separate Slack credentials with different purposes:
 
-- An app-level token (`xapp-...`, with `connections:write`) opens and refreshes
+- Slack's App-Level Token (`xapp-...`, with `connections:write`) opens and refreshes
   the WebSocket connection.
-- A bot token (`xoxb-...`) reads allowed Slack context and calls Slack's Web API
+- Slack's Bot User OAuth Token (`xoxb-...`) reads allowed Slack context and calls Slack's Web API
   to post, edit, react, upload, or otherwise respond.
 
-The app-level and bot tokens belong only in the tos-tag Slack adapter/control
+Slack may also issue a User OAuth Token (`xoxp-...`) for user-consented scopes.
+The current runtime names and stores that credential distinctly but does not use
+it until a user-authorized feature is explicitly enabled.
+
+The app-level and OAuth tokens belong only in the tos-tag Slack adapter/control
 plane. They must never be copied into an OpenCode worker, model prompt, MCP
 server environment, repository, log, or generated artifact.
 
@@ -466,6 +470,16 @@ Operational rules:
   latency, retry/deduplication count, and queue latency without logging tokens or
   sensitive Slack payloads.
 
+The selected `slack-go` client consumes Slack `disconnect` frames internally
+and automatically reconnects, so application code cannot reliably treat those
+frames as public events. The adapter instead records the client's connected
+event generation (`connection_count`) and whether it represents a reconnect.
+Deterministic transport tests cover the critical retry contract: a persistence
+failure is not acknowledged, a retried duplicate is durably recognized and
+acknowledged, and reconnect generation metadata remains observable. A natural
+Slack-requested refresh still requires a long-running live observation because
+Slack normally rotates Socket Mode connections only every few hours.
+
 Socket Mode is currently unavailable to apps distributed through the public
 Slack Marketplace. That is acceptable for an internal TelemetryOS experiment.
 Keep the Slack adapter behind an internal event interface so a future public
@@ -498,7 +512,7 @@ more expensive stages:
    resolve tenant/channel membership, and append the observation to the channel
    and organization intelligence timelines.
 2. Run deterministic trigger/suppression rules and, for every remaining human
-   message, a tool-free structured chat gate over an immutable organization
+   message, a tool-free structured classifier over an immutable organization
    context pack capped initially at 100k input tokens.
 3. Only when the decision is to act, create a durable job and invoke the full
    routed OpenCode profile.
@@ -511,7 +525,7 @@ model session**:
 ```text
 organization/workspace
   -> organization intelligence timeline         every eligible channel message
-     -> situation facts and 100k gating packs   bounded cross-channel awareness
+     -> situation facts and 100k classifier packs   bounded cross-channel awareness
   -> channel scope                         policy, members, memory, observer cursor
      -> channel observation stream         every normalized message/edit/delete
      -> thread session                     one root thread or task conversation
@@ -535,14 +549,14 @@ channel observer maintains ordered ingestion and a durable cursor. Slack event
 IDs provide deduplication; stored receive sequence plus Slack timestamps provide
 deterministic replay without assuming WebSocket delivery order.
 
-The raw workspace stream is not copied wholesale into each prompt. A gating
+The raw workspace stream is not copied wholesale into each prompt. A classifier
 context materializer should assemble an immutable 100k-capped pack from the
 active thread, target-channel history, a fair-sampled recent organization
 timeline, related source-linked cross-channel evidence, active situation facts,
 rolling summaries, and target-channel instructions/policy. All messages remain
 retrieval candidates. Raw private context enters a response only when the
 complete destination audience may receive it; otherwise a content-free
-restricted signal may inform the gate but never the final prose generator.
+restricted signal may inform the classifier but never the final prose generator.
 
 #### Response-decision pipeline
 
@@ -565,7 +579,7 @@ Resolution order:
 3. **Deterministic relevance rules:** channel-specific keywords, message types,
    user or group mentions, severity patterns, reactions, active commitments,
    cooldowns, and response budgets may decide without a model.
-4. **Structured chat gate:** every remaining human message uses a dedicated
+4. **Structured classifier:** every remaining human message uses a dedicated
    profile that returns only outcome, confidence, reason/evidence IDs, response
    intent, disclosure class, reply mode, and whether a higher-cost job is
    justified. It has no tools, secrets, long-running session, final prose, or
@@ -584,17 +598,23 @@ Each channel has an explicit participation mode:
 
 | Mode | Observation | Proactive speech |
 | --- | --- | --- |
-| `observe` | Process and index all eligible messages | Never; direct mentions may still be denied or handled by separate policy |
+| `observe` | Process and index all eligible messages; optionally record assist-style predictions under global shadow mode | Never; the effective decision remains silent and cannot enqueue work |
 | `mention` | Process all messages for context | Only direct triggers |
 | `assist` | Process all messages | High-confidence, low-frequency intervention |
 | `proactive` | Process all messages | Channel-tuned alerts, suggestions, and routines within budgets |
 
 Store a compact decision receipt for every message: event and policy revision,
-context-pack revision/watermark, decision code, gate profile, confidence,
+context-pack revision/watermark, decision code, classifier model, confidence,
 releasable evidence/restricted signals, reply mode, and any resulting job.
 Do not store hidden chain-of-thought. Sample or aggregate verbose classifier
 diagnostics, but retain enough structured evidence to explain why the bot spoke
 or stayed silent.
+
+Observe-mode shadow evaluation is deliberately asymmetric: hard suppressions
+run first, the candidate is classified with assist semantics, and only the
+prediction is retained. The enforced decision remains
+`admission.channel_mode`, so measuring precision does not authorize speech,
+model work, tools, jobs, or deliveries.
 
 #### Authority and safety
 
@@ -775,7 +795,7 @@ Example policy, subject to the provider catalog available at deployment time:
 | --- | --- | --- | --- |
 | Slack channel `#alerts` | `alerts-fast` | Claude Sonnet with an approved moderate compute profile | Low-latency incident triage |
 | Slack channel `#product` | `product-deep` | GPT 5.6 with `xhigh`, when supported | Deliberate product analysis |
-| Phase `chat-gating` | `chat-gating` | A structured-output, no-tools model authorized for the 100k organization pack | Decide whether speaking is justified and select releasable evidence/reply mode |
+| Phase `classifier` | `classifier` | A structured-output, no-tools model authorized for the 100k organization pack | Decide whether speaking is justified and select releasable evidence/reply mode |
 | Skill `security-review` | `security-deep` | An approved high-reasoning coding model | Override the channel for this bounded step |
 | Tool-adjacent phase `telemetry-result-summary` | `telemetry-fast` | A fast model with the required context window | Interpret a large read-only result cheaply |
 
@@ -1154,7 +1174,7 @@ Cross-channel authorization is computed before the database query. The
 searchable set is the intersection of the agent principal's scope, the explicit
 requester or routine owner's Slack visibility, the complete destination
 audience's visibility, organization quote-out/sharing policy, active bot search
-authority, and any narrower job/channel restriction. Ambient gating with no
+authority, and any narrower job/channel restriction. Ambient classification with no
 explicit requester may use content safe for the complete destination audience
 plus separately labeled content-free restricted signals; the response job sees
 releasable evidence only. Stale membership fails closed. Unauthorized channel
@@ -1187,7 +1207,7 @@ explicit restart/new generation.
 
 - `organizations`, `slack_installations`, `workspaces`, `channels`, `members`
 - `channel_observations`, `channel_observer_cursors`, `channel_receive_counters`
-- `organization_receive_counters`, `chat_gating_decisions`, `gating_reconsiderations`
+- `organization_receive_counters`, `classifier_decisions`, `classifier_reconsiderations`
 - `users`, `web_sessions`, `roles`
 - `agent_principals`, `agent_principal_bindings`, `instruction_profiles`
 - `scopes`, `access_bundles`, `scope_bundle_bindings`
@@ -1498,7 +1518,7 @@ payloads or OpenCode/Slack boundary types.
   separate lifecycle component, not an HTTP route.
 - Server-rendered `html/template` management views and `go:embed` assets,
   parsed and validated once in `core.New` so broken templates fail startup.
-- MongoDB driver v1 plus `otelmongo`, with required indexes ensured during
+- MongoDB driver v2 plus its v2 `otelmongo` adapter, with required indexes ensured during
   startup.
 - A root router, resource route packages, one handler per operation, and one
   `routes/shared.Deps` bundle. Translate domain sentinel errors to stable HTTP
@@ -1789,7 +1809,7 @@ The server API exposes the primitives tos-tag needs:
 
 ### Local verification
 
-The machine already has OpenCode installed:
+The initial 2026-07-30 Linux verification used:
 
 - Executable: `/home/gersham/.local/bin/opencode`
 - Version tested: `1.18.4`
@@ -1983,10 +2003,18 @@ worker receives no provider credential by default. This confirms that headless
 OpenCode is a viable harness while keeping MongoDB, routing, authorization,
 memory, and credential ownership in tos-tag.
 
+The 2026-07-31 dependency refresh upgraded the macOS user-local binary from
+`1.2.10` to `1.18.10`. A clean temporary XDG-state smoke reached
+`GET /global/health` with `{"healthy":true,"version":"1.18.10"}`, created a
+session, opened the session-filtered SSE endpoint with HTTP 200, and accepted
+abort. The pre-existing host OpenCode state did not start after the updater's
+database migration (`no such column: name`); it remains preserved for separate
+repair and is not used by tos-tag's disposable clean-XDG workers.
+
 Subsequent implementation validation removed `--pure` because that mode also
 suppressed the project-local custom tool. The final disposable worker instead
 uses a clean home/XDG tree and a generated default-deny permission policy; real
-anonymous provider routing, model-based gating, and a model-initiated call
+anonymous provider routing, model-based classification, and a model-initiated call
 through `tos_tag_tool` all passed. The local worker remains process/environment
 isolated rather than a network namespace.
 

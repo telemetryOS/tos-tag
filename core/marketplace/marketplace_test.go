@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -57,6 +58,73 @@ func TestPluginMarketplaceLoadsBehaviorWithoutInjectingScripts(t *testing.T) {
 	}
 	if len(snapshots) != 1 || len(snapshots[0].Files) != 1 || snapshots[0].Files[0] != "SKILL.md" {
 		t.Fatalf("snapshots=%#v", snapshots)
+	}
+}
+
+func TestLoadPluginSelectsOnePluginAndAllowsAnEmptyBase(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "plugins", "headless", "skills", "queue"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "plugins", "base", "skills"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "plugins", "headless", "skills", "queue", "SKILL.md"), []byte("# Queue"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog := `{"name":"agents","plugins":[{"name":"headless","source":"./plugins/headless","version":"1.0.0"},{"name":"base","source":"./plugins/base","version":"0.1.0"}]}`
+	if err := os.WriteFile(filepath.Join(root, "marketplace.json"), []byte(catalog), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	headless, err := LoadPlugin(root, "marketplace.json", "headless")
+	if err != nil || len(headless) != 1 || headless[0].Name != "queue" || headless[0].MarketplaceID != "agents/headless" {
+		t.Fatalf("headless=%#v err=%v", headless, err)
+	}
+	base, err := LoadPlugin(root, "marketplace.json", "base")
+	if err != nil || len(base) != 0 {
+		t.Fatalf("base=%#v err=%v", base, err)
+	}
+	if _, err := LoadPlugin(root, "marketplace.json", "missing"); err == nil {
+		t.Fatal("missing selected plugin was accepted")
+	}
+}
+
+func TestLoadPluginSnapshotsSharedReferencesButExcludesSharedScripts(t *testing.T) {
+	root := t.TempDir()
+	skillsRoot := filepath.Join(root, "plugins", "headless", "skills")
+	for _, directory := range []string{
+		filepath.Join(skillsRoot, "queue"),
+		filepath.Join(skillsRoot, ".references"),
+		filepath.Join(skillsRoot, ".scripts"),
+	} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(skillsRoot, "queue", "SKILL.md"), []byte("Read ../.references/common.md"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillsRoot, ".references", "common.md"), []byte("# Common\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillsRoot, ".scripts", "unsafe.sh"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "marketplace.json"), []byte(`{"name":"agents","plugins":[{"name":"headless","source":"./plugins/headless","version":"1.0.0"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err := LoadPlugin(root, "marketplace.json", "headless")
+	if err != nil || len(snapshots) != 1 {
+		t.Fatalf("snapshots=%#v err=%v", snapshots, err)
+	}
+	snapshot := snapshots[0]
+	if snapshot.SharedRoot != skillsRoot || len(snapshot.SharedFiles) != 1 || snapshot.SharedFiles[0] != ".references/common.md" || snapshot.SharedHash == "" {
+		t.Fatalf("shared snapshot=%#v", snapshot)
+	}
+	for _, path := range append(append([]string(nil), snapshot.Files...), snapshot.SharedFiles...) {
+		if strings.Contains(path, ".scripts") || strings.HasSuffix(path, ".sh") {
+			t.Fatalf("script entered behavioral snapshot: %s", path)
+		}
 	}
 }
 

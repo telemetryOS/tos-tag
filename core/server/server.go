@@ -22,7 +22,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/approvals"
 	"github.com/telemetryos/tos-tag/core/audit"
 	"github.com/telemetryos/tos-tag/core/channelconfig"
-	"github.com/telemetryos/tos-tag/core/chatgating"
+	"github.com/telemetryos/tos-tag/core/classifier"
 	"github.com/telemetryos/tos-tag/core/config"
 	"github.com/telemetryos/tos-tag/core/deliveries"
 	"github.com/telemetryos/tos-tag/core/intelligence"
@@ -61,7 +61,7 @@ type Dependencies struct {
 	Transport        StubDelivery
 	Jobs             jobs.Queue
 	Deliveries       deliveries.Queue
-	Decisions        chatgating.DecisionStore
+	Decisions        classifier.DecisionStore
 	Version          string
 	Routes           *modelrouter.Registry
 	Organizations    orgconfig.Store
@@ -670,6 +670,13 @@ func (s *Server) auditMutation(w http.ResponseWriter, r *http.Request, organizat
 		}
 		writeError(w, http.StatusServiceUnavailable, "audit_unavailable")
 		return false
+	}
+	if s.deps.Logger != nil {
+		s.deps.Logger.WithCtx(blackbox.Ctx{
+			"organization_id": organizationID, "resource_id": resourceID,
+			"action_type": receiptType, "actor_id": actorID,
+			"http_method": r.Method, "http_path": r.URL.Path,
+		}).Info("management action authorized and audited")
 	}
 	return true
 }

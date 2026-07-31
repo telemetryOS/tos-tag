@@ -5,7 +5,12 @@ package deliveries
 const SlackOutputContractVersion = "slack-output/v1"
 
 const SlackOutputPrompt = `You are writing a message that will be delivered to Slack.
-Return ordered typed segments: mrkdwn_text, table, or artifact.
+Return only one JSON object with this exact top-level shape:
+{"segments":[{"kind":"mrkdwn_text","text":"message"}]}
+
+Every segment must use the field "kind" with one of: mrkdwn_text, table, or
+artifact. Do not use "type" for the segment kind and do not wrap the JSON in a
+Markdown code fence.
 
 For mrkdwn_text:
 - Use Slack links: <https://example.com|descriptive label>.

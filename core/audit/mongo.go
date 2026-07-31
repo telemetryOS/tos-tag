@@ -7,9 +7,9 @@ import (
 	"sort"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/telemetryos/tos-tag/core/database"
 	"github.com/telemetryos/tos-tag/models"
@@ -87,7 +87,7 @@ func (c *MongoChain) Append(ctx context.Context, request AppendRequest) (Receipt
 		}
 		filter := bson.M{"organization_id": request.OrganizationID, "sequence": head.Sequence, "version": head.Version}
 		update := bson.M{"$set": bson.M{"hash": receipt.Hash, "updated_at": c.now().UTC()}, "$inc": bson.M{"sequence": 1, "version": 1}, "$setOnInsert": bson.M{"organization_id": request.OrganizationID}}
-		result, err := c.db.Collection(models.CollectionAuditHeads).UpdateOne(ctx, filter, update, options.Update().SetUpsert(head.Version == 0))
+		result, err := c.db.Collection(models.CollectionAuditHeads).UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(head.Version == 0))
 		if err == nil && result.MatchedCount+result.UpsertedCount == 1 {
 			return receipt, nil
 		}
@@ -126,7 +126,7 @@ func (c *MongoChain) recoverNext(ctx context.Context, head mongoHead) (bool, err
 	if err != nil || receipt.PreviousHash != head.Hash || expected != receipt.Hash {
 		return false, fmt.Errorf("invalid orphan audit receipt at sequence %d", receipt.Sequence)
 	}
-	result, err := c.db.Collection(models.CollectionAuditHeads).UpdateOne(ctx, bson.M{"organization_id": head.OrganizationID, "sequence": head.Sequence, "version": head.Version}, bson.M{"$set": bson.M{"hash": receipt.Hash, "updated_at": c.now().UTC()}, "$inc": bson.M{"sequence": 1, "version": 1}, "$setOnInsert": bson.M{"organization_id": head.OrganizationID}}, options.Update().SetUpsert(head.Version == 0))
+	result, err := c.db.Collection(models.CollectionAuditHeads).UpdateOne(ctx, bson.M{"organization_id": head.OrganizationID, "sequence": head.Sequence, "version": head.Version}, bson.M{"$set": bson.M{"hash": receipt.Hash, "updated_at": c.now().UTC()}, "$inc": bson.M{"sequence": 1, "version": 1}, "$setOnInsert": bson.M{"organization_id": head.OrganizationID}}, options.UpdateOne().SetUpsert(head.Version == 0))
 	if mongo.IsDuplicateKeyError(err) {
 		return false, nil
 	}

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/telemetryos/tos-tag/core/chatgating"
+	"github.com/telemetryos/tos-tag/core/classifier"
 	"github.com/telemetryos/tos-tag/core/config"
 	"github.com/telemetryos/tos-tag/core/contextpacks"
 	"github.com/telemetryos/tos-tag/core/observer"
@@ -15,10 +15,10 @@ import (
 
 type Fixture struct {
 	Name                    string
-	Target                  chatgating.Target
+	Target                  classifier.Target
 	Pack                    types.ContextPackRevision
-	WantPredicted           types.GatingOutcome
-	WantEffective           types.GatingOutcome
+	WantPredicted           types.ClassificationOutcome
+	WantEffective           types.ClassificationOutcome
 	WantReleasableEvidence  bool
 	WantRestrictedSafeBlock bool
 }
@@ -48,7 +48,7 @@ type Score struct {
 
 func Run() (Score, error) {
 	cfg := config.DefaultConfiguration
-	gate, err := chatgating.New(chatgating.DeterministicClassifier{}, true, cfg.Gating.AssistThreshold, cfg.Gating.ChannelReplyThreshold)
+	gate, err := classifier.New(classifier.DeterministicClassifier{}, true, cfg.Classifier.AssistThreshold, cfg.Classifier.ChannelReplyThreshold)
 	if err != nil {
 		return Score{}, err
 	}
@@ -137,8 +137,8 @@ func dedupeCheck() bool {
 }
 
 func Fixtures() []Fixture {
-	base := func(text string) chatgating.Target {
-		return chatgating.Target{ObservationID: "obs-target", Mode: types.ModeAssist, Envelope: types.SlackEnvelope{OrganizationID: "org", TeamID: "team", ChannelID: "support", MessageTS: "2.0", Text: text, Kind: types.SlackEventMessage}}
+	base := func(text string) classifier.Target {
+		return classifier.Target{ObservationID: "obs-target", Mode: types.ModeAssist, Envelope: types.SlackEnvelope{OrganizationID: "org", TeamID: "team", ChannelID: "support", MessageTS: "2.0", Text: text, Kind: types.SlackEventMessage}}
 	}
 	pack := func(sources ...types.ContextSource) types.ContextPackRevision {
 		return types.ContextPackRevision{OrganizationID: "org", TargetObservationID: "obs-target", Sources: sources}

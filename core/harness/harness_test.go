@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -116,6 +117,26 @@ func TestOpenCodeRequiresOptInAndRejectsMalformedResponses(t *testing.T) {
 	adapter.client.Transport = handlerTransport{handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`not-json`)) })}
 	if err := adapter.Health(context.Background()); err == nil {
 		t.Fatal("malformed response was accepted")
+	}
+}
+
+func TestOpenCodeSessionErrorIsReturnedOnErrorChannel(t *testing.T) {
+	adapter, err := NewOpenCode(OpenCodeOptions{Enabled: true, BaseURL: "http://opencode.test", Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.client.Transport = handlerTransport{handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintln(w, `data: {"type":"session.error","properties":{"error":{"name":"ProviderError"}}}`)
+	})}
+	events, errs := adapter.Events(context.Background(), "session-error")
+	for range events {
+		t.Fatal("session.error was emitted as an ordinary event")
+	}
+	if err := <-errs; !errors.Is(err, ErrOpenCodeSession) {
+		t.Fatalf("session error = %v", err)
+	} else if coded, ok := err.(interface{ DiagnosticCode() string }); !ok || coded.DiagnosticCode() != "ProviderError" {
+		t.Fatalf("session diagnostic = %v", err)
 	}
 }
 

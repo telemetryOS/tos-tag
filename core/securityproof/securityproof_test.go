@@ -22,8 +22,8 @@ func TestSecretSentinelNeverCrossesManagedSurfaces(t *testing.T) {
 
 	cfg := config.DefaultConfiguration
 	cfg.Auth.AdminToken = sentinel
-	cfg.Slack.AppToken = "xapp-" + sentinel
-	cfg.Slack.BotToken = "xoxb-" + sentinel
+	cfg.Slack.AppLevelToken = "xapp-" + sentinel
+	cfg.Slack.BotUserOAuthToken = "xoxb-" + sentinel
 	cfg.OpenCode.Password = sentinel
 	status, _ := json.Marshal(cfg.RedactedStatus())
 	assertAbsent(t, "redacted status/log fields", status, sentinel)

@@ -42,7 +42,7 @@ func (q *MemoryQueue) Enqueue(_ context.Context, spec Spec) (Job, bool, error) {
 	}
 	job := Job{
 		ID: types.JobID(types.NewID("job")), OrganizationID: spec.OrganizationID, WorkspaceID: spec.WorkspaceID,
-		ChannelID: spec.ChannelID, RootThreadTS: spec.RootThreadTS, SessionID: spec.SessionID, Generation: spec.Generation,
+		ChannelID: spec.ChannelID, RootThreadTS: spec.RootThreadTS, ReplyInChannel: spec.ReplyInChannel, SessionID: spec.SessionID, Generation: spec.Generation,
 		ObservationID: spec.ObservationID, IdempotencyKey: spec.IdempotencyKey, Kind: spec.Kind, Input: spec.Input,
 		State: StateQueued, MaxAttempts: spec.MaxAttempts, SteeringEpoch: 1, AvailableAt: now, CreatedAt: now, UpdatedAt: now, ExpiresAt: expiresAt, Version: 1,
 		AdmissionReservationID: spec.AdmissionReservationID,

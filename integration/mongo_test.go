@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/RobertWHurst/blackbox"
-	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/telemetryos/tos-tag/core/admission"
 	"github.com/telemetryos/tos-tag/core/approvals"

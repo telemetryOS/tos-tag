@@ -82,7 +82,7 @@ Correction:
   server-side capability bridge for executable marketplace operations.
 - The response model now receives structured, destination-safe context rather
   than only the triggering message. Restricted awareness sources and the
-  internal gating prompt are omitted.
+  internal classifier prompt are omitted.
 - Organization and workspace bootstrap mutation APIs were added so live scope
   can be configured without direct database edits; each mutation is audited.
 

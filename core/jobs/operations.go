@@ -28,7 +28,7 @@ func (o Operations) Restart(ctx context.Context, id string) (Job, error) {
 	if err != nil {
 		return Job{}, err
 	}
-	created, _, err := o.Queue.Enqueue(ctx, Spec{OrganizationID: current.OrganizationID, WorkspaceID: current.WorkspaceID, ChannelID: current.ChannelID, RootThreadTS: current.RootThreadTS, SessionID: session.ID, Generation: session.CurrentGeneration, ObservationID: current.ObservationID, IdempotencyKey: current.IdempotencyKey + fmt.Sprintf("/restart/%d", session.CurrentGeneration), Kind: current.Kind, Input: current.Input, MaxAttempts: current.MaxAttempts, ResolvedModel: current.ResolvedModel, RouteTrace: current.RouteTrace, ExpiresAt: current.ExpiresAt})
+	created, _, err := o.Queue.Enqueue(ctx, Spec{OrganizationID: current.OrganizationID, WorkspaceID: current.WorkspaceID, ChannelID: current.ChannelID, RootThreadTS: current.RootThreadTS, ReplyInChannel: current.ReplyInChannel, SessionID: session.ID, Generation: session.CurrentGeneration, ObservationID: current.ObservationID, IdempotencyKey: current.IdempotencyKey + fmt.Sprintf("/restart/%d", session.CurrentGeneration), Kind: current.Kind, Input: current.Input, MaxAttempts: current.MaxAttempts, ResolvedModel: current.ResolvedModel, RouteTrace: current.RouteTrace, ExpiresAt: current.ExpiresAt})
 	return created, err
 }
 func (o Operations) Branch(ctx context.Context, id, newRootThreadTS string) (Job, error) {
@@ -43,6 +43,6 @@ func (o Operations) Branch(ctx context.Context, id, newRootThreadTS string) (Job
 	if err != nil {
 		return Job{}, err
 	}
-	created, _, err := o.Queue.Enqueue(ctx, Spec{OrganizationID: current.OrganizationID, WorkspaceID: current.WorkspaceID, ChannelID: current.ChannelID, RootThreadTS: newRootThreadTS, SessionID: session.ID, Generation: session.CurrentGeneration, ObservationID: current.ObservationID, IdempotencyKey: current.IdempotencyKey + "/branch/" + newRootThreadTS, Kind: current.Kind, Input: current.Input, MaxAttempts: current.MaxAttempts, ResolvedModel: current.ResolvedModel, RouteTrace: current.RouteTrace, ExpiresAt: current.ExpiresAt})
+	created, _, err := o.Queue.Enqueue(ctx, Spec{OrganizationID: current.OrganizationID, WorkspaceID: current.WorkspaceID, ChannelID: current.ChannelID, RootThreadTS: newRootThreadTS, ReplyInChannel: current.ReplyInChannel, SessionID: session.ID, Generation: session.CurrentGeneration, ObservationID: current.ObservationID, IdempotencyKey: current.IdempotencyKey + "/branch/" + newRootThreadTS, Kind: current.Kind, Input: current.Input, MaxAttempts: current.MaxAttempts, ResolvedModel: current.ResolvedModel, RouteTrace: current.RouteTrace, ExpiresAt: current.ExpiresAt})
 	return created, err
 }

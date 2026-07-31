@@ -45,7 +45,7 @@ below depends on a real Slack installation and is deferred to that initiative.
 ## 2. Configuration and lifecycle
 
 - [x] Implement configuration defaults and `TAG__*` environment overrides.
-- [x] Validate listener, Mongo, retention, queue, context, gating, auth, and
+- [x] Validate listener, Mongo, retention, queue, context, classification, auth, and
   stub-mode invariants.
 - [x] Reject unauthenticated management on non-loopback listeners.
 - [x] Keep configuration/status redaction centralized and tested.
@@ -63,7 +63,7 @@ below depends on a real Slack installation and is deferred to that initiative.
 - [x] Add organization, workspace, channel, and participation-mode models.
 - [x] Add observation and current-message projection models.
 - [x] Add organization/channel receive counters and watermarks.
-- [x] Add chat-gating decision models.
+- [x] Add classifier decision models.
 - [x] Add context-pack, situation-fact, restricted-signal, and summary models.
 - [x] Add session, generation, job, attempt, and steering models.
 - [x] Add durable Mongo-backed approval and external-action models, including
@@ -124,7 +124,8 @@ below depends on a real Slack installation and is deferred to that initiative.
 - [x] Maintain current message projections across edits and deletes.
 - [x] Append every eligible message to the organization intelligence timeline.
 - [x] Project source-linked active incident/status facts.
-- [x] Produce content-free restricted signals for non-disclosable sources.
+- [x] Keep restricted projections destination-local and exclude other private
+  channels before context queries.
 - [x] Track projector watermarks and bounded lag.
 - [x] Fair-sample channels so one noisy channel cannot monopolize context.
 - [x] Enqueue bounded late high-signal reconsiderations without recursion.
@@ -136,7 +137,8 @@ below depends on a real Slack installation and is deferred to that initiative.
 - [x] Use deterministic selection and stable source ordering.
 - [x] Preserve source IDs, versions, token counts, disclosure class, and hash.
 - [x] Exclude deleted, superseded, expired, or unauthorized sources.
-- [x] Keep restricted signals out of final response evidence.
+- [x] Keep other private-channel content and derived awareness out of context
+  packs and final response evidence.
 - [ ] Extend the implemented pre-query enrolled/restricted/membership channel
   filter with live requester and complete destination-audience membership from
   Slack before live deployment.
@@ -146,17 +148,19 @@ below depends on a real Slack installation and is deferred to that initiative.
   authorized context projection; retain on-demand search as an optional later
   optimization rather than a second disclosure path.
 
-## 9. Chat gating and response admission
+## 9. Classifier and response admission
 
 - [x] Implement hard trigger and hard suppression rules as pure functions.
 - [x] Implement `observe`, `mention`, `assist`, and `proactive` channel modes.
 - [x] Implement `silent`, `react`, `reply_in_thread`, `reply_in_channel`,
   `start_background_job`, and `escalate_for_approval` outcomes.
-- [x] Keep the gate tool-free and validate structured output.
+- [x] Keep the direct classifier tool-free and validate strict structured output.
 - [x] Default errors, ambiguity, chatter, and low confidence to silence.
 - [x] Preserve direct mentions as hard triggers unless policy denies them.
 - [x] Make thread reply the default and channel reply a higher threshold.
 - [x] Implement shadow mode before live ambient speech.
+- [x] Require an explicit global `live` classifier mode before `assist` or
+  `proactive` channel decisions can produce ambient output.
 - [x] Enforce kill switch, cooldown, response budget, and concurrency limits.
 - [x] Validate selected evidence IDs and destination disclosure at admission.
 - [x] Use one observation-level output guard across decision revisions.
@@ -186,7 +190,7 @@ below depends on a real Slack installation and is deferred to that initiative.
 - [x] Implement explicit validated fallback chains.
 - [x] Snapshot routing policy for a job while rechecking live hard denies.
 - [x] Record effective profile, provider, model, variant, and reason.
-- [x] Provide deterministic fake gating and response model adapters.
+- [x] Provide deterministic fake classification and response model adapters.
 - [x] Add route-preview API/UI/CLI behavior.
 - [x] Keep real provider tests opt-in and disabled by default.
 
@@ -228,6 +232,10 @@ below depends on a real Slack installation and is deferred to that initiative.
 - [x] Disable hooks and executable OpenCode plugins by default.
 - [x] Resolve deterministic immutable skill snapshots and collisions.
 - [x] Materialize only authorized skills into a read-only worker view.
+- [x] Automatically select and inject the complete `telemetryos-automation`
+  and `base` behavioral plugins from separate configured repositories, while
+  allowing an empty base plugin and failing on missing plugins or skill-name
+  collisions.
 - [x] Parse and validate executable tool bundles separately.
 - [x] Keep tool executable bytes outside the OpenCode filesystem contract.
 - [x] Resolve the configured tool-ID allowlist into immutable tool skills and
@@ -297,16 +305,43 @@ below depends on a real Slack installation and is deferred to that initiative.
   earlier code-complete overclaims after adversarial review.
 - [x] Explicitly state that no live Slack installation or message was used.
 
-## Deferred live Slack initiative
+## Active live Slack validation initiative
 
-These are intentionally not completion gates for the current goal:
+These remain opt-in live gates and must be checked only after direct evidence:
 
-- [x] Create/review the Slack app manifest and least-privilege scopes.
-- [ ] Configure app-level and bot tokens in an approved secret store.
-- [ ] Install into a development workspace.
-- [ ] Exercise Socket Mode connect/reconnect/refresh and ack timing.
-- [ ] Validate public/private membership and audience semantics.
-- [ ] Validate message, edit, delete, mention, thread, and delivery behavior.
-- [ ] Validate real Block Kit rendering and accessibility in Slack clients.
-- [ ] Run shadow-mode precision evaluation on real channel traffic.
-- [ ] Approve any transition from stub mode to live `mention`/`assist` modes.
+- [x] Create/review the Slack app manifest; the development installation is
+  intentionally broad while runtime authorization remains default-deny.
+- [x] Configure Slack App-Level and Bot User OAuth tokens in the gitignored,
+  owner-readable local `runtime.env` fallback and validate the bot credential
+  with `auth.test` without logging secret values.
+- [x] Install into the dedicated development workspace and start the local
+  control plane in Socket Mode with shadow classification.
+- [x] Verify Socket Mode connect and reconnect hello events against the expected
+  Slack App ID without logging credentials.
+- [x] Add correlated redacted lifecycle logging for Socket Mode, normalization,
+  acknowledgements, persistence, decisions, jobs, deliveries, and management
+  actions, with an owner-readable JSONL local test artifact.
+- [x] Validate a real public-channel human message through Events API,
+  normalization, durable non-duplicate observation persistence, 45 ms
+  acknowledgement, and the expected `observe`-mode silent decision.
+- [x] Deterministically exercise reconnect generation plus the durable retry
+  contract: failed persistence is not acknowledged; a retried duplicate is
+  durably recognized and acknowledged.
+- [ ] Observe a natural Slack-requested Socket Mode refresh in the long-running
+  development connection; Slack normally rotates it only every few hours.
+- [x] Validate public-channel bot membership and allowlisted audience policy.
+- [ ] Validate private-channel and Slack Connect membership/audience semantics.
+- [x] Validate live message, edit, delete, mention, thread, job, and threaded
+  delivery behavior in the enrolled public development channel.
+- [x] Validate native Block Kit table API acceptance, accessible fallback text,
+  and duplicate-delivery reconciliation against the development workspace.
+- [x] Inspect the native Block Kit table in Slack desktop: headers, rows,
+  download, and copy controls are exposed accessibly; verify the mention thread
+  contains exactly one bot reply.
+- [ ] Inspect native Block Kit accessibility in Slack mobile and web clients.
+- [x] Run a controlled four-message observe-only shadow sample in the real test
+  channel: all four expected labels matched, effective decisions remained
+  silent, and job/delivery counts did not change.
+- [ ] Run a longer shadow-mode precision evaluation on organic channel traffic.
+- [x] Approve and exercise a bounded transition to live `mention` mode for the
+  enrolled test channel, then return it to `observe`; `assist` remains disabled.

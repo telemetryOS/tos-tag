@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -31,6 +32,18 @@ type OpenCode struct {
 	password string
 	client   *http.Client
 }
+
+var ErrOpenCodeSession = errors.New("OpenCode session failed")
+
+type OpenCodeSessionError struct {
+	Code string
+}
+
+func (e *OpenCodeSessionError) Error() string {
+	return "OpenCode session failed: " + e.Code
+}
+func (e *OpenCodeSessionError) Unwrap() error          { return ErrOpenCodeSession }
+func (e *OpenCodeSessionError) DiagnosticCode() string { return e.Code }
 
 // NewOpenCode requires an explicit opt-in. Constructing it performs no I/O.
 func NewOpenCode(options OpenCodeOptions) (*OpenCode, error) {
@@ -145,6 +158,10 @@ func (o *OpenCode) Events(ctx context.Context, sessionID string) (<-chan Event, 
 				errs <- fmt.Errorf("decode OpenCode event: %w", err)
 				return
 			}
+			if event.Type == "session.error" {
+				errs <- openCodeSessionError(event.Data)
+				return
+			}
 			if event.Type == "message.part.updated" {
 				if part, ok := event.Data["part"].(map[string]any); ok {
 					id, _ := part["id"].(string)
@@ -174,6 +191,35 @@ func (o *OpenCode) Events(ctx context.Context, sessionID string) (<-chan Event, 
 		}
 	}()
 	return out, errs
+}
+
+func openCodeSessionError(data map[string]any) error {
+	code := "unknown"
+	if upstream, ok := data["error"].(map[string]any); ok {
+		if name, ok := upstream["name"].(string); ok {
+			code = sanitizeDiagnosticCode(name)
+		}
+		if details, ok := upstream["data"].(map[string]any); ok {
+			if status, ok := details["statusCode"].(float64); ok {
+				code += fmt.Sprintf("_http_%d", int(status))
+			} else if status, ok := details["status"].(float64); ok {
+				code += fmt.Sprintf("_http_%d", int(status))
+			}
+		}
+	}
+	return &OpenCodeSessionError{Code: code}
+}
+
+func sanitizeDiagnosticCode(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 64 {
+		value = value[:64]
+	}
+	value = regexp.MustCompile(`[^A-Za-z0-9_.-]+`).ReplaceAllString(value, "_")
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }
 
 func (o *OpenCode) doJSON(ctx context.Context, method, path string, input, output any) error {

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/telemetryos/tos-tag/core/database"
 	"github.com/telemetryos/tos-tag/models"

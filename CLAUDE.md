@@ -11,7 +11,7 @@ Consult [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) and do not imply
 that a live workspace or credential-bearing connector effect was tested unless
 the current initiative produced that evidence. The opt-in OpenCode tests have
 verified an anonymous `opencode/deepseek-v4-flash-free` provider route,
-model-based gating, and a real model-initiated call through the reviewed tool
+model-based classification, and a real model-initiated call through the reviewed tool
 bridge.
 
 Before implementation work, read these documents in order:
@@ -75,7 +75,7 @@ Never implement one unbounded model session per channel.
 - Different threads may run concurrently.
 
 The raw workspace stream must not become one permanent model session or be
-copied wholesale into every prompt. Chat-gating builds an immutable, source-
+copied wholesale into every prompt. Classifier builds an immutable, source-
 linked organization `ContextPackRevision`, initially capped at 100k input
 tokens, from the target thread/channel, fair-sampled recent organization
 timeline, related evidence, situation facts, and rolling summaries. Every
@@ -93,11 +93,13 @@ Valid outcomes are:
 silent | react | reply_in_thread | reply_in_channel | start_background_job | escalate_for_approval
 ```
 
-The gate is tool-free, returns structured action/evidence selection, and never
-user-facing prose. It may use releasable cross-channel evidence and content-free
-restricted signals. The admitted response job receives releasable evidence
-only. Thread reply is the quiet default; channel reply requires higher
-confidence, broad relevance, and explicit policy.
+The classifier is a direct, stateless OpenAI call that is tool-free, returns
+structured action/evidence/placement/reaction/model selection, and never
+user-facing prose. It may use releasable cross-channel evidence from public
+channels. A private channel's messages are eligible only when that same channel
+is the destination; they never contribute content, metadata, counts, or derived
+awareness to another channel's context pack. Thread reply is the quiet default;
+channel reply requires higher confidence, broad relevance, and explicit policy.
 
 Silence is the default on errors, ambiguity, social chatter, repetition, and low
 confidence. Direct mentions and active-thread replies are hard triggers unless
@@ -330,11 +332,12 @@ authorized channel set before issuing a
 MongoDB query. Intersect agent-principal scope, explicit requester or routine
 owner Slack visibility, complete destination-audience visibility, organization
 sharing/quote-out policy, active bot search authority, and any narrower job
-restriction. Ambient gating without an explicit requester may use content safe
-for the complete destination audience plus separately labeled restricted
-signals; the response job receives releasable sources only. Stale Slack
-membership fails closed. Do not leak unauthorized channel names, notes, counts,
-or snippets.
+restriction. Ambient classification without an explicit requester may use content safe
+for the complete destination audience. Private-channel content is
+destination-local: include the current private channel when it is the target,
+and exclude every other private channel before querying. Stale Slack membership
+fails closed. Do not leak unauthorized channel names, notes, counts, snippets,
+or derived awareness.
 
 Persist organization observation watermarks and immutable context-pack source/
 token/disclosure metadata. Context selection must be deterministic for a fixed
@@ -476,7 +479,7 @@ for progressive enhancement such as live SSE refresh.
 - Never display stored secrets.
 - Show shadow and live ambient decisions with structured reasons.
 - Show the organization situation board, intelligence watermark, context-pack
-  token partitions/sources/disclosure, gating reply mode, and reconsideration
+  token partitions/sources/disclosure, classifier reply mode, and reconsideration
   history without exposing unauthorized content.
 - Provide model route, effective channel directive, `SkillSnapshot`, and
   `ToolSnapshot` previews before publishing policy.
@@ -509,14 +512,14 @@ Add tests for the invariant affected by the change. Important suites include:
 - deterministic 100k context-pack budgeting, organization watermarks,
   noisy-channel fairness, situation/summary invalidation, and prompt-cache-
   independent correctness;
-- alert-to-support correlation, reply-mode admission, restricted-signal versus
-  releasable-evidence separation, and late-event reconsideration dedupe;
+- alert-to-support correlation, reply-mode admission, private-channel
+  destination isolation, and late-event reconsideration dedupe;
 - channel/thread/session derivation and single-writer concurrency;
 - Mongo leases, stale writers, retries, and idempotency;
 - private-channel isolation in every retrieval path;
 - conversational-search requester and destination-audience authorization before
   query, stale-membership fallback, result caps, source links, message
-  edits/deletes, and restricted-signal fallback;
+  edits/deletes, and exclusion of other private channels before query;
 - channel-note pending-review/sharing/provenance and directive
   precedence/confirmation/snapshot behavior;
 - model route precedence, constraints, fallback, and provider options;
@@ -559,13 +562,13 @@ The wired local implementation slice is:
    context packs, and bounded retroactive-correlation queue;
 7. revisioned/confirmed channel directives and human-reviewed source-linked
    channel notes;
-8. deterministic/fake cross-channel shadow gating, durable admission, and the
+8. deterministic/fake cross-channel shadow classification, durable admission, and the
    durable kill switch;
 9. finite-attempt durable jobs for admitted responses;
 10. CAS-serialized Slack delivery records and audit receipts; and
 11. restart/replay/concurrency tests.
 
-The OpenCode response and tool-free gating boundaries, behavioral/tool
+The OpenCode response and direct-classifier boundaries, behavioral/tool
 marketplace allowlists, job-scoped tool gateway, encrypted keystore, durable
 approvals and routines, authorized context packs, notes/directives, usage, and
 management mutation sections are implemented. Consult

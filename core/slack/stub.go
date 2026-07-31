@@ -128,17 +128,33 @@ func (s *StubIngress) Acks() []types.SlackAck {
 type StubDelivery struct {
 	mu sync.Mutex
 
-	sequence uint64
-	results  map[string]types.SlackDeliveryResult
-	requests []types.SlackDeliveryRequest
-	failures map[string]int
+	sequence         uint64
+	results          map[string]types.SlackDeliveryResult
+	requests         []types.SlackDeliveryRequest
+	failures         map[string]int
+	reactions        map[string]types.SlackReactionResult
+	reactionRequests []types.SlackReactionRequest
 }
 
 func NewStubDelivery() *StubDelivery {
 	return &StubDelivery{
-		results:  make(map[string]types.SlackDeliveryResult),
-		failures: make(map[string]int),
+		results:   make(map[string]types.SlackDeliveryResult),
+		failures:  make(map[string]int),
+		reactions: make(map[string]types.SlackReactionResult),
 	}
+}
+
+func (s *StubDelivery) React(_ context.Context, req types.SlackReactionRequest) (types.SlackReactionResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing, ok := s.reactions[req.IdempotencyKey]; ok {
+		existing.Duplicate = true
+		return existing, nil
+	}
+	result := types.SlackReactionResult{AppliedAt: time.Now().UTC()}
+	s.reactions[req.IdempotencyKey] = result
+	s.reactionRequests = append(s.reactionRequests, req)
+	return result, nil
 }
 
 func (s *StubDelivery) FailNext(idempotencyKey string, count int) {
@@ -172,4 +188,10 @@ func (s *StubDelivery) Requests() []types.SlackDeliveryRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]types.SlackDeliveryRequest(nil), s.requests...)
+}
+
+func (s *StubDelivery) ReactionRequests() []types.SlackReactionRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]types.SlackReactionRequest(nil), s.reactionRequests...)
 }

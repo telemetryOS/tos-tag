@@ -67,7 +67,7 @@ analysis, and rejected alternatives live in [research.md](research.md).
   context compaction.
 - Treating a whole Slack channel as one infinite model conversation.
 - Treating an organization-wide raw transcript as one infinite model session or
-  pasting every retained message into every gating prompt.
+  pasting every retained message into every classifier prompt.
 - Sending every Slack message to a full-cost model or starting an OpenCode
   worker for every message.
 - Letting a model, prompt, skill, or marketplace plugin grant itself authority.
@@ -140,23 +140,20 @@ observations, approvals, artifacts, commits, model route decisions, and audit
 events. The system must explain why it spoke without storing hidden
 chain-of-thought.
 
-### 3.8 Awareness and disclosure are separate
+### 3.8 Private-channel context is destination-local
 
-The chat-gating path may use organization-wide observations to recognize that
-two conversations are related. That awareness is not permission to quote or
-summarize every source into the destination channel. Cross-channel context is
-partitioned into:
+The classifier path may use organization-wide public observations to recognize
+that two conversations are related. Private-channel content has a stricter
+boundary: it is eligible only when that exact private channel is the destination.
+A context pack for a private `#management` channel may therefore contain
+`#management` plus eligible public-channel context, but it must exclude every
+other private channel before the observation query is issued.
 
-- **releasable evidence**, which both the requester and complete destination
-  audience may receive and which a response generator may use; and
-- **restricted signals**, which may tell the gating model that an incident or
-  related topic exists but contain no raw text, sensitive identities, or source
-  details that could be disclosed.
-
-The gate selects an action and evidence IDs; it never writes the final Slack
-prose. Final response generation receives only releasable evidence. This permits
-human-like cross-channel awareness without making a private channel readable
-through a public one.
+No raw text, source metadata, channel identity, result count, or content-free
+derived awareness from one private channel may enter another channel's context
+pack. The classifier selects an action and evidence IDs and never writes final Slack
+prose; final response generation receives only the destination-safe sources
+selected from the same authorized pack.
 
 ## 4. System context
 
@@ -336,7 +333,7 @@ Each channel has one participation mode:
 
 | Mode | Processing | Speech policy |
 | --- | --- | --- |
-| `observe` | Ingest and index every eligible event | No proactive output |
+| `observe` | Ingest and index every eligible event; optionally record assist-style predictions under global shadow mode | No output; the effective decision is always silent |
 | `mention` | Same observation behavior | Only direct triggers |
 | `assist` | Same observation behavior | High-confidence, rate-limited ambient help |
 | `proactive` | Same observation behavior | Tuned alerts, suggestions, and routines within policy |
@@ -347,6 +344,18 @@ channel the Slack installation is authorized and technically able to observe is
 automatically enrolled unless an explicit audited exclusion applies. New
 channels inherit `observe` until their speech mode/directive is configured, but
 their eligible messages still contribute to organization intelligence.
+
+Global shadow mode does not expand channel authority. For an `observe` channel,
+the classifier may run the same classifier path used by `assist` and retain that
+prediction for precision review, but it persists `admission.channel_mode` as the
+effective silent decision. This path cannot create jobs or deliveries. Hard
+suppressions such as self-authored messages are applied before classification.
+
+Once that precision review passes, the explicit global `live` classifier mode lets
+only an already-authorized `assist` or `proactive` channel apply its ambient
+decision. It does not alter enrollment, membership, disclosure, kill-switch,
+cooldown, response-budget, or concurrency checks, and `observe` remains an
+absolute no-output mode.
 
 Removing the bot from a channel stops future ingestion and marks the channel
 `ingestion_revoked_at`. Historical local data then follows retention and
@@ -362,10 +371,10 @@ prompts. They share authorized knowledge through the control plane:
 - every normalized Slack message in every eligible channel observed by the app
   is stored in MongoDB, enters the organization intelligence timeline, and is
   indexed for bounded conversational search;
-- every eligible human-authored message becomes a chat-gating target after
+- every eligible human-authored message becomes a classifier target after
   deterministic suppressions and a short burst debounce, whether or not it
   mentions tos-tag;
-- each gating decision uses a versioned organization context pack capped by a
+- each classification decision uses a versioned organization context pack capped by a
   configurable token budget, initially 100,000 input tokens;
 - every admitted worker receives the core `conversation-search` tool;
 - results include source channel/thread/message IDs and excerpts so answers can
@@ -378,17 +387,15 @@ prompts. They share authorized knowledge through the control plane:
 - no session receives raw database credentials.
 
 The previous current-channel-only ambient default is replaced by
-organization-wide gating for enrolled channels. “All channels” means all
+organization-wide classification for enrolled channels. “All channels” means all
 conversations the Slack installation can lawfully observe under its scopes,
 membership, enrollment, and retention policy; it never bypasses private-channel
 membership or Slack authorization.
 
-Raw cross-channel excerpts enter the releasable partition only when requester
-and destination-audience policy permit them. Otherwise the gate may receive a
-minimal restricted signal such as `active_incident: true`, affected public
-service labels, freshness, and confidence. Restricted signals can cause silence,
-escalation, or an evidence-gathering job, but cannot alone justify a factual
-reply and are never passed to the final prose generator as evidence.
+Raw public cross-channel excerpts enter the releasable partition only when
+requester and destination-audience policy permit them. Private-channel messages
+are destination-local and excluded from every other destination's pre-query
+channel set, including derived incident or awareness signals.
 
 Channel notes and channel directives are different objects:
 
@@ -453,7 +460,7 @@ Bulk history-change events mark a channel cursor for reconciliation. Unsupported
 message subtypes remain observable metadata but do not automatically enter
 model context.
 
-### 7.2 Ambient response decision
+### 7.2 Ambient classification
 
 ```mermaid
 flowchart TD
@@ -461,10 +468,10 @@ flowchart TD
     H -->|"hard suppress"| S["silent receipt"]
     H -->|"hard trigger: forced response intent"| C
     H -->|"unresolved"| C["100k organization context-pack builder"]
-    C --> R["tool-free chat-gating model"]
+    C --> R["direct tool-free OpenAI classifier"]
     R --> P
     P -->|"deny, low confidence, cooldown, or budget"| S
-    P -->|"react"| Q["durable Slack delivery"]
+    P -->|"act"| Q["allowlisted acknowledgement reaction"]
     P -->|"thread/channel reply, background job, or approval"| J["durable job queue"]
 ```
 
@@ -488,21 +495,23 @@ inside an active tos-tag thread, an assigned request, a matched alert rule, and
 an approved routine trigger. A stronger deny can still block them.
 
 Hard triggers still receive an organization context pack so the resulting
-answer has the same cross-channel intelligence. They bypass debounce and cannot
-be turned into `silent` by the chat-gating model; the model selects evidence,
-intent, and reply placement while admission may still apply a hard policy deny.
-If pack/gating is unavailable, the explicit request continues with narrower
-safe context and a recorded degraded-context reason.
+answer has the same cross-channel intelligence. They bypass debounce and the
+ambient classifier, deterministically acknowledge with an allowlisted reaction,
+default to a thread reply, and use normal model-routing defaults unless policy
+denies the request. If context construction is unavailable, the explicit request
+continues with narrower safe context and a recorded degraded-context reason.
 
 Every eligible human message not deterministically suppressed is evaluated by a
-`chat-gating` model profile. It receives the target message/thread, bounded
-target-channel history, organization-wide recent context, related cross-channel
-excerpts, current situation facts, and restricted signals within the 100k-token
-cap. It has no tools, credentials, worker, long-lived session, or ability to
-send Slack output. It returns a validated structured result containing outcome,
+stateless direct OpenAI classifier configured independently from OpenCode. It receives the target message/thread, bounded
+target-channel history, organization-wide recent public context, related
+destination-safe cross-channel excerpts, and current eligible situation facts
+within the 100k-token cap. It has no tools, OpenCode worker, long-lived session,
+or ability to send Slack output. Its OpenAI credential remains only in the Go
+control plane. It returns strict structured output containing outcome,
 confidence, reason codes, topic/evidence IDs, response intent, disclosure class,
-reply mode, freshness requirement, and whether full agent work is justified.
-It returns no user-facing prose.
+channel/thread placement, an allowlisted Slack emoji reaction, whether full
+agent work is justified, and the exact permitted model profile/strength/reasoning
+effort for that OpenCode job. It returns no user-facing prose.
 
 Reply placement is policy-driven:
 
@@ -518,7 +527,7 @@ Reply placement is policy-driven:
 For example, an alert in `#alerts` creates or updates an active incident fact.
 When a later message in `#support` asks whether the system is down, its context
 pack includes the releasable alert evidence or a restricted incident signal.
-The gate can therefore start a grounded response even though the support
+The classifier can therefore start a grounded response even though the support
 message never mentioned the agent.
 
 Admission then applies channel confidence threshold, cooloff, response-rate
@@ -698,7 +707,7 @@ cells per row, and 10,000 aggregate cell characters. Larger tables are split or
 attached as an artifact with a readable summary and link.
 
 The model cannot choose an arbitrary channel. Output destination is derived
-from the target observation and authorized job/routine scope. The gate may
+from the target observation and authorized job/routine scope. The classifier may
 propose thread versus top-level placement within that fixed channel; admission
 validates the proposal against channel policy. Final output includes a
 management receipt link when available and source references appropriate for
@@ -798,20 +807,22 @@ bounded configurable gap timeout, the decider proceeds and records
 `late_or_missing_predecessor`; a later event cannot retroactively duplicate an
 already guarded output.
 
-### 8.4 Organization chat-gating and ambient decision service
+### 8.4 Organization classification and ambient decision service
 
 The ambient decision service is a pure coordinator around:
 
 - hard trigger and suppression rules;
 - channel participation policy;
 - bounded context materialization;
-- optional structured model classification;
+- deterministic test classification or a direct structured OpenAI call;
 - confidence, cooldown, cost, and concurrency admission; and
 - decision receipts and resulting job/delivery creation.
 
-The service cannot call external tools. Its model profile must have tool access
-disabled and structured output validation enabled. A classification failure
-defaults to `silent` unless the observation already matched a hard trigger.
+The service cannot call external tools. The direct provider request declares no
+tools, disables provider-side storage, and requires strict structured output. A
+classification failure falls back to the deterministic classifier, which still
+defaults ambiguity and ordinary chatter to `silent`. Hard triggers bypass the
+ambient provider call.
 
 The rules engine and classifier emit stable reason codes, for example:
 
@@ -852,7 +863,8 @@ timeline as well as its channel sequence. An intelligence projector maintains:
   confidence, affected services, and expiry;
 - channel rolling summaries for history older than the raw recency window;
 - lexical/metadata and optional semantic retrieval indexes; and
-- restricted signal projections stripped of raw text and sensitive identity.
+- destination-local restricted projections for authorized inspection inside
+  their source channel; they are never shared into another channel's context.
 
 Derived topics, summaries, and signals are untrusted retrieval aids, not factual
 authority. A final answer must ground factual claims in releasable source
@@ -867,13 +879,13 @@ only updates indexes and future context packs.
 
 #### 8.4.2 Versioned 100k-token context pack
 
-The chat-gating model receives a fresh immutable `ContextPackRevision` rather
+The classifier model receives a fresh immutable `ContextPackRevision` rather
 than owning a permanent organization conversation. The revision records the
 target observation, organization observation watermark, membership/policy
 revisions, tokenizer/model profile, selected source IDs and versions, per-source
 token counts, summaries/signals, disclosure partition, and content hash.
 
-Before gating an unmentioned target, the builder waits a bounded interval for
+Before classifying an unmentioned target, the builder waits a bounded interval for
 the intelligence projector to reach at least the target's organization sequence.
 It can always select authorized raw timeline segments through that watermark,
 so projector lag cannot erase an earlier alert; missing derived facts are
@@ -919,9 +931,9 @@ cache reuse: stable instructions and situation-board revisions precede target
 deltas. Cache availability is an optimization only. Token counting, truncation,
 and decision correctness never depend on a provider cache hit.
 
-#### 8.4.3 Gating output and response admission
+#### 8.4.3 Classifier output and response admission
 
-The gate returns a schema equivalent to:
+The classifier returns a schema equivalent to:
 
 ```json
 {
@@ -933,8 +945,11 @@ The gate returns a schema equivalent to:
   "restricted_signal_ids": [],
   "response_intent": "short non-user-facing plan",
   "disclosure_class": "destination_safe|restricted_awareness_only",
-  "freshness_deadline": "RFC3339|null",
-  "requires_full_agent": true
+  "requires_full_agent": true,
+  "reaction": "eyes",
+  "agent_model_profile": "chatgpt-luna-max",
+  "agent_model_strength": "strong",
+  "agent_reasoning_effort": "max"
 }
 ```
 
@@ -942,7 +957,7 @@ Admission validates every returned evidence/signal ID against the exact context
 pack, recomputes destination disclosure, applies confidence/rate/budget policy,
 and rejects model-selected channels or authority. The response job receives the
 target thread/channel, response intent, and releasable evidence only. Restricted
-signals remain in the gating receipt and may cause silence, escalation, or an
+signals remain in the classification receipt and may cause silence, escalation, or an
 evidence-gathering job, but cannot support a factual response or be copied into
 the response prompt. A coarse public-status statement is allowed only when that
 separate statement is itself marked releasable by policy or an approved status
@@ -1007,7 +1022,7 @@ The context service keeps six data classes separate:
 6. **Ephemeral model context:** the bounded prompt assembled for one inference
    and discarded after usage/audit metadata is recorded.
 
-The following order applies to an admitted response job; chat-gating uses the
+The following order applies to an admitted response job; classifier uses the
 separate 100k-token pack in Section 8.4.2:
 
 1. system and safety instructions;
@@ -1016,7 +1031,7 @@ separate 100k-token pack in Section 8.4.2:
 4. active thread transcript;
 5. triggering observation;
 6. bounded recent channel window;
-7. gate-selected releasable cross-channel evidence and situation facts;
+7. classifier-selected releasable cross-channel evidence and situation facts;
 8. relevant target-channel notes and curated memories;
 9. selected skill and tool descriptions; and
 10. task contract and the immutable Slack `mrkdwn` output contract when the
@@ -1026,7 +1041,7 @@ Retrieval always includes tenant/channel/audience filters in the database query,
 not only in prompt instructions. Private-channel raw text or memory cannot enter
 a different destination unless the complete audience and source quote-out
 policy permit it. A non-disclosable source may contribute only a restricted
-signal to chat-gating and never appears in response-job context. Curated memory
+signal to classifier and never appears in response-job context. Curated memory
 starts as an explicit user/admin operation; automatic extraction is deferred
 until provenance and correction behavior are proven.
 
@@ -1061,12 +1076,13 @@ TTL and revalidated before sensitive retrieval. Stale or failed membership
 resolution reduces the searchable set to the current destination channel or
 denies the query; it never broadens results.
 
-For ambient gating without an explicit requester, releasable raw search defaults
-to content safe for the complete target-channel audience; a reviewed service
-authority may additionally consume restricted signals. The admitted response
-job and its `conversation-search` tool still receive releasable sources only.
-Search never reveals the existence, name, count, or snippets of a channel
-outside the authorized set.
+For ambient classification without an explicit requester, releasable raw search defaults
+to content safe for the complete target-channel audience. A private channel is
+included only when it is the current destination; every other private channel is
+excluded before query. The admitted response job and its `conversation-search`
+tool receive the same destination-safe boundary. Search never reveals the
+existence, name, count, snippets, or derived awareness of a channel outside the
+authorized set.
 
 ### 8.8 Model catalog, router, and gateway
 
@@ -1260,6 +1276,27 @@ Compatibility classes:
 | JavaScript/TypeScript OpenCode plugins | Disabled by default; executable in-process code |
 | Runtime-specific marketplace manifests | Catalog metadata, not executable configuration |
 
+The development response-worker baseline combines two explicitly named plugin
+sources from separate private repositories:
+
+- `telemetryos-automation` from `telemetryos-agent-skills`; and
+- `base` from `tag-agent-skills`.
+
+All behavioral skills in those two selected plugins are injected automatically;
+the initial `base` plugin may validly be empty. Selection is by exact repository
+root, marketplace manifest, and plugin name rather than by loading every plugin
+advertised by either marketplace. Runtime skill names remain flat under
+`.opencode/skills/<name>/SKILL.md` and must be unique across the combined set.
+A missing source/plugin or a collision fails startup. The manifests themselves,
+agents, hooks, MCP declarations, and helper scripts are not installed as
+executable OpenCode configuration.
+
+Development checkouts are hashed when tos-tag starts, and workers verify those
+hashes again while materializing files read-only. A changed checkout therefore
+requires an intentional control-plane restart and cannot silently alter an
+already admitted worker. Production still requires immutable revision pinning,
+sync/promotion, and audited scope binding as described below.
+
 At job admission, the skill resolver computes an immutable `SkillSnapshot` from
 organization, workspace, channel, routine, and job bindings. Collision order is
 deterministic and visible before execution. The materializer creates a fresh
@@ -1274,8 +1311,9 @@ new version before any binding may adopt it.
 
 Skills may declare dependencies on logical tool IDs and compatible versions.
 Job admission must resolve those dependencies from the separate tool marketplace
-or fail closed. The TelemetryOS behavioral marketplace remains
-`telemetryos-agent-skills`; it should not become the keystore or executable tool
+or fail closed. The TelemetryOS workflow marketplace remains
+`telemetryos-agent-skills`, while tos-tag-owned behavioral skills live in
+`tag-agent-skills`; neither repository becomes the keystore or executable tool
 registry.
 
 ### 8.13 Executable tool marketplace
@@ -1446,9 +1484,9 @@ Initial screens:
 - context-pack inspection showing the target, 100k partition budget, selected
   channel/source IDs, token counts, disclosure partitions, truncation, and
   content/policy revisions without exposing unauthorized text;
-- chat-gating decision inspection with thread-versus-channel reply mode,
-  cross-channel evidence, restricted signals, confidence, and retroactive
-  reconsideration history;
+- classifier decision inspection with thread-versus-channel reply mode,
+  cross-channel evidence, private-channel exclusion, confidence, and
+  retroactive reconsideration history;
 - jobs, attempts, sessions, generations, progress, results, and artifacts;
 - agent principals, instruction profiles, access bundles, and scope bindings;
 - per-channel directive editor with revision history, preview, activation, and
@@ -1492,6 +1530,11 @@ does not bypass policy.
 Operators configure stable named profiles instead of placing provider/model IDs
 directly in every channel rule:
 
+The deployment default is `chatgpt-luna-max`: provider `openai`, model
+`gpt-5.6-luna`, and provider variant `max`. Provider execution remains an
+independent opt-in boundary; selecting this default does not enable OpenCode or
+inject a provider credential.
+
 ```yaml
 id: product-deep
 provider: openai
@@ -1513,15 +1556,15 @@ live pinned OpenCode/provider catalog. `claude-sonnet-medium` is a tos-tag
 profile name, not proof that `medium` is a universal Anthropic/OpenCode variant.
 Provider-specific options remain provider-specific.
 
-`chat-gating` is a dedicated model profile, independent from the model used for
-the eventual answer. It requires structured output, no tools, sufficient context
-for the configured 100k input pack plus output headroom, prompt-cache support
-where useful, and authorization for every data class in the pack. Organizations
-with restricted cross-channel data may route this phase to an approved local or
-self-hosted model while using hosted models for narrower response jobs. A model
-that cannot accept the complete authorized pack causes deterministic truncation
-to its configured lower cap or fails routing; tos-tag never silently sends
-classified content to an ineligible provider.
+The classifier is a direct, stateless Responses API client independent from the
+OpenCode model used for the eventual answer. Its endpoint, credential, model,
+reasoning effort, timeout, output bound, and reaction allowlist are explicit
+control-plane configuration. The classifier has no tools or durable provider
+session. It receives only the already-authorized immutable context pack and may
+choose only among enabled agent profiles advertised by the live model router.
+A classifier model that cannot accept the configured pack must be replaced or
+the configured pack limit deliberately lowered; tos-tag never silently sends
+content to an unconfigured provider.
 
 ### 9.2 Route context and precedence
 
@@ -1598,7 +1641,7 @@ The architecture uses:
 | Domain | Collections |
 | --- | --- |
 | Tenancy and Slack | `organizations`, `slack_installations`, `workspaces`, `channels`, `members`, `kill_switches` |
-| Observation and intelligence | `channel_observations`, `channel_messages`, `channel_observer_cursors`, `channel_receive_counters`, `organization_receive_counters`, `chat_gating_decisions`, `gating_reconsiderations` |
+| Observation and intelligence | `channel_observations`, `channel_messages`, `channel_observer_cursors`, `channel_receive_counters`, `organization_receive_counters`, `classifier_decisions`, `classifier_reconsiderations` |
 | Identity and policy | `users`, `roles`, `web_sessions`, `agent_principals`, `agent_principal_bindings`, `instruction_profiles`, `scopes`, `access_bundles`, `scope_bundle_bindings` |
 | Models | `model_catalog_snapshots`, `model_profiles`, `model_routing_rules`, `model_route_decisions`, `model_usage_events` |
 | Behavioral skills | `skill_marketplaces`, `skill_marketplace_syncs`, `plugins`, `plugin_versions`, `plugin_compatibility_reports`, `skills`, `skill_versions`, `scope_plugin_bindings`, `job_skill_snapshots` |
@@ -1632,16 +1675,17 @@ enrolled channel is stored in `channel_messages` with an absolute `expires_at`.
 The default message-history window is 30 days, measured from the original Slack
 message timestamp; edits, reactions, retries, and reindexing do not renew it.
 
-### 10.4 Chat-gating decision document
+### 10.4 Classifier decision document
 
 Important fields:
 
 ```text
 observation_id, decision_revision, policy_revision, channel_mode
 decision, reason_code, confidence
-rules_version, classifier_profile_id, model_route_decision_id
+rules_version, classifier_model, classifier_reasoning_effort, classifier_response_id
 context_pack_revision_id, organization_observation_watermark
-releasable_evidence_ids, restricted_signal_ids, response_intent, reply_mode
+releasable_evidence_ids, restricted_signal_ids, response_intent, reply_mode, reaction
+agent_model_profile, agent_model_strength, agent_reasoning_effort
 context_source_ids, cooldown_state, budget_state
 resulting_job_id, resulting_delivery_id
 decided_at, receipt_id
@@ -1658,7 +1702,7 @@ policy/membership/model/tokenizer revisions, content hash, selected source IDs
 and versions, per-partition token counts, disclosure partition, and expiry.
 Materialized prompt payloads expire after 24 hours by default and never later
 than their earliest source. Content-free selection metadata may follow the
-audit policy. `gating_reconsiderations` links a high-signal observation to
+audit policy. `classifier_reconsiderations` links a high-signal observation to
 recent target observations and records admission, dedupe, and outcome.
 
 ### 10.5 Shared knowledge documents
@@ -1776,7 +1820,7 @@ At minimum:
 - unique organization receive-counter identity;
 - unique `channel_id + received_seq`;
 - pending observation scan by decision state and lease expiry;
-- unique `observation_id + decision_revision` chat-gating decision;
+- unique `observation_id + decision_revision` classifier decision;
 - unique `team_id + channel_id + root_thread_ts` thread session;
 - unique thread-session + generation;
 - unique job idempotency key;
@@ -1793,7 +1837,7 @@ At minimum:
 - conversation search by organization/channel, timestamp, terms, and retention;
 - context-pack lookup by target observation/revision/content hash;
 - active situation fact and restricted signal by organization/topic/expiry;
-- gating reconsideration by trigger observation + target observation;
+- classification reconsideration by trigger observation + target observation;
 - source-message derivations by source ID and derived record;
 - unique audit receipt sequence and organization chain position;
 - unique organization audit-chain head;
@@ -1865,7 +1909,7 @@ tos-tag/
     observer/
     intelligence/
     contextpacks/
-    chatgating/
+    classifier/
     identity/
     policy/
     sessions/
@@ -1956,7 +2000,7 @@ type ObservationStore interface {
     Accept(context.Context, SlackEnvelope) (ChannelObservation, bool, error)
     ClaimPending(context.Context, WorkerID, time.Duration) (ChannelObservation, Lease, error)
     ApplyMutation(context.Context, ChannelObservation, Lease) error
-    MarkDecided(context.Context, ObservationID, Lease, ChatGatingDecision) error
+    MarkDecided(context.Context, ObservationID, Lease, ClassificationDecision) error
 }
 
 type IntelligenceProjector interface {
@@ -1964,15 +2008,15 @@ type IntelligenceProjector interface {
 }
 
 type ContextPackBuilder interface {
-    Build(context.Context, ChatGatingTarget, TokenBudget) (ContextPackRevision, error)
+    Build(context.Context, ClassificationTarget, TokenBudget) (ContextPackRevision, error)
 }
 
 type ChatGate interface {
-    Decide(context.Context, ChatGatingTarget, ContextPackRevision) (ChatGatingDecision, error)
+    Decide(context.Context, ClassificationTarget, ContextPackRevision) (ClassificationDecision, error)
 }
 
 type JobQueue interface {
-    EnqueueDecision(context.Context, ChatGatingDecision) (Job, bool, error)
+    EnqueueDecision(context.Context, ClassificationDecision) (Job, bool, error)
     Claim(context.Context, WorkerID, time.Duration) (Job, Lease, error)
     Heartbeat(context.Context, JobID, Lease) error
     Transition(context.Context, JobID, Lease, JobTransition) (Job, error)
@@ -2055,16 +2099,16 @@ Configuration groups:
 
 ```text
 server, auth, database, slack, observer, intelligence, context_packs,
-chat_gating, jobs, workers,
+classifier, jobs, workers,
 opencode, model_gateway, tool_gateway, tool_runner, keystore,
 skill_marketplaces, tool_marketplaces, conversation_search, notes,
 directives, routines, audit, retention, telemetry, logging
 ```
 
 Startup validation checks cross-field invariants: non-loopback HTTP requires
-auth; live gating requires call/token/spend budgets, a context-capable
-structured-output profile, and a validated tokenizer; configured pack partitions
-must fit the hard cap; active model profiles must exist in the catalog; workers
+auth; the OpenAI classifier requires an HTTPS endpoint, API key, model,
+reasoning effort, timeout, output bound, and reaction allowlist; configured pack
+partitions must fit the hard cap; active model profiles must exist in the catalog; workers
 require default-deny egress; and write-capable tools require a credential/policy
 gateway.
 
@@ -2098,7 +2142,7 @@ The scaffold should copy the proven service conventions from
 - `go-shared/buildmeta` build/version metadata;
 - `go-shared/dotroutes` health, version, and redacted status routes;
 - `navaros` over plain `net/http` for management/API routing;
-- MongoDB Go driver v1 plus `otelmongo`, with indexes ensured during startup;
+- MongoDB Go driver v2 plus its v2 `otelmongo` adapter, with indexes ensured during startup;
 - `html/template` and `go:embed` for the management interface;
 - one root router, small resource route packages, one handler per operation, and
   a shared dependency bundle;
@@ -2119,7 +2163,7 @@ separate decision.
 
 | Secret | Allowed location | Forbidden location |
 | --- | --- | --- |
-| Slack app/bot token | Slack adapter/control-plane secret store | Worker, prompt, repository, logs |
+| Slack App-Level / User OAuth / Bot User OAuth tokens | Slack adapter/control-plane secret store | Worker, prompt, repository, logs |
 | Provider credential | Model gateway/secret store | OpenCode environment, generated config, prompt |
 | Tool/connector credential | Write-only keystore; exact trusted tool subprocess environment for one call | OpenCode/global worker environment, skill text, tool arguments, logs |
 | Repository/GitHub credential | Tool/checkout gateway | Long-lived worker files or global Git config |
@@ -2174,12 +2218,12 @@ Prompt injection is managed structurally:
 - output channels are fixed by the admitted job;
 - marketplace skills are pinned and treated as untrusted instructions;
 - context sources are labeled, delimited, scoped, and versioned;
-- organization-wide chat-gating returns structured action/evidence selection and
+- organization-wide classification returns structured action/evidence selection and
   never final user-facing prose;
-- gate-selected evidence IDs are reauthorized against the destination audience
+- classifier-selected evidence IDs are reauthorized against the destination audience
   before response-job admission;
-- restricted signals contain no raw source text/identity and never enter the
-  response generator as factual evidence;
+- other private channels are excluded before context/search queries and never
+  enter the response generator as content or derived awareness;
 - tool results are size-limited and redacted; and
 - sensitive writes require live authorization or approval.
 
@@ -2282,7 +2326,7 @@ explicit uncertainty handling after timeout.
   per-channel receive sequence for decision eligibility subject to the bounded
   missing-predecessor timeout.
 - Organization intelligence projection advances a monotonic observation
-  watermark. A gating decision snapshots one watermark and never reads a mix of
+  watermark. A classification decision snapshots one watermark and never reads a mix of
   newer/older mutable projections without recording their versions.
 - Steering events are durable and ordered within a thread.
 - Routines and ambient decisions that target the same thread use the same lease.
@@ -2296,7 +2340,7 @@ Backpressure is applied independently to:
 - Socket Mode durable acceptance latency;
 - pending observation decisions;
 - intelligence projection and context-pack construction;
-- chat-gating model calls and retroactive reconsiderations;
+- classifier model calls and retroactive reconsiderations;
 - ambient classifier calls;
 - runnable jobs;
 - worker capacity;
@@ -2308,7 +2352,7 @@ Backpressure is applied independently to:
 When capacity is exhausted, explicit mentions receive a durable queued status
 when possible. Ambient decisions prefer silence or delayed evaluation rather
 than flooding the queue. Low-priority routines can be postponed within their
-policy window. Chat-gating uses per-organization call, token, and spend budgets;
+policy window. Classifier uses per-organization call, token, and spend budgets;
 reconsideration has a smaller independent budget and never recursively triggers
 itself. Queue age and rejected/admission-delayed counts are observable.
 
@@ -2386,8 +2430,8 @@ Core metric families:
   speak rate;
 - `context_pack_tokens{partition}`, build latency, truncation, source-channel
   diversity, cache hit/miss, and watermark lag;
-- `chat_gating_total{outcome,reply_mode,reason}`, reconsiderations, grounded
-  cross-channel matches, and restricted-signal escalations;
+- `classifier_total{outcome,reply_mode,reason}`, reconsiderations, grounded
+  cross-channel matches, and private-channel context exclusions;
 - shadow/live precision feedback and operator overrides;
 - `jobs_total{state,type}`, queue latency, run duration, retries, cancellations;
 - worker cold start, warm reuse, crashes, resource pressure, teardown failures;
@@ -2424,11 +2468,21 @@ requires an explicit time-bounded operator setting and still applies redaction.
 
 ### 15.1 Local development
 
-`docker-compose.yml` should provide MongoDB and any local gateway dependencies.
-The Go service may run on the host or in Compose. OpenCode workers use isolated
-temporary directories and a reviewed pinned image/binary version. Local provider
-execution is opt-in; fake model, OpenCode, Slack, and tool servers cover normal
-tests.
+`docker-compose.yml` provides a pinned development image for the Go service,
+OpenCode, GitHub CLI, Aion, and repository tooling plus a separate MongoDB
+service. Named volumes retain the operator home, Aion-managed checkouts, skill
+repositories, logs, and MongoDB data across container replacement. A checked-in
+bootstrap creates a default umbrella `AGENTS.md`, clones the control-plane and
+skill repositories, and runs `aion sync` only when explicitly requested.
+
+The persistent operator workspace is not a Slack-worker session. Slack-triggered
+OpenCode workers continue to use isolated disposable directories and a reviewed
+pinned binary. The host Docker socket is never mounted; Docker-backed Aion fleet
+execution requires a separately reviewed nested-runtime design. The ambient
+classifier calls OpenAI directly from the control plane and never starts
+OpenCode. OpenCode remains the full agent harness for admitted jobs with pinned
+skill/tool snapshots. Direct provider execution is opt-in; fake classifier,
+OpenCode, Slack, and tool servers cover normal tests.
 
 Local management may run without auth only on loopback. Test credentials and
 artifacts follow the workspace `.testruns` guidance and are never committed.
@@ -2470,8 +2524,8 @@ Mongo job/routine state machines.
   and tool-free classifier schema validation;
 - deterministic 100k context-pack partitioning/truncation, organization
   watermark snapshots, noisy-channel fairness, and content hashes;
-- gate outcome/reply-mode admission, evidence-ID validation, restricted-signal
-  separation, and retroactive reconsideration dedupe;
+- classifier outcome/reply-mode admission, evidence-ID validation, private-channel
+  destination isolation, and retroactive reconsideration dedupe;
 - channel/thread/session key derivation;
 - model routing, constraint filtering, provider-specific options, fallback, and
   budget behavior;
@@ -2564,11 +2618,11 @@ Mongo job/routine state machines.
 16. A final Slack reply links the job receipt, sources, model route, and artifact
     without revealing secrets.
 17. An alert in `#alerts` updates the situation board; a later unmentioned “is
-    the system down?” message in `#support` is gated with that evidence and
+    the system down?” message in `#support` is classified with that evidence and
     receives one grounded thread reply.
-18. A source visible to the gating service but not the complete destination
-    audience contributes only a restricted signal; the response contains no
-    source identity, excerpt, count, or inferable private detail.
+18. A private-channel source is absent from every other channel's pre-query
+    authorized set and contributes no identity, excerpt, count, or derived
+    awareness; it remains available when its own channel is the destination.
 19. A noisy channel cannot monopolize a 100k pack, the exact token cap is
     respected, and a high-signal late alert reconsiders a recent unanswered
     target without producing a duplicate reply.
@@ -2617,9 +2671,9 @@ not enter response context, and restart loses no acknowledged event.
 
 - Implement the harness with fake and pinned real OpenCode.
 - Add model catalog, profiles, dynamic route simulator, and model gateway.
-- Enable the real tool-free `chat-gating` profile for every eligible human
+- Enable the real direct, tool-free OpenAI classifier for every eligible human
   message in enrolled channels, with per-organization token/call/spend budgets,
-  prompt-cache instrumentation, and deterministic smaller-pack fallback.
+  usage instrumentation, and deterministic failure fallback.
 - Add worker isolation and no-secret/no-egress verification.
 - Add the required Slack membership scopes/cache with current-channel-only
   failure behavior, destination-audience search authorization, and a private
@@ -2633,7 +2687,7 @@ not enter response context, and restart loses no acknowledged event.
   switch. Expand from the test channels to all enrolled channels only after
   shadow precision and disclosure tests pass.
 
-Exit criteria: live cross-channel gating precision is acceptable, the alert-to-
+Exit criteria: live cross-channel classification precision is acceptable, the alert-to-
 support scenario produces a grounded response in the correct reply mode, routed
 model usage/context tokens match receipts, cancellation/recovery work, and the
 worker cannot access raw secrets.
@@ -2697,12 +2751,14 @@ receipt trail without placing a human or GitHub App credential in the worker.
 | ADR-021 | Cross-channel retrieval is authorized for both requester and complete destination audience before query | Prevents an authorized requester from leaking private sources into a broader channel |
 | ADR-022 | Security receipts append through organization-head CAS and use keyed payload commitments | Makes multi-instance audit ordering deterministic without retaining brute-forceable public hashes |
 | ADR-023 | Claude Fable adversarial review findings are incorporated before Phase 0 | Resolves durable-contract defects before implementation makes them expensive to change |
-| ADR-024 | Every eligible message in every enrolled channel is an organization chat-gating target | Cross-channel intelligence must exist before a job or explicit search, like a human following several channels |
-| ADR-025 | Chat-gating uses an immutable context pack capped initially at 100k input tokens, not a permanent global model session | Bounds cost/context while preserving recent and retrieved organization awareness |
-| ADR-026 | Gating awareness and response disclosure are separate; the gate selects evidence but final prose sees releasable evidence only | Enables alert-to-support correlation without leaking private-channel content |
+| ADR-024 | Every eligible message in every enrolled channel is an organization classification target | Cross-channel intelligence must exist before a job or explicit search, like a human following several channels |
+| ADR-025 | Classifier uses an immutable context pack capped initially at 100k input tokens, not a permanent global model session | Bounds cost/context while preserving recent and retrieved organization awareness |
+| ADR-026 | Private-channel context is destination-local and other private channels are excluded before query | Preserves public cross-channel continuity without allowing private content or derived awareness to cross channel boundaries |
 | ADR-027 | Every normalized enrolled-channel message has a default 30-day absolute MongoDB TTL | Gives cross-channel intelligence a useful rolling corpus while bounding privacy exposure, storage, and context drift |
 | ADR-028 | Every Slack-destined generation is governed by an immutable Slack `mrkdwn` contract | Keeps links, emphasis, identifiers, code, and tabular results readable and consistent across models, skills, channels, and delivery types |
 | ADR-029 | The local experiment may use a clean process-group OpenCode worker, while untrusted or multi-tenant deployments require a container or stronger sandbox | Enables real headless harness testing without misrepresenting process isolation as a hardened security boundary |
+| ADR-030 | The development Slack app requests broad future-agent scopes while tos-tag runtime authorization remains default-deny | Avoids repeated web-based grant churn during exploration without treating Slack scope availability as permission to observe, retrieve, disclose, or act; production manifests narrow to measured use |
+| ADR-031 | Local development uses a pinned Compose toolchain with persistent operator/code volumes while Slack workers remain disposable | Makes installation and repository synchronization reproducible without turning shared OpenCode state or the host Docker socket into an authority boundary |
 
 ## 19. Open implementation decisions
 
@@ -2731,15 +2787,15 @@ The following require proof-of-concept evidence before being fixed:
     already restricted to the explicit requester.
 16. Tuning the provisional raw recency horizons, rolling-summary cadence, and
     five-minute reconsideration window after production traffic measurements.
-17. Per-organization chat-gating token/call/spend budgets and the evidence
+17. Per-organization classification token/call/spend budgets and the evidence
     threshold for reducing the default 100k cap.
-18. Which approved gating profiles/providers deliver sufficient latency, prompt
+18. Which approved classifier models/providers deliver sufficient latency, prompt
     caching, context capacity, and data-class coverage, including local-model
     options for restricted organizations.
 19. Confidence and rate thresholds for `reply_in_channel` versus the quieter
     `reply_in_thread` default.
-20. Whether restricted signals are produced deterministically, by an approved
-    local projector model, or by connector-specific parsers for each data class.
+20. How destination-local restricted projections should be presented to
+    authorized operators without making their existence observable elsewhere.
 
 Each decision should become an ADR or an explicit configuration contract after
 the relevant experiment; it should not be hidden in implementation code.

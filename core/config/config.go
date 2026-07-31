@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +30,7 @@ type LoggingConfig struct {
 	DisableColor bool   `config:"disableColor"`
 	Level        string `config:"level"`
 	NoSplash     bool   `config:"noSplash"`
+	FilePath     string `config:"filePath"`
 }
 
 type TelemetryConfig struct {
@@ -42,14 +44,16 @@ type AuthConfig struct {
 }
 
 type SlackConfig struct {
-	Mode           string `config:"mode"`
-	LiveEnabled    bool   `config:"liveEnabled"`
-	OrganizationID string `config:"organizationId"`
-	TeamID         string `config:"teamId"`
-	AppToken       string `config:"appToken"`
-	BotToken       string `config:"botToken"`
-	BotUserID      string `config:"botUserId"`
-	StubQueueSize  int    `config:"stubQueueSize"`
+	Mode              string `config:"mode"`
+	LiveEnabled       bool   `config:"liveEnabled"`
+	OrganizationID    string `config:"organizationId"`
+	AppID             string `config:"appId"`
+	TeamID            string `config:"teamId"`
+	AppLevelToken     string `config:"appLevelToken"`
+	UserOAuthToken    string `config:"userOauthToken"`
+	BotUserOAuthToken string `config:"botUserOauthToken"`
+	BotUserID         string `config:"botUserId"`
+	StubQueueSize     int    `config:"stubQueueSize"`
 }
 
 type RetentionConfig struct {
@@ -74,11 +78,19 @@ func (c ContextPackConfig) PartitionTotal() int {
 	return c.System + c.Thread + c.Channel + c.RecentOrg + c.Evidence + c.Situation + c.Headroom
 }
 
-type GatingConfig struct {
-	Mode                  string  `config:"mode"`
-	AssistThreshold       float64 `config:"assistThreshold"`
-	ChannelReplyThreshold float64 `config:"channelReplyThreshold"`
-	MaxResponsesPerHour   int     `config:"maxResponsesPerHour"`
+type ClassifierConfig struct {
+	Mode                  string        `config:"mode"`
+	Provider              string        `config:"provider"`
+	BaseURL               string        `config:"baseUrl"`
+	OpenAIAPIKey          string        `config:"openAiApiKey"`
+	Model                 string        `config:"model"`
+	ReasoningEffort       string        `config:"reasoningEffort"`
+	Timeout               time.Duration `config:"timeout"`
+	MaxOutputTokens       int           `config:"maxOutputTokens"`
+	ReactionEmojis        []string      `config:"reactionEmojis"`
+	AssistThreshold       float64       `config:"assistThreshold"`
+	ChannelReplyThreshold float64       `config:"channelReplyThreshold"`
+	MaxResponsesPerHour   int           `config:"maxResponsesPerHour"`
 }
 
 type JobsConfig struct {
@@ -105,13 +117,19 @@ type ModelConfig struct {
 	DefaultVariant  string `config:"defaultVariant"`
 }
 type MarketplaceConfig struct {
-	SkillRoot       string   `config:"skillRoot"`
-	CatalogPath     string   `config:"catalogPath"`
-	InjectedSkills  []string `config:"injectedSkills"`
-	InjectedTools   []string `config:"injectedTools"`
-	ToolRoot        string   `config:"toolRoot"`
-	ToolCatalogPath string   `config:"toolCatalogPath"`
-	ToolsEnabled    bool     `config:"toolsEnabled"`
+	SkillRoot           string   `config:"skillRoot"`
+	CatalogPath         string   `config:"catalogPath"`
+	InjectedSkills      []string `config:"injectedSkills"`
+	HeadlessRoot        string   `config:"headlessRoot"`
+	HeadlessCatalogPath string   `config:"headlessCatalogPath"`
+	HeadlessPlugin      string   `config:"headlessPlugin"`
+	BaseRoot            string   `config:"baseRoot"`
+	BaseCatalogPath     string   `config:"baseCatalogPath"`
+	BasePlugin          string   `config:"basePlugin"`
+	InjectedTools       []string `config:"injectedTools"`
+	ToolRoot            string   `config:"toolRoot"`
+	ToolCatalogPath     string   `config:"toolCatalogPath"`
+	ToolsEnabled        bool     `config:"toolsEnabled"`
 }
 type KeystoreConfig struct {
 	Enabled   bool   `config:"enabled"`
@@ -128,7 +146,7 @@ type Config struct {
 	Slack        SlackConfig       `config:"slack"`
 	Retention    RetentionConfig   `config:"retention"`
 	ContextPacks ContextPackConfig `config:"contextPacks"`
-	Gating       GatingConfig      `config:"gating"`
+	Classifier   ClassifierConfig  `config:"classifier"`
 	Jobs         JobsConfig        `config:"jobs"`
 	OpenCode     OpenCodeConfig    `config:"openCode"`
 	Models       ModelConfig       `config:"models"`
@@ -168,8 +186,15 @@ var DefaultConfiguration = Config{
 		Situation: 10_000,
 		Headroom:  5_000,
 	},
-	Gating: GatingConfig{
+	Classifier: ClassifierConfig{
 		Mode:                  "shadow",
+		Provider:              "deterministic",
+		BaseURL:               "https://api.openai.com/v1",
+		Model:                 "gpt-5.6-luna",
+		ReasoningEffort:       "max",
+		Timeout:               60 * time.Second,
+		MaxOutputTokens:       2048,
+		ReactionEmojis:        []string{"eyes", "thinking_face", "white_check_mark", "warning", "rotating_light", "hammer_and_wrench", "speech_balloon"},
 		AssistThreshold:       0.90,
 		ChannelReplyThreshold: 0.98,
 		MaxResponsesPerHour:   6,
@@ -180,7 +205,12 @@ var DefaultConfiguration = Config{
 		MaxAttempts: 3,
 	},
 	OpenCode: OpenCodeConfig{Mode: "local_worker", BaseURL: "http://127.0.0.1:4096", Username: "opencode", Command: "opencode", WorkerRoot: "/tmp/tos-tag-workers", Timeout: 30 * time.Second},
-	Models:   ModelConfig{DefaultProfile: "fake-default", DefaultProvider: "fake", DefaultModel: "deterministic"},
+	Models: ModelConfig{
+		DefaultProfile:  "chatgpt-luna-max",
+		DefaultProvider: "openai",
+		DefaultModel:    "gpt-5.6-luna",
+		DefaultVariant:  "max",
+	},
 }
 
 func Load() (*Config, error) {
@@ -192,6 +222,12 @@ func Load() (*Config, error) {
 	if err := loader.GetAll(&cfg); err != nil {
 		return nil, fmt.Errorf("read tag configuration: %w", err)
 	}
+	if err := applyOpenCodeEnvironment(&cfg.OpenCode); err != nil {
+		return nil, err
+	}
+	if err := applyClassifierEnvironment(&cfg.Classifier); err != nil {
+		return nil, err
+	}
 	if env := strings.TrimSpace(os.Getenv("DEPLOYMENT_ENVIRONMENT")); env != "" {
 		cfg.Environment = env
 	}
@@ -199,6 +235,87 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// Orale tokenizes the Go field name OpenCode as OPEN_CODE. The public runtime
+// contract predates that detail and documents TAG__OPENCODE__*, so preserve
+// those names explicitly rather than silently leaving the fake harness active.
+func applyOpenCodeEnvironment(cfg *OpenCodeConfig) error {
+	if raw, ok := os.LookupEnv("TAG__OPENCODE__ENABLED"); ok {
+		value, err := strconv.ParseBool(strings.TrimSpace(raw))
+		if err != nil {
+			return fmt.Errorf("TAG__OPENCODE__ENABLED must be a boolean: %w", err)
+		}
+		cfg.Enabled = value
+	}
+	for name, target := range map[string]*string{
+		"TAG__OPENCODE__MODE":        &cfg.Mode,
+		"TAG__OPENCODE__BASE_URL":    &cfg.BaseURL,
+		"TAG__OPENCODE__USERNAME":    &cfg.Username,
+		"TAG__OPENCODE__PASSWORD":    &cfg.Password,
+		"TAG__OPENCODE__COMMAND":     &cfg.Command,
+		"TAG__OPENCODE__WORKER_ROOT": &cfg.WorkerRoot,
+	} {
+		if value, ok := os.LookupEnv(name); ok {
+			*target = strings.TrimSpace(value)
+		}
+	}
+	if raw, ok := os.LookupEnv("TAG__OPENCODE__TIMEOUT"); ok {
+		value, err := time.ParseDuration(strings.TrimSpace(raw))
+		if err != nil {
+			return fmt.Errorf("TAG__OPENCODE__TIMEOUT must be a duration: %w", err)
+		}
+		cfg.Timeout = value
+	}
+	return nil
+}
+
+// Explicit mapping keeps the public OpenAI credential name unambiguous and
+// independent from struct-field tokenization details in the generic loader.
+func applyClassifierEnvironment(cfg *ClassifierConfig) error {
+	for name, target := range map[string]*string{
+		"TAG__CLASSIFIER__MODE":             &cfg.Mode,
+		"TAG__CLASSIFIER__PROVIDER":         &cfg.Provider,
+		"TAG__CLASSIFIER__BASE_URL":         &cfg.BaseURL,
+		"TAG__CLASSIFIER__OPENAI_API_KEY":   &cfg.OpenAIAPIKey,
+		"TAG__CLASSIFIER__MODEL":            &cfg.Model,
+		"TAG__CLASSIFIER__REASONING_EFFORT": &cfg.ReasoningEffort,
+	} {
+		if value, ok := os.LookupEnv(name); ok {
+			*target = strings.TrimSpace(value)
+		}
+	}
+	if _, explicit := os.LookupEnv("TAG__CLASSIFIER__OPENAI_API_KEY"); !explicit && cfg.OpenAIAPIKey == "" {
+		cfg.OpenAIAPIKey = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	}
+	if raw, ok := os.LookupEnv("TAG__CLASSIFIER__TIMEOUT"); ok {
+		value, err := time.ParseDuration(strings.TrimSpace(raw))
+		if err != nil {
+			return fmt.Errorf("TAG__CLASSIFIER__TIMEOUT must be a duration: %w", err)
+		}
+		cfg.Timeout = value
+	}
+	if raw, ok := os.LookupEnv("TAG__CLASSIFIER__MAX_OUTPUT_TOKENS"); ok {
+		value, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return fmt.Errorf("TAG__CLASSIFIER__MAX_OUTPUT_TOKENS must be an integer: %w", err)
+		}
+		cfg.MaxOutputTokens = value
+	}
+	if raw, ok := os.LookupEnv("TAG__CLASSIFIER__REACTION_EMOJIS"); ok {
+		cfg.ReactionEmojis = splitNonEmpty(raw)
+	}
+	return nil
+}
+
+func splitNonEmpty(raw string) []string {
+	var values []string
+	for _, value := range strings.Split(raw, ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
 }
 
 func Validate(cfg *Config) error {
@@ -236,11 +353,14 @@ func Validate(cfg *Config) error {
 		if !cfg.Slack.LiveEnabled {
 			return fmt.Errorf("slack.liveEnabled must be explicitly true for socket_mode")
 		}
-		if cfg.Slack.OrganizationID == "" || cfg.Slack.TeamID == "" {
-			return fmt.Errorf("Slack organizationId and teamId are required for socket_mode")
+		if cfg.Slack.OrganizationID == "" || !strings.HasPrefix(cfg.Slack.AppID, "A") || cfg.Slack.TeamID == "" {
+			return fmt.Errorf("Slack organizationId, appId, and teamId are required for socket_mode")
 		}
-		if !strings.HasPrefix(cfg.Slack.AppToken, "xapp-") || !strings.HasPrefix(cfg.Slack.BotToken, "xoxb-") {
-			return fmt.Errorf("Slack socket_mode requires xapp and xoxb tokens")
+		if !strings.HasPrefix(cfg.Slack.AppLevelToken, "xapp-") || !strings.HasPrefix(cfg.Slack.BotUserOAuthToken, "xoxb-") {
+			return fmt.Errorf("Slack socket_mode requires an app-level xapp token and bot-user OAuth xoxb token")
+		}
+		if cfg.Slack.UserOAuthToken != "" && !strings.HasPrefix(cfg.Slack.UserOAuthToken, "xoxp-") {
+			return fmt.Errorf("Slack user OAuth token must use the xoxp prefix")
 		}
 	default:
 		return fmt.Errorf("unsupported slack.mode %q", cfg.Slack.Mode)
@@ -257,14 +377,26 @@ func Validate(cfg *Config) error {
 	if cfg.ContextPacks.MaxTokens <= 0 || cfg.ContextPacks.PartitionTotal() != cfg.ContextPacks.MaxTokens {
 		return fmt.Errorf("context pack partitions must exactly equal maxTokens")
 	}
-	if cfg.Gating.Mode != "shadow" {
-		return fmt.Errorf("gating.mode %q is unsupported before live Slack evaluation; use shadow", cfg.Gating.Mode)
+	if cfg.Classifier.Mode != "shadow" && cfg.Classifier.Mode != "live" {
+		return fmt.Errorf("unsupported classifier.mode %q; use shadow or live", cfg.Classifier.Mode)
 	}
-	if cfg.Gating.AssistThreshold < 0 || cfg.Gating.AssistThreshold > 1 || cfg.Gating.ChannelReplyThreshold < cfg.Gating.AssistThreshold || cfg.Gating.ChannelReplyThreshold > 1 {
-		return fmt.Errorf("invalid gating thresholds")
+	if cfg.Classifier.AssistThreshold < 0 || cfg.Classifier.AssistThreshold > 1 || cfg.Classifier.ChannelReplyThreshold < cfg.Classifier.AssistThreshold || cfg.Classifier.ChannelReplyThreshold > 1 {
+		return fmt.Errorf("invalid classifier thresholds")
 	}
-	if cfg.Gating.MaxResponsesPerHour <= 0 || cfg.Jobs.Lease <= 0 || cfg.Jobs.Poll <= 0 || cfg.Jobs.MaxAttempts <= 0 {
-		return fmt.Errorf("gating and job bounds must be positive")
+	if cfg.Classifier.MaxResponsesPerHour <= 0 || cfg.Jobs.Lease <= 0 || cfg.Jobs.Poll <= 0 || cfg.Jobs.MaxAttempts <= 0 {
+		return fmt.Errorf("classifier and job bounds must be positive")
+	}
+	if cfg.Classifier.Timeout <= 0 || cfg.Classifier.MaxOutputTokens <= 0 || len(cfg.Classifier.ReactionEmojis) == 0 {
+		return fmt.Errorf("classifier timeout, output bound, and reaction allowlist are required")
+	}
+	switch cfg.Classifier.Provider {
+	case "deterministic":
+	case "openai":
+		if cfg.Classifier.OpenAIAPIKey == "" || cfg.Classifier.BaseURL == "" || cfg.Classifier.Model == "" || cfg.Classifier.ReasoningEffort == "" {
+			return fmt.Errorf("OpenAI classifier requires base URL, API key, model, and reasoning effort")
+		}
+	default:
+		return fmt.Errorf("unsupported classifier.provider %q; use deterministic or openai", cfg.Classifier.Provider)
 	}
 	if cfg.Models.DefaultProfile == "" || cfg.Models.DefaultProvider == "" || cfg.Models.DefaultModel == "" {
 		return fmt.Errorf("default model profile, provider, and model are required")
@@ -292,6 +424,12 @@ func Validate(cfg *Config) error {
 	if (cfg.Marketplaces.SkillRoot == "") != (cfg.Marketplaces.CatalogPath == "") {
 		return fmt.Errorf("marketplace skill root and catalog path must be configured together")
 	}
+	if err := validatePluginSource("headless", cfg.Marketplaces.HeadlessRoot, cfg.Marketplaces.HeadlessCatalogPath, cfg.Marketplaces.HeadlessPlugin); err != nil {
+		return err
+	}
+	if err := validatePluginSource("base", cfg.Marketplaces.BaseRoot, cfg.Marketplaces.BaseCatalogPath, cfg.Marketplaces.BasePlugin); err != nil {
+		return err
+	}
 	if (cfg.Marketplaces.ToolRoot == "") != (cfg.Marketplaces.ToolCatalogPath == "") {
 		return fmt.Errorf("tool marketplace root and catalog path must be configured together")
 	}
@@ -303,6 +441,19 @@ func Validate(cfg *Config) error {
 		if err != nil || len(key) != 32 {
 			return fmt.Errorf("enabled keystore requires a base64-encoded 32-byte master key")
 		}
+	}
+	return nil
+}
+
+func validatePluginSource(label, root, catalogPath, plugin string) error {
+	configured := 0
+	for _, value := range []string{root, catalogPath, plugin} {
+		if strings.TrimSpace(value) != "" {
+			configured++
+		}
+	}
+	if configured != 0 && configured != 3 {
+		return fmt.Errorf("%s behavioral plugin root, catalog path, and plugin name must be configured together", label)
 	}
 	return nil
 }
@@ -333,13 +484,19 @@ func (c *Config) RedactedStatus() map[string]any {
 		"mongo_database":               c.Mongo.Database,
 		"slack_mode":                   c.Slack.Mode,
 		"slack_live_enabled":           c.Slack.LiveEnabled,
-		"gating_mode":                  c.Gating.Mode,
+		"classifier_mode":              c.Classifier.Mode,
+		"classifier_provider":          c.Classifier.Provider,
+		"classifier_model":             c.Classifier.Model,
+		"classifier_reasoning_effort":  c.Classifier.ReasoningEffort,
 		"auth_enabled":                 c.Auth.Enabled,
+		"log_file_enabled":             c.Logging.FilePath != "",
 		"message_retention":            c.Retention.Messages.String(),
 		"context_max_tokens":           c.ContextPacks.MaxTokens,
 		"opencode_enabled":             c.OpenCode.Enabled,
 		"default_model_profile":        c.Models.DefaultProfile,
-		"skill_marketplace_configured": c.Marketplaces.SkillRoot != "",
+		"skill_marketplace_configured": c.Marketplaces.SkillRoot != "" || c.Marketplaces.HeadlessRoot != "" || c.Marketplaces.BaseRoot != "",
+		"headless_plugin":              c.Marketplaces.HeadlessPlugin,
+		"base_plugin":                  c.Marketplaces.BasePlugin,
 		"tool_marketplace_configured":  c.Marketplaces.ToolRoot != "",
 		"marketplace_tools_enabled":    c.Marketplaces.ToolsEnabled,
 		"keystore_enabled":             c.Keystore.Enabled,

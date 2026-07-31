@@ -23,6 +23,7 @@ type Request struct {
 	RequesterChannels  []string
 	PrincipalChannels  []string
 	AudienceChannels   []string
+	RestrictedChannels []string
 	MembershipRevision string
 	MembershipStale    bool
 	Since              time.Time
@@ -47,10 +48,11 @@ func New(source Source) (*Searcher, error) {
 }
 
 func (s *Searcher) Search(ctx context.Context, request Request) ([]Result, error) {
-	if request.OrganizationID == "" || request.TargetChannelID == "" || request.MembershipRevision == "" || request.Limit <= 0 || request.Limit > 100 {
+	if request.OrganizationID == "" || request.TargetChannelID == "" || request.MembershipRevision == "" || request.RestrictedChannels == nil || request.Limit <= 0 || request.Limit > 100 {
 		return nil, errors.New("invalid search scope or bound")
 	}
 	channels := intersect(request.RequesterChannels, request.PrincipalChannels, request.AudienceChannels)
+	channels = destinationLocalChannels(channels, request.RestrictedChannels, request.TargetChannelID)
 	if request.MembershipStale {
 		if contains(channels, request.TargetChannelID) {
 			channels = []string{request.TargetChannelID}
@@ -73,12 +75,30 @@ func (s *Searcher) Search(ctx context.Context, request Request) ([]Result, error
 	results := make([]Result, 0, request.Limit)
 	for index := len(messages) - 1; index >= 0 && len(results) < request.Limit; index-- {
 		message := messages[index]
+		if message.Restricted && message.ChannelID != request.TargetChannelID {
+			continue
+		}
 		if !matchesTerms(strings.ToLower(message.Text), terms) {
 			continue
 		}
 		results = append(results, Result{SourceID: message.ChannelID + "/" + message.MessageTS, ChannelID: message.ChannelID, MessageTS: message.MessageTS, Text: message.Text, Observed: message.OriginalAt})
 	}
 	return results, nil
+}
+
+func destinationLocalChannels(channels, restrictedChannels []string, targetChannelID string) []string {
+	restricted := make(map[string]bool, len(restrictedChannels))
+	for _, channelID := range restrictedChannels {
+		restricted[channelID] = true
+	}
+	result := make([]string, 0, len(channels))
+	for _, channelID := range channels {
+		if restricted[channelID] && channelID != targetChannelID {
+			continue
+		}
+		result = append(result, channelID)
+	}
+	return result
 }
 
 func intersect(groups ...[]string) []string {

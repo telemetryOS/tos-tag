@@ -2,11 +2,12 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/telemetryos/tos-tag/core/chatgating"
+	"github.com/telemetryos/tos-tag/core/classifier"
 	"github.com/telemetryos/tos-tag/core/config"
 	"github.com/telemetryos/tos-tag/core/contextpacks"
 	"github.com/telemetryos/tos-tag/core/deliveries"
@@ -21,12 +22,30 @@ import (
 
 type recordingObservationStore struct {
 	observer.Store
-	recentChannels []string
+	recentChannels     []string
+	lateCandidateCalls int
+}
+
+type recordingAdmissions struct {
+	completed []string
+}
+
+func (*recordingAdmissions) Admit(context.Context, orgconfig.ChannelPolicy) (string, error) {
+	return "", nil
+}
+
+func (r *recordingAdmissions) Complete(_ context.Context, id string) {
+	r.completed = append(r.completed, id)
 }
 
 func (s *recordingObservationStore) Recent(ctx context.Context, organizationID string, channelIDs []string, since time.Time, limit int) ([]models.ChannelMessage, error) {
 	s.recentChannels = append([]string(nil), channelIDs...)
 	return s.Store.Recent(ctx, organizationID, channelIDs, since, limit)
+}
+
+func (s *recordingObservationStore) LateCandidates(ctx context.Context, organizationID string, since, before time.Time, limit int) ([]models.Observation, error) {
+	s.lateCandidateCalls++
+	return s.Store.LateCandidates(ctx, organizationID, since, before, limit)
 }
 
 type testSystem struct {
@@ -35,7 +54,7 @@ type testSystem struct {
 	transport  *slack.StubDelivery
 	jobs       *jobs.MemoryQueue
 	deliveries *deliveries.MemoryQueue
-	decisions  *chatgating.MemoryDecisionStore
+	decisions  *classifier.MemoryDecisionStore
 }
 
 func newTestSystem(t *testing.T) testSystem {
@@ -47,7 +66,7 @@ func newTestSystem(t *testing.T) testSystem {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate, err := chatgating.New(chatgating.DeterministicClassifier{}, true, cfg.Gating.AssistThreshold, cfg.Gating.ChannelReplyThreshold)
+	classificationService, err := classifier.New(classifier.DeterministicClassifier{}, true, cfg.Classifier.AssistThreshold, cfg.Classifier.ChannelReplyThreshold)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +74,7 @@ func newTestSystem(t *testing.T) testSystem {
 	transport := slack.NewStubDelivery()
 	jobQueue := jobs.NewMemoryQueue(nil)
 	deliveryQueue := deliveries.NewMemoryQueue(nil)
-	decisionStore := chatgating.NewMemoryDecisionStore()
+	decisionStore := classifier.NewMemoryDecisionStore()
 	pipe, err := New(Dependencies{
 		Config:       &cfg,
 		Ingress:      ingress,
@@ -66,7 +85,7 @@ func newTestSystem(t *testing.T) testSystem {
 		Decisions:    decisionStore,
 		Deliveries:   deliveryQueue,
 		ContextPacks: builder,
-		Gate:         gate,
+		Classifier:   classificationService,
 		Renderer:     deliveries.NewRenderer(),
 	})
 	if err != nil {
@@ -112,6 +131,9 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 		t.Fatal("first envelope was marked duplicate")
 	}
 	waitFor(t, func() bool { return len(system.transport.Requests()) == 1 })
+	if reactions := system.transport.ReactionRequests(); len(reactions) != 1 || reactions[0].Emoji != "eyes" || reactions[0].ChannelID != message.ChannelID || reactions[0].MessageTS != message.MessageTS {
+		t.Fatalf("classifier acknowledgement reactions = %#v", reactions)
+	}
 
 	jobList, err := system.jobs.List(context.Background())
 	if err != nil || len(jobList) != 1 || jobList[0].State != jobs.StateSucceeded {
@@ -139,6 +161,51 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	if got := len(system.transport.Requests()); got != 1 {
 		t.Fatalf("duplicate caused %d deliveries", got)
+	}
+	if got := len(system.transport.ReactionRequests()); got != 1 {
+		t.Fatalf("duplicate caused %d reactions", got)
+	}
+}
+
+func TestReconcileJobsReleasesExpiredWorkerAdmission(t *testing.T) {
+	now := time.Now().UTC()
+	queue := jobs.NewMemoryQueue(func() time.Time { return now })
+	job, _, err := queue.Enqueue(context.Background(), jobs.Spec{
+		OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "channel-test", RootThreadTS: "100.1",
+		SessionID: "session-test", Generation: 1, IdempotencyKey: "message/test", Kind: "agent_response",
+		Input: "test", MaxAttempts: 1, AdmissionReservationID: "admit-test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = queue.Claim(context.Background(), "worker-test", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = queue.Transition(context.Background(), job.ID, job.Lease.Token, jobs.StateRunning, nil); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Second)
+	if _, err = queue.Claim(context.Background(), "worker-test", time.Second); !errors.Is(err, jobs.ErrNoRunnableJob) {
+		t.Fatalf("expired running claim err = %v", err)
+	}
+
+	admissions := &recordingAdmissions{}
+	pipe := &Pipeline{deps: Dependencies{Jobs: queue, Admissions: admissions}}
+	pipe.reconcileJobs(context.Background())
+	if len(admissions.completed) != 1 || admissions.completed[0] != "admit-test" {
+		t.Fatalf("completed admissions = %v", admissions.completed)
+	}
+}
+
+func TestDeliveryDestinationHonorsReplyOutcome(t *testing.T) {
+	job := jobs.Job{RootThreadTS: "100.1"}
+	if got := deliveryThreadTS(job); got != "100.1" {
+		t.Fatalf("thread reply destination = %q", got)
+	}
+	job.ReplyInChannel = true
+	if got := deliveryThreadTS(job); got != "" {
+		t.Fatalf("channel reply destination = %q", got)
 	}
 }
 
@@ -171,9 +238,12 @@ func TestAmbientCrossChannelIncidentIsPredictedButShadowed(t *testing.T) {
 	if len(system.transport.Requests()) != 0 {
 		t.Fatal("shadow decision produced a Slack delivery")
 	}
+	if len(system.transport.ReactionRequests()) != 0 {
+		t.Fatal("shadow decision produced a Slack reaction")
+	}
 }
 
-func TestRestrictedCrossChannelSignalCannotGroundAmbientReply(t *testing.T) {
+func TestRestrictedCrossChannelMessageIsExcludedFromAmbientContext(t *testing.T) {
 	system := newTestSystem(t)
 	alert := envelope("restricted-alert-1", "private-alerts", "300.001", "Confidential outage incident is down")
 	alert.Restricted = true
@@ -191,11 +261,11 @@ func TestRestrictedCrossChannelSignalCannotGroundAmbientReply(t *testing.T) {
 		t.Fatal(err)
 	}
 	decision := records[len(records)-1].Result
-	if decision.Predicted.Outcome != types.OutcomeSilent || decision.Effective.Outcome != types.OutcomeSilent {
-		t.Fatalf("restricted signal grounded a reply: %#v", decision)
+	if decision.Effective.Outcome != types.OutcomeSilent {
+		t.Fatalf("shadow decision produced an effective reply: %#v", decision)
 	}
-	if got := decision.Predicted.ReasonCodes; len(got) != 1 || got[0] != "admission.destination_disclosure_denied" {
-		t.Fatalf("reason codes = %v", got)
+	if len(decision.Predicted.RestrictedSignalIDs) != 0 || len(decision.Predicted.ReleasableEvidenceIDs) != 0 {
+		t.Fatalf("restricted cross-channel evidence entered the decision: %#v", decision.Predicted)
 	}
 }
 
@@ -210,8 +280,10 @@ func TestContextQueryUsesOnlyAuthorizedChannelsAndPolicyRestriction(t *testing.T
 	now := time.Now().UTC()
 	for _, message := range []types.SlackEnvelope{
 		envelope("support-policy", "support", "350.001", "is the system down?"),
-		envelope("private-policy", "private-alerts", "350.002", "Confidential customer incident is down"),
-		envelope("unenrolled-policy", "not-enrolled", "350.003", "Never query this channel"),
+		envelope("public-policy", "public-status", "350.002", "Public status update"),
+		envelope("private-policy", "private-alerts", "350.003", "Confidential customer incident is down"),
+		envelope("management-policy", "management", "350.004", "Private management plan"),
+		envelope("unenrolled-policy", "not-enrolled", "350.005", "Never query this channel"),
 	} {
 		message.EventTime, message.ReceivedAt = now, now
 		if _, err := base.Accept(context.Background(), message); err != nil {
@@ -223,7 +295,9 @@ func TestContextQueryUsesOnlyAuthorizedChannelsAndPolicyRestriction(t *testing.T
 	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
 	for _, policy := range []orgconfig.ChannelPolicy{
 		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "support", Enrolled: true, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
+		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "public-status", Enrolled: true, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
 		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "private-alerts", Enrolled: true, Restricted: true, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
+		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "management", Enrolled: true, Restricted: true, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
 		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "not-enrolled", Enrolled: false, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
 	} {
 		if _, err := scopes.PutChannel(context.Background(), policy); err != nil {
@@ -236,16 +310,52 @@ func TestContextQueryUsesOnlyAuthorizedChannelsAndPolicyRestriction(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recording.recentChannels) != 2 || containsString(recording.recentChannels, "not-enrolled") {
+	if len(recording.recentChannels) != 2 || !containsString(recording.recentChannels, "support") || !containsString(recording.recentChannels, "public-status") {
 		t.Fatalf("pre-query channels=%v", recording.recentChannels)
 	}
 	for _, source := range pack.Sources {
-		if source.ChannelID == "not-enrolled" || source.Text == "Never query this channel" {
-			t.Fatalf("unenrolled source leaked: %#v", source)
+		if source.ChannelID == "not-enrolled" || source.ChannelID == "private-alerts" || source.ChannelID == "management" {
+			t.Fatalf("ineligible source leaked into public destination: %#v", source)
 		}
-		if source.ChannelID == "private-alerts" && (source.DisclosureClass != types.DisclosureRestrictedAwareness || source.Text != "active_incident: true") {
-			t.Fatalf("policy-restricted source was not redacted: %#v", source)
+	}
+
+	privateTarget := envelope("management-target", "management", "350.004", "Private management plan")
+	privatePack, err := p.buildContextPack(context.Background(), privateTarget, "obs-management", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recording.recentChannels) != 3 || !containsString(recording.recentChannels, "management") || !containsString(recording.recentChannels, "support") || !containsString(recording.recentChannels, "public-status") || containsString(recording.recentChannels, "private-alerts") {
+		t.Fatalf("private-destination query channels=%v", recording.recentChannels)
+	}
+	var foundManagement bool
+	for _, source := range privatePack.Sources {
+		if source.ChannelID == "private-alerts" || source.ChannelID == "not-enrolled" {
+			t.Fatalf("other private or unenrolled source leaked into management: %#v", source)
 		}
+		if source.ChannelID == "management" && source.Text == "Private management plan" {
+			foundManagement = true
+		}
+	}
+	if !foundManagement {
+		t.Fatal("current private channel content was not available in its own context")
+	}
+}
+
+func TestRestrictedIncidentDoesNotReconsiderOtherChannels(t *testing.T) {
+	cfg := config.DefaultConfiguration
+	now := time.Now().UTC()
+	recording := &recordingObservationStore{Store: observer.NewMemoryStore(cfg.Retention.Messages, nil)}
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
+	_, err := scopes.PutChannel(context.Background(), orgconfig.ChannelPolicy{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "management", Enrolled: true, Restricted: true, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{deps: Dependencies{Observations: recording, Scopes: scopes}}
+	p.reconsiderLateQuestions(context.Background(), models.Observation{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "management", SlackEventTime: now})
+	if recording.lateCandidateCalls != 0 {
+		t.Fatalf("restricted incident triggered %d cross-channel reconsideration queries", recording.lateCandidateCalls)
 	}
 }
 
@@ -260,7 +370,7 @@ func containsString(values []string, target string) bool {
 
 func TestAgentInputContainsOnlyDestinationSafeContext(t *testing.T) {
 	input := buildAgentInput("is it down?", types.ContextPackRevision{Sources: []types.ContextSource{
-		{ID: "system/gating", Partition: types.PartitionSystem, Text: "internal gate", DisclosureClass: types.DisclosureDestinationSafe},
+		{ID: "system/classifier", Partition: types.PartitionSystem, Text: "internal classifier", DisclosureClass: types.DisclosureDestinationSafe},
 		{ID: "alerts/1", ChannelID: "alerts", Partition: types.PartitionEvidence, Text: "Production incident active", DisclosureClass: types.DisclosureDestinationSafe},
 		{ID: "private/2", ChannelID: "private", Partition: types.PartitionSituation, Text: "restricted details", DisclosureClass: types.DisclosureRestrictedAwareness},
 	}})
@@ -279,7 +389,7 @@ func TestSocialChatterStaysSilent(t *testing.T) {
 	if err != nil || len(records) != 1 {
 		t.Fatalf("records = %#v, err = %v", records, err)
 	}
-	if records[0].Result.Effective.Outcome != types.OutcomeSilent || len(system.transport.Requests()) != 0 {
+	if records[0].Result.Effective.Outcome != types.OutcomeSilent || len(system.transport.Requests()) != 0 || len(system.transport.ReactionRequests()) != 0 {
 		t.Fatal("social chatter produced output")
 	}
 }
@@ -298,7 +408,7 @@ func TestLateCrossChannelAlertReconsidersEarlierSupportQuestionOnce(t *testing.T
 	}
 	waitFor(t, func() bool { records, _ := system.decisions.List(context.Background()); return len(records) == 3 })
 	records, _ := system.decisions.List(context.Background())
-	var reconsidered *chatgating.DecisionRecord
+	var reconsidered *classifier.DecisionRecord
 	for index := range records {
 		if records[index].ObservationID == records[0].ObservationID && records[index].DecisionRevision == 2 {
 			reconsidered = &records[index]

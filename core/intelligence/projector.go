@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/telemetryos/tos-tag/core/database"
 	"github.com/telemetryos/tos-tag/models"
@@ -114,7 +114,7 @@ func (p *Mongo) Project(ctx context.Context, observation models.Observation) (Re
 	if message.Restricted {
 		link.DerivedCollection = models.CollectionRestrictedSignals
 	}
-	_, err = p.db.Collection(models.CollectionDerivations).UpdateOne(ctx, bson.M{"organization_id": link.OrganizationID, "source_id": link.SourceID, "derived_collection": link.DerivedCollection, "derived_id": link.DerivedID}, bson.M{"$setOnInsert": link}, options.Update().SetUpsert(true))
+	_, err = p.db.Collection(models.CollectionDerivations).UpdateOne(ctx, bson.M{"organization_id": link.OrganizationID, "source_id": link.SourceID, "derived_collection": link.DerivedCollection, "derived_id": link.DerivedID}, bson.M{"$setOnInsert": link}, options.UpdateOne().SetUpsert(true))
 	if err != nil {
 		return Result{}, err
 	}

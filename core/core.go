@@ -13,7 +13,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/approvals"
 	"github.com/telemetryos/tos-tag/core/audit"
 	"github.com/telemetryos/tos-tag/core/channelconfig"
-	"github.com/telemetryos/tos-tag/core/chatgating"
+	"github.com/telemetryos/tos-tag/core/classifier"
 	"github.com/telemetryos/tos-tag/core/config"
 	"github.com/telemetryos/tos-tag/core/contextpacks"
 	"github.com/telemetryos/tos-tag/core/database"
@@ -67,7 +67,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	sessionStore := sessions.NewMongoStore(db)
 	jobQueue := jobs.NewMongoQueue(db)
 	deliveryQueue := deliveries.NewMongoQueue(db)
-	decisionStore := chatgating.NewMongoDecisionStore(db)
+	decisionStore := classifier.NewMongoDecisionStore(db)
 	contextBuilder, err := contextpacks.New(cfg.ContextPacks, contextpacks.WordTokenizer{})
 	if err != nil {
 		return nil, err
@@ -119,18 +119,11 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 			return nil, fmt.Errorf("construct keystore: %w", err)
 		}
 	}
-	var skillSnapshots []marketplace.SkillSnapshot
-	if cfg.Marketplaces.SkillRoot != "" {
-		skillSnapshots, err = marketplace.LoadPluginMarketplace(cfg.Marketplaces.SkillRoot, cfg.Marketplaces.CatalogPath)
-		if err != nil {
-			return nil, fmt.Errorf("load skill marketplace: %w", err)
-		}
-	}
-	marketplaceRegistry, err := marketplace.NewRegistry(skillSnapshots)
+	skillSnapshots, injectedSkillSnapshots, err := loadBehavioralSkills(cfg.Marketplaces)
 	if err != nil {
 		return nil, err
 	}
-	injectedSkillSnapshots, err := selectSkillSnapshots(skillSnapshots, cfg.Marketplaces.InjectedSkills)
+	marketplaceRegistry, err := marketplace.NewRegistry(skillSnapshots)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +152,6 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 		}
 	}
 	var responseHarness harness.Harness = harness.NewFake()
-	var gatingHarness harness.Harness = responseHarness
 	if cfg.OpenCode.Enabled {
 		switch cfg.OpenCode.Mode {
 		case "local_worker":
@@ -168,30 +160,32 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 				return nil, fmt.Errorf("construct OpenCode worker manager: %w", workerErr)
 			}
 			responseHarness, err = harness.NewWorkerOpenCode(harness.WorkerOpenCodeOptions{Manager: workerManager, Command: cfg.OpenCode.Command, Skills: injectedSkillSnapshots, Timeout: cfg.OpenCode.Timeout, ToolBridge: toolBridge, ToolIDs: allowedToolIDs})
-			if err == nil {
-				gatingHarness, err = harness.NewWorkerOpenCode(harness.WorkerOpenCodeOptions{Manager: workerManager, Command: cfg.OpenCode.Command, Timeout: cfg.OpenCode.Timeout})
-			}
 		case "external":
 			responseHarness, err = harness.NewOpenCode(harness.OpenCodeOptions{Enabled: true, BaseURL: cfg.OpenCode.BaseURL, Username: cfg.OpenCode.Username, Password: cfg.OpenCode.Password, Timeout: cfg.OpenCode.Timeout})
-			gatingHarness = responseHarness
 		}
 		if err != nil {
 			return nil, err
 		}
 	}
-	responseRouter, err := modelrouter.NewRegistry([]types.ModelProfile{{ID: cfg.Models.DefaultProfile, ProviderID: cfg.Models.DefaultProvider, ModelID: cfg.Models.DefaultModel, Variant: cfg.Models.DefaultVariant, RequiredCapabilities: []string{"structured"}, AllowedDataClasses: []string{"internal"}, MaxInputTokens: 200000, MaxOutputTokens: 16000, Enabled: true}}, nil, nil, cfg.Models.DefaultProfile, "routing/v1")
+	responseRouter, err := modelrouter.NewRegistry([]types.ModelProfile{{ID: cfg.Models.DefaultProfile, ProviderID: cfg.Models.DefaultProvider, ModelID: cfg.Models.DefaultModel, Variant: cfg.Models.DefaultVariant, ProviderOptions: map[string]any{"strength": "strong"}, RequiredCapabilities: []string{"structured"}, AllowedDataClasses: []string{"internal"}, MaxInputTokens: 200000, MaxOutputTokens: 16000, Enabled: true}}, nil, nil, cfg.Models.DefaultProfile, "routing/v1")
 	if err != nil {
 		return nil, err
 	}
 	responseRouter.AttachStore(modelrouter.NewMongoStore(db))
-	var gateClassifier chatgating.Classifier = chatgating.DeterministicClassifier{}
-	if cfg.OpenCode.Enabled {
-		gateClassifier, err = chatgating.NewHarnessClassifier(gatingHarness, responseRouter)
+	var ambientClassifier classifier.Classifier = classifier.DeterministicClassifier{}
+	if cfg.Classifier.Provider == "openai" {
+		ambientClassifier, err = classifier.NewOpenAIClassifier(classifier.OpenAIOptions{
+			BaseURL: cfg.Classifier.BaseURL, APIKey: cfg.Classifier.OpenAIAPIKey,
+			Model: cfg.Classifier.Model, ReasoningEffort: cfg.Classifier.ReasoningEffort,
+			Timeout: cfg.Classifier.Timeout, MaxOutputTokens: cfg.Classifier.MaxOutputTokens,
+			ReactionEmojis: cfg.Classifier.ReactionEmojis, AgentProfiles: responseRouter,
+		})
 		if err != nil {
 			return nil, err
 		}
+		ambientClassifier = loggedClassifier{next: ambientClassifier, logger: logger, usage: usageRecorder, providerID: "openai", modelID: cfg.Classifier.Model}
 	}
-	gate, err := chatgating.New(gateClassifier, true, cfg.Gating.AssistThreshold, cfg.Gating.ChannelReplyThreshold)
+	classificationService, err := classifier.New(ambientClassifier, cfg.Classifier.Mode == "shadow", cfg.Classifier.AssistThreshold, cfg.Classifier.ChannelReplyThreshold)
 	if err != nil {
 		return nil, err
 	}
@@ -205,11 +199,13 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 		ingress, transport = stubIngress, stubTransport
 	} else {
 		liveIngress, liveDelivery, liveErr := slack.NewLive(slack.LiveOptions{
-			OrganizationID: cfg.Slack.OrganizationID,
-			TeamID:         cfg.Slack.TeamID,
-			AppToken:       cfg.Slack.AppToken,
-			BotToken:       cfg.Slack.BotToken,
-			BotUserID:      cfg.Slack.BotUserID,
+			OrganizationID:    cfg.Slack.OrganizationID,
+			AppID:             cfg.Slack.AppID,
+			TeamID:            cfg.Slack.TeamID,
+			AppLevelToken:     cfg.Slack.AppLevelToken,
+			BotUserOAuthToken: cfg.Slack.BotUserOAuthToken,
+			BotUserID:         cfg.Slack.BotUserID,
+			Logger:            logger,
 		}, renderer)
 		if liveErr != nil {
 			return nil, fmt.Errorf("construct live Slack adapters: %w", liveErr)
@@ -220,13 +216,21 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 		Config: cfg, Logger: logger, Ingress: ingress, Transport: transport,
 		Observations: observations, Sessions: sessionStore, Jobs: jobQueue,
 		Decisions: decisionStore, Deliveries: deliveryQueue, ContextPacks: contextBuilder, ContextStore: contextStore,
-		Gate: gate, Renderer: renderer, Scopes: scopeResolver, Intelligence: intelligenceProjector, Admissions: admissionController, ModelRouter: responseRouter, Harness: responseHarness, Usage: usageRecorder, ChannelConfig: channelConfiguration, Audit: auditChain,
+		Classifier: classificationService, Renderer: renderer, Scopes: scopeResolver, Intelligence: intelligenceProjector, Admissions: admissionController, ModelRouter: responseRouter, Harness: responseHarness, Usage: usageRecorder, ChannelConfig: channelConfiguration, Audit: auditChain,
 	})
 	if err != nil {
 		return nil, err
 	}
+	var statusIngress server.StubIngress
+	var statusTransport server.StubDelivery
+	if stubIngress != nil {
+		statusIngress = stubIngress
+	}
+	if stubTransport != nil {
+		statusTransport = stubTransport
+	}
 	srv, err := server.New(server.Dependencies{
-		Config: cfg, Logger: logger, Health: db, Ingress: stubIngress, Transport: stubTransport,
+		Config: cfg, Logger: logger, Health: db, Ingress: statusIngress, Transport: statusTransport,
 		Jobs: jobQueue, Deliveries: deliveryQueue, Decisions: decisionStore, Version: Version,
 		Routes: responseRouter, Organizations: organizationStore, Retention: retentionJanitor, Records: managementRecords, ChannelConfig: channelConfiguration, Marketplaces: marketplaceRegistry, ToolMarketplaces: toolMarketplaceRegistry, Intelligence: intelligenceProjector, Secrets: secretStore, Audit: auditChain, Approvals: approvalStore, Routines: routineStore,
 	})
@@ -234,6 +238,110 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 		return nil, err
 	}
 	return &Core{Config: cfg, Logger: logger, database: db, pipeline: pipe, server: srv, retention: retentionJanitor, router: responseRouter, toolBridge: toolBridge, routines: routineService}, nil
+}
+
+type loggedClassifier struct {
+	next       classifier.Classifier
+	logger     *blackbox.Logger
+	usage      usage.Recorder
+	providerID string
+	modelID    string
+}
+
+func (c loggedClassifier) Decide(ctx context.Context, target classifier.Target, pack types.ContextPackRevision) (types.ClassificationDecision, error) {
+	started := time.Now()
+	c.logger.WithCtx(blackbox.Ctx{
+		"organization_id": target.Envelope.OrganizationID,
+		"channel_id":      target.Envelope.ChannelID,
+		"observation_id":  target.ObservationID,
+		"context_pack_id": pack.ID,
+		"context_tokens":  pack.TotalTokens,
+		"context_sources": len(pack.Sources),
+		"provider_id":     c.providerID,
+		"model_id":        c.modelID,
+	}).Info("OpenAI classifier request started")
+	decision, err := c.next.Decide(ctx, target, pack)
+	if err != nil {
+		duration := time.Since(started)
+		c.logger.WithCtx(blackbox.Ctx{
+			"organization_id":  target.Envelope.OrganizationID,
+			"channel_id":       target.Envelope.ChannelID,
+			"observation_id":   target.ObservationID,
+			"classifier_stage": classifier.ErrorStage(err),
+			"classifier_code":  classifier.ErrorCode(err),
+			"error_type":       fmt.Sprintf("%T", err),
+			"duration_ms":      duration.Milliseconds(),
+		}).Warn("OpenAI classifier failed; deterministic fallback selected")
+		if c.usage != nil {
+			_ = c.usage.Record(ctx, usage.Event{OrganizationID: target.Envelope.OrganizationID, Category: "classifier", ProviderID: c.providerID, ModelID: c.modelID, Calls: 1, DurationMS: duration.Milliseconds()})
+		}
+		fallback, fallbackErr := (classifier.DeterministicClassifier{}).Decide(ctx, target, pack)
+		if fallbackErr != nil {
+			return types.ClassificationDecision{}, err
+		}
+		fallback.ReasonCodes = append([]string{"classifier.deterministic_fallback"}, fallback.ReasonCodes...)
+		return fallback, nil
+	}
+	duration := time.Since(started)
+	c.logger.WithCtx(blackbox.Ctx{
+		"organization_id":             target.Envelope.OrganizationID,
+		"channel_id":                  target.Envelope.ChannelID,
+		"observation_id":              target.ObservationID,
+		"classifier_response_id":      decision.ClassifierResponseID,
+		"classifier_model":            decision.ClassifierModel,
+		"classifier_reasoning_effort": decision.ClassifierReasoningEffort,
+		"input_tokens":                decision.ClassifierInputTokens,
+		"output_tokens":               decision.ClassifierOutputTokens,
+		"duration_ms":                 duration.Milliseconds(),
+	}).Info("OpenAI classifier request completed")
+	if c.usage != nil {
+		_ = c.usage.Record(ctx, usage.Event{OrganizationID: target.Envelope.OrganizationID, Category: "classifier", ProviderID: c.providerID, ModelID: c.modelID, InputTokens: decision.ClassifierInputTokens, OutputTokens: decision.ClassifierOutputTokens, Calls: 1, DurationMS: duration.Milliseconds()})
+	}
+	return decision, err
+}
+
+func loadBehavioralSkills(cfg config.MarketplaceConfig) ([]marketplace.SkillSnapshot, []marketplace.SkillSnapshot, error) {
+	var available []marketplace.SkillSnapshot
+	var automaticallyInjected []marketplace.SkillSnapshot
+	if cfg.SkillRoot != "" {
+		loaded, err := marketplace.LoadPluginMarketplace(cfg.SkillRoot, cfg.CatalogPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("load skill marketplace: %w", err)
+		}
+		available = append(available, loaded...)
+	}
+	for _, source := range []struct {
+		label       string
+		root        string
+		catalogPath string
+		plugin      string
+	}{
+		{label: "headless", root: cfg.HeadlessRoot, catalogPath: cfg.HeadlessCatalogPath, plugin: cfg.HeadlessPlugin},
+		{label: "base", root: cfg.BaseRoot, catalogPath: cfg.BaseCatalogPath, plugin: cfg.BasePlugin},
+	} {
+		if source.root == "" {
+			continue
+		}
+		loaded, err := marketplace.LoadPlugin(source.root, source.catalogPath, source.plugin)
+		if err != nil {
+			return nil, nil, fmt.Errorf("load %s behavioral plugin: %w", source.label, err)
+		}
+		available = append(available, loaded...)
+		automaticallyInjected = append(automaticallyInjected, loaded...)
+	}
+	selected, err := selectSkillSnapshots(available, cfg.InjectedSkills)
+	if err != nil {
+		return nil, nil, err
+	}
+	selected = append(selected, automaticallyInjected...)
+	if len(selected) > 0 {
+		registry, err := marketplace.NewRegistry(selected)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve injected behavioral plugins: %w", err)
+		}
+		selected = registry.List()
+	}
+	return available, selected, nil
 }
 
 func selectSkillSnapshots(available []marketplace.SkillSnapshot, allowlist []string) ([]marketplace.SkillSnapshot, error) {
@@ -310,7 +418,7 @@ func (c *Core) Start(ctx context.Context) error {
 		_ = c.database.Disconnect(stopCtx)
 		return fmt.Errorf("start Slack ingress: %w", err)
 	}
-	c.Logger.Infof("tos-tag started at %s with Slack mode %s and shadow gating", c.server.Addr(), c.Config.Slack.Mode)
+	c.Logger.Infof("tos-tag started at %s with Slack mode %s and %s %s classifier", c.server.Addr(), c.Config.Slack.Mode, c.Config.Classifier.Mode, c.Config.Classifier.Provider)
 	return nil
 }
 

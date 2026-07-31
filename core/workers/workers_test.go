@@ -77,6 +77,60 @@ func TestAuthorizedSkillsAreHashVerifiedAndReadOnly(t *testing.T) {
 	}
 }
 
+func TestSharedSkillReferencesAreHashVerifiedReadOnlyAndScriptsStayExcluded(t *testing.T) {
+	root := t.TempDir()
+	skillsRoot := filepath.Join(root, "plugins", "headless", "skills")
+	for _, directory := range []string{
+		filepath.Join(skillsRoot, "queue"),
+		filepath.Join(skillsRoot, ".references"),
+		filepath.Join(skillsRoot, ".scripts"),
+	} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(skillsRoot, "queue", "SKILL.md"), []byte("Read ../.references/common.md"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillsRoot, ".references", "common.md"), []byte("# Common\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillsRoot, ".scripts", "not-injected.sh"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "marketplace.json"), []byte(`{"name":"agents","plugins":[{"name":"headless","source":"./plugins/headless","version":"1.0.0"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err := marketplace.LoadPlugin(root, "marketplace.json", "headless")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, _ := NewLocal(t.TempDir(), "/usr/bin:/bin")
+	workspace, err := manager.Provision(context.Background(), Spec{JobID: "j", AttemptID: "a", Command: []string{"/bin/sh", "-c", "sleep 30"}, Skills: snapshots, WallTime: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Terminate(context.Background(), workspace)
+	for _, path := range []string{
+		filepath.Join(workspace.SkillsDir, "queue", "SKILL.md"),
+		filepath.Join(workspace.SkillsDir, ".references", "common.md"),
+	} {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o400 {
+			t.Fatalf("materialized file %s info=%v err=%v", path, info, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(workspace.SkillsDir, ".scripts")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scripts directory was injected: %v", err)
+	}
+
+	tampered := append([]marketplace.SkillSnapshot(nil), snapshots...)
+	tampered[0].SharedHash = "sha256:bad"
+	if _, err := manager.Provision(context.Background(), Spec{JobID: "j2", AttemptID: "a2", Command: []string{"/bin/true"}, Skills: tampered, WallTime: time.Second}); !errors.Is(err, ErrUnsafeSpec) {
+		t.Fatalf("tampered shared snapshot accepted: %v", err)
+	}
+}
+
 func TestCustomToolIsReadOnlyAndNarrowlyAllowed(t *testing.T) {
 	manager, _ := NewLocal(t.TempDir(), "/usr/bin:/bin")
 	workspace, err := manager.Provision(context.Background(), Spec{JobID: "j", AttemptID: "a", Command: []string{"/bin/sh", "-c", "sleep 30"}, CustomTools: map[string][]byte{"tos_tag_tool.ts": []byte("export default {}\n")}, WallTime: time.Minute})
@@ -128,6 +182,22 @@ func (r *testRevoker) RevokeAttempt(_ context.Context, attempt string) error {
 	r.attempt = attempt
 	return nil
 }
+
+func TestTypedNilCapabilityRevokerIsIgnored(t *testing.T) {
+	var revoker *testRevoker
+	manager, err := NewLocalWithDependencies(t.TempDir(), "/usr/bin:/bin", revoker, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := manager.Provision(context.Background(), Spec{JobID: "job", AttemptID: "attempt", Command: []string{"/bin/sh", "-c", "sleep 30"}, WallTime: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Terminate(context.Background(), workspace); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTerminationRevokesAttemptCapability(t *testing.T) {
 	revoker := &testRevoker{}
 	recorder := usage.NewMemory()

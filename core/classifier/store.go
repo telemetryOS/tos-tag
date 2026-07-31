@@ -1,4 +1,4 @@
-package chatgating
+package classifier
 
 import (
 	"context"
@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/telemetryos/tos-tag/core/database"
 	"github.com/telemetryos/tos-tag/models"
@@ -106,7 +106,7 @@ func (s *MongoDecisionStore) Record(ctx context.Context, record DecisionRecord) 
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = time.Now().UTC()
 	}
-	doc := models.GatingDecision{PublicID: record.ID, OrganizationID: record.OrganizationID, ObservationID: record.ObservationID, DecisionRevision: record.DecisionRevision, ContextPackRevisionID: string(record.ContextPackRevisionID), OrganizationWatermark: record.OrganizationWatermark, Predicted: record.Result.Predicted, Effective: record.Result.Effective, Shadowed: record.Result.Shadowed, CreatedAt: record.CreatedAt}
+	doc := models.ClassificationDecision{PublicID: record.ID, OrganizationID: record.OrganizationID, ObservationID: record.ObservationID, DecisionRevision: record.DecisionRevision, ContextPackRevisionID: string(record.ContextPackRevisionID), OrganizationWatermark: record.OrganizationWatermark, Predicted: record.Result.Predicted, Effective: record.Result.Effective, Shadowed: record.Result.Shadowed, CreatedAt: record.CreatedAt}
 	_, err := s.db.Collection(models.CollectionDecisions).InsertOne(ctx, doc)
 	if err == nil {
 		return record, true, nil
@@ -114,7 +114,7 @@ func (s *MongoDecisionStore) Record(ctx context.Context, record DecisionRecord) 
 	if !mongo.IsDuplicateKeyError(err) {
 		return DecisionRecord{}, false, fmt.Errorf("record decision: %w", err)
 	}
-	var existing models.GatingDecision
+	var existing models.ClassificationDecision
 	if err := s.db.Collection(models.CollectionDecisions).FindOne(ctx, bson.M{"organization_id": record.OrganizationID, "observation_id": record.ObservationID, "decision_revision": record.DecisionRevision}).Decode(&existing); err != nil {
 		return DecisionRecord{}, false, fmt.Errorf("resolve decision: %w", err)
 	}
@@ -138,7 +138,7 @@ func (s *MongoDecisionStore) list(ctx context.Context, filter bson.M) ([]Decisio
 		return nil, err
 	}
 	defer cursor.Close(ctx)
-	var docs []models.GatingDecision
+	var docs []models.ClassificationDecision
 	if err := cursor.All(ctx, &docs); err != nil {
 		return nil, err
 	}
@@ -149,8 +149,8 @@ func (s *MongoDecisionStore) list(ctx context.Context, filter bson.M) ([]Decisio
 	return result, nil
 }
 
-func decisionFromModel(doc models.GatingDecision) DecisionRecord {
-	var predicted, effective types.ChatGatingDecision
+func decisionFromModel(doc models.ClassificationDecision) DecisionRecord {
+	var predicted, effective types.ClassificationDecision
 	if encoded, err := bson.Marshal(doc.Predicted); err == nil {
 		_ = bson.Unmarshal(encoded, &predicted)
 	}

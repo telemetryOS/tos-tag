@@ -7,9 +7,9 @@ import (
 	"sort"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/telemetryos/tos-tag/core/database"
 	"github.com/telemetryos/tos-tag/models"
@@ -194,7 +194,7 @@ func (s *MongoStore) applyProjection(ctx context.Context, envelope types.SlackEn
 		"text":               choose(text, "$text"),
 		"projection_version": bson.M{"$cond": bson.A{newer, bson.M{"$add": bson.A{bson.M{"$ifNull": bson.A{"$projection_version", 0}}, 1}}, "$projection_version"}},
 	}}}}
-	if _, err := s.db.Collection(models.CollectionMessages).UpdateOne(ctx, filter, update, options.Update().SetUpsert(true)); err != nil {
+	if _, err := s.db.Collection(models.CollectionMessages).UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true)); err != nil {
 		return fmt.Errorf("apply message projection: %w", err)
 	}
 	return nil
@@ -264,21 +264,16 @@ func (s *MongoStore) CurrentMessage(ctx context.Context, organizationID, teamID,
 }
 
 func (s *MongoStore) Channels(ctx context.Context, organizationID string) ([]string, error) {
-	values, err := s.db.Collection(models.CollectionMessages).Distinct(ctx, "channel_id", bson.M{
+	var values []string
+	err := s.db.Collection(models.CollectionMessages).Distinct(ctx, "channel_id", bson.M{
 		"organization_id": organizationID,
 		"expires_at":      bson.M{"$gt": s.now().UTC()},
-	})
+	}).Decode(&values)
 	if err != nil {
 		return nil, fmt.Errorf("list observed channels: %w", err)
 	}
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		if channel, ok := value.(string); ok {
-			result = append(result, channel)
-		}
-	}
-	sort.Strings(result)
-	return result, nil
+	sort.Strings(values)
+	return values, nil
 }
 
 func (s *MongoStore) MarkOutput(ctx context.Context, observationID, jobID, deliveryID string) (bool, error) {

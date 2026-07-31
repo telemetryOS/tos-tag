@@ -1,4 +1,4 @@
-package chatgating
+package classifier
 
 import (
 	"context"
@@ -73,6 +73,15 @@ func TestMentionModeSilencesAmbientQuestion(t *testing.T) {
 	}
 }
 
+func TestProactiveModeActsOnActionableStatementInChannel(t *testing.T) {
+	got := target("the deployment failed and needs attention")
+	got.Mode = types.ModeProactive
+	result := newService(t, false).Decide(context.Background(), got, types.ContextPackRevision{})
+	if result.Effective.Outcome != types.OutcomeReplyInChannel || result.Effective.Confidence < 0.98 {
+		t.Fatalf("proactive statement was not admitted in-channel: %#v", result)
+	}
+}
+
 func TestObserveModeSilencesDirectMentionAndActiveThread(t *testing.T) {
 	for _, activeThread := range []bool{false, true} {
 		got := target("@tag help")
@@ -83,5 +92,27 @@ func TestObserveModeSilencesDirectMentionAndActiveThread(t *testing.T) {
 		if result.Effective.Outcome != types.OutcomeSilent {
 			t.Fatalf("observe mode produced output (active_thread=%v): %#v", activeThread, result)
 		}
+	}
+}
+
+func TestObserveModeRecordsAssistPredictionOnlyInGlobalShadow(t *testing.T) {
+	got := target("can anyone help?")
+	got.Mode = types.ModeObserve
+	result := newService(t, true).Decide(context.Background(), got, types.ContextPackRevision{})
+	if result.Predicted.Outcome != types.OutcomeReplyInThread || result.Effective.Outcome != types.OutcomeSilent || !result.Shadowed {
+		t.Fatalf("observe shadow prediction was not safely recorded: %#v", result)
+	}
+	if result.Effective.ReasonCodes[0] != "admission.channel_mode" {
+		t.Fatalf("observe authority was not preserved: %#v", result)
+	}
+}
+
+func TestObserveShadowStillSuppressesSelfAuthoredMessagesBeforeClassification(t *testing.T) {
+	got := target("can anyone help?")
+	got.Mode = types.ModeObserve
+	got.SelfAuthored = true
+	result := newService(t, true).Decide(context.Background(), got, types.ContextPackRevision{})
+	if result.Predicted.Outcome != types.OutcomeSilent || result.Shadowed || result.Effective.ReasonCodes[0] != "suppress.self_message" {
+		t.Fatalf("self-authored observe event reached shadow classification: %#v", result)
 	}
 }

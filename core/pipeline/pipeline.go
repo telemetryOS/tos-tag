@@ -16,7 +16,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/admission"
 	"github.com/telemetryos/tos-tag/core/audit"
 	"github.com/telemetryos/tos-tag/core/channelconfig"
-	"github.com/telemetryos/tos-tag/core/chatgating"
+	"github.com/telemetryos/tos-tag/core/classifier"
 	"github.com/telemetryos/tos-tag/core/config"
 	"github.com/telemetryos/tos-tag/core/contextpacks"
 	"github.com/telemetryos/tos-tag/core/deliveries"
@@ -41,11 +41,11 @@ type Dependencies struct {
 	Observations observer.Store
 	Sessions     sessions.Store
 	Jobs         jobs.Queue
-	Decisions    chatgating.DecisionStore
+	Decisions    classifier.DecisionStore
 	Deliveries   deliveries.Queue
 	ContextPacks *contextpacks.Builder
 	ContextStore contextpacks.Store
-	Gate         *chatgating.Service
+	Classifier   *classifier.Service
 	Renderer     *deliveries.Renderer
 	Scopes       interface {
 		orgconfig.Resolver
@@ -78,7 +78,7 @@ var (
 )
 
 func New(deps Dependencies) (*Pipeline, error) {
-	if deps.Config == nil || deps.Ingress == nil || deps.Transport == nil || deps.Observations == nil || deps.Sessions == nil || deps.Jobs == nil || deps.Decisions == nil || deps.Deliveries == nil || deps.ContextPacks == nil || deps.Gate == nil || deps.Renderer == nil {
+	if deps.Config == nil || deps.Ingress == nil || deps.Transport == nil || deps.Observations == nil || deps.Sessions == nil || deps.Jobs == nil || deps.Decisions == nil || deps.Deliveries == nil || deps.ContextPacks == nil || deps.Classifier == nil || deps.Renderer == nil {
 		return nil, fmt.Errorf("pipeline dependencies are incomplete")
 	}
 	if deps.Logger == nil {
@@ -100,15 +100,24 @@ func (p *Pipeline) StartWorkers(parent context.Context) error {
 	go func() { defer p.wg.Done(); p.runDecisions(ctx) }()
 	go func() { defer p.wg.Done(); p.runJobs(ctx) }()
 	go func() { defer p.wg.Done(); p.runDeliveries(ctx) }()
+	p.deps.Logger.Info("pipeline workers started")
 	return nil
 }
 
 func (p *Pipeline) StartIngress(ctx context.Context) error {
-	return p.deps.Ingress.Start(ctx, p.HandleEnvelope)
+	p.deps.Logger.Info("Slack ingress start requested")
+	if err := p.deps.Ingress.Start(ctx, p.HandleEnvelope); err != nil {
+		p.deps.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Error("Slack ingress start failed")
+		return err
+	}
+	p.deps.Logger.Info("Slack ingress started")
+	return nil
 }
 
 func (p *Pipeline) Stop(ctx context.Context) error {
+	p.deps.Logger.Info("pipeline stop requested")
 	if err := p.deps.Ingress.Stop(ctx); err != nil {
+		p.deps.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Error("Slack ingress stop failed")
 		return err
 	}
 	p.mu.Lock()
@@ -120,6 +129,7 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	go func() { p.wg.Wait(); close(done) }()
 	select {
 	case <-done:
+		p.deps.Logger.Info("pipeline workers stopped")
 		if closer, ok := p.deps.Harness.(interface{ Close(context.Context) error }); ok {
 			return closer.Close(ctx)
 		}
@@ -130,10 +140,15 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 }
 
 func (p *Pipeline) HandleEnvelope(ctx context.Context, envelope types.SlackEnvelope) (slack.AcceptResult, error) {
+	started := time.Now()
+	eventLogger := p.deps.Logger.WithCtx(envelopeLogContext(envelope))
+	eventLogger.Info("Slack envelope persistence started")
 	accepted, err := p.deps.Observations.Accept(ctx, envelope)
 	if err != nil {
+		eventLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err)}).Error("Slack envelope persistence failed")
 		return slack.AcceptResult{}, err
 	}
+	eventLogger.WithCtx(blackbox.Ctx{"observation_id": accepted.Observation.PublicID, "duplicate": accepted.Duplicate, "duration_ms": time.Since(started).Milliseconds()}).Info("Slack envelope durably persisted")
 	p.appendReceipt(ctx, audit.AppendRequest{OrganizationID: envelope.OrganizationID, Type: "observation.accepted", ResourceID: accepted.Observation.PublicID, RetentionEpoch: retentionEpoch(accepted.Observation.ExpiresAt), IdempotencyKey: "observation/" + accepted.Observation.PublicID + "/accepted", Metadata: map[string]any{"channel_id": envelope.ChannelID, "event_type": string(envelope.Kind)}, Content: []byte(envelope.Text)})
 	return slack.AcceptResult{Duplicate: accepted.Duplicate}, nil
 }
@@ -161,15 +176,20 @@ func (p *Pipeline) processOneDecision(ctx context.Context) bool {
 		p.deps.Logger.Error("claim observation", err)
 		return false
 	}
+	observationLogger := p.deps.Logger.WithCtx(observationLogContext(observation))
+	observationLogger.Info("observation decision claimed")
 	if err := p.decideObservation(ctx, observation, 1); err != nil {
 		if errors.Is(err, errScopeDenied) {
+			observationLogger.Info("observation suppressed by scope policy")
 			return true
 		}
-		p.deps.Logger.Error("decide observation", err)
+		observationLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Error("observation decision failed")
 		return false
 	}
 	if err := p.deps.Observations.CompleteDecision(ctx, observation.PublicID, observation.DecisionLeaseToken, "resolved", "decided"); err != nil {
-		p.deps.Logger.Error("complete observation decision", err)
+		observationLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Error("observation decision completion failed")
+	} else {
+		observationLogger.Info("observation decision completed")
 	}
 	if observation.EventType == string(types.SlackEventMessage) && containsIncident(observation.Text) {
 		p.reconsiderLateQuestions(ctx, observation)
@@ -182,6 +202,7 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 	// Live installations fail closed if an event names another workspace. Scope
 	// membership refresh can narrow this further without changing ack timing.
 	if p.deps.Config.Slack.LiveEnabled && (envelope.OrganizationID != p.deps.Config.Slack.OrganizationID || envelope.TeamID != p.deps.Config.Slack.TeamID) {
+		p.deps.Logger.WithCtx(observationLogContext(observation)).Warn("observation denied for workspace mismatch")
 		if revision > 1 {
 			return errScopeDenied
 		}
@@ -195,6 +216,7 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 	if p.deps.Scopes != nil {
 		policy, err := p.deps.Scopes.Resolve(ctx, envelope.OrganizationID, envelope.TeamID, envelope.ChannelID)
 		if err != nil || !authorizedPolicy(policy, time.Now().UTC()) {
+			p.deps.Logger.WithCtx(observationLogContext(observation)).Warn("observation denied by channel policy")
 			if revision > 1 {
 				return errScopeDenied
 			}
@@ -205,9 +227,10 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 		}
 		mode = policy.ParticipationMode
 		channelPolicy = &policy
-		envelope.Restricted = policy.Restricted
-		observation.Restricted = policy.Restricted
-		if err := p.deps.Observations.SetRestricted(ctx, observation.PublicID, policy.Restricted); err != nil {
+		restricted := envelope.Restricted || policy.Restricted
+		envelope.Restricted = restricted
+		observation.Restricted = restricted
+		if err := p.deps.Observations.SetRestricted(ctx, observation.PublicID, restricted); err != nil {
 			return fmt.Errorf("persist channel disclosure class: %w", err)
 		}
 	}
@@ -237,7 +260,7 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 			return fmt.Errorf("persist context pack: %w", err)
 		}
 	}
-	target := chatgating.Target{
+	target := classifier.Target{
 		ObservationID: observation.PublicID,
 		Envelope:      envelope,
 		Mode:          mode,
@@ -246,23 +269,41 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 		Deleted:       envelope.Kind == types.SlackEventDelete,
 		SelfAuthored:  envelope.BotID == "tos-tag-stub",
 	}
-	decision := p.deps.Gate.Decide(ctx, target, pack)
+	decision := p.deps.Classifier.Decide(ctx, target, pack)
 	reservationID := ""
 	if createsJob(decision.Effective.Outcome) && p.deps.Admissions != nil && channelPolicy != nil {
 		reservationID, err = p.deps.Admissions.Admit(ctx, *channelPolicy)
 		if err != nil {
-			decision = chatgating.Suppress(decision, admissionReason(err))
+			decision = classifier.Suppress(decision, admissionReason(err))
 			reservationID = ""
 		}
 	}
-	recordedDecision, _, err := p.deps.Decisions.Record(ctx, chatgating.DecisionRecord{
+	recordedDecision, _, err := p.deps.Decisions.Record(ctx, classifier.DecisionRecord{
 		OrganizationID: envelope.OrganizationID, ObservationID: observation.PublicID, DecisionRevision: int64(revision),
 		ContextPackRevisionID: pack.ID, OrganizationWatermark: pack.OrganizationWatermark, Result: decision,
 	})
 	if err != nil {
-		return fmt.Errorf("record gating decision: %w", err)
+		return fmt.Errorf("record classification decision: %w", err)
 	}
+	p.deps.Logger.WithCtx(blackbox.Ctx{
+		"observation_id": observation.PublicID, "decision_id": recordedDecision.ID,
+		"decision_revision": revision, "predicted_outcome": string(recordedDecision.Result.Predicted.Outcome),
+		"effective_outcome": string(recordedDecision.Result.Effective.Outcome), "reason_codes": recordedDecision.Result.Effective.ReasonCodes,
+		"confidence": recordedDecision.Result.Effective.Confidence, "shadowed": recordedDecision.Result.Shadowed,
+		"reaction":                    recordedDecision.Result.Effective.Reaction,
+		"agent_model_profile":         recordedDecision.Result.Effective.AgentModelProfile,
+		"agent_model_strength":        recordedDecision.Result.Effective.AgentModelStrength,
+		"agent_reasoning_effort":      recordedDecision.Result.Effective.AgentReasoningEffort,
+		"classifier_model":            recordedDecision.Result.Predicted.ClassifierModel,
+		"classifier_reasoning_effort": recordedDecision.Result.Predicted.ClassifierReasoningEffort,
+		"classifier_response_id":      recordedDecision.Result.Predicted.ClassifierResponseID,
+		"classifier_input_tokens":     recordedDecision.Result.Predicted.ClassifierInputTokens,
+		"classifier_output_tokens":    recordedDecision.Result.Predicted.ClassifierOutputTokens,
+	}).Info("classification decision recorded")
 	p.appendReceipt(ctx, audit.AppendRequest{OrganizationID: envelope.OrganizationID, Type: "decision.recorded", ResourceID: recordedDecision.ID, RetentionEpoch: retentionEpoch(pack.ExpiresAt), IdempotencyKey: fmt.Sprintf("decision/%s/%d", observation.PublicID, revision), Metadata: map[string]any{"outcome": string(recordedDecision.Result.Effective.Outcome), "revision": revision}})
+	if recordedDecision.Result.Effective.Reaction != "" {
+		p.applyClassifierReaction(ctx, envelope, revision, recordedDecision)
+	}
 	if !createsJob(decision.Effective.Outcome) {
 		return nil
 	}
@@ -273,12 +314,18 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 		if channelPolicy != nil {
 			channelDefault = channelPolicy.DefaultModelProfile
 		}
-		resolvedModel, routeTrace, err = p.deps.ModelRouter.Resolve(ctx, types.ModelRouteContext{OrganizationID: envelope.OrganizationID, WorkspaceID: envelope.TeamID, ChannelID: envelope.ChannelID, Phase: "response", ChannelDefault: channelDefault, DataClasses: []string{"internal"}, Capabilities: []string{"structured"}, InputTokens: pack.TotalTokens}, modelrouter.Constraints{})
+		resolvedModel, routeTrace, err = p.deps.ModelRouter.Resolve(ctx, types.ModelRouteContext{OrganizationID: envelope.OrganizationID, WorkspaceID: envelope.TeamID, ChannelID: envelope.ChannelID, Phase: "response", Override: decision.Effective.AgentModelProfile, ChannelDefault: channelDefault, DataClasses: []string{"internal"}, Capabilities: []string{"structured"}, InputTokens: pack.TotalTokens}, modelrouter.Constraints{})
 		if err != nil {
 			if reservationID != "" {
 				p.deps.Admissions.Complete(ctx, reservationID)
 			}
 			return fmt.Errorf("resolve response model: %w", err)
+		}
+		if decision.Effective.AgentReasoningEffort != "" && resolvedModel.Variant != decision.Effective.AgentReasoningEffort {
+			if reservationID != "" {
+				p.deps.Admissions.Complete(ctx, reservationID)
+			}
+			return fmt.Errorf("classifier reasoning recommendation no longer matches live model profile")
 		}
 	}
 
@@ -291,11 +338,12 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 		WorkspaceID:            envelope.TeamID,
 		ChannelID:              envelope.ChannelID,
 		RootThreadTS:           envelope.RootThreadTS(),
+		ReplyInChannel:         decision.Effective.Outcome == types.OutcomeReplyInChannel,
 		SessionID:              session.ID,
 		Generation:             session.CurrentGeneration,
 		ObservationID:          types.ObservationID(observation.PublicID),
 		IdempotencyKey:         observation.PublicID + "/" + string(decision.Effective.Outcome),
-		Kind:                   "stub_echo",
+		Kind:                   "agent_response",
 		Input:                  buildAgentInput(envelope.Text, pack),
 		MaxAttempts:            p.deps.Config.Jobs.MaxAttempts,
 		AdmissionReservationID: reservationID,
@@ -308,6 +356,7 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 		}
 		return fmt.Errorf("enqueue job: %w", err)
 	}
+	p.deps.Logger.WithCtx(blackbox.Ctx{"job_id": job.ID, "observation_id": observation.PublicID, "channel_id": job.ChannelID, "job_kind": job.Kind, "model_profile": job.ResolvedModel.ProfileID}).Info("agent job durably enqueued")
 	p.appendReceipt(ctx, audit.AppendRequest{OrganizationID: envelope.OrganizationID, Type: "job.enqueued", ResourceID: string(job.ID), RetentionEpoch: retentionEpoch(job.ExpiresAt), IdempotencyKey: "job/" + string(job.ID) + "/enqueued", Metadata: map[string]any{"channel_id": job.ChannelID, "kind": job.Kind}})
 	won, err := p.deps.Observations.MarkOutput(ctx, observation.PublicID, string(job.ID), "")
 	if err != nil {
@@ -319,7 +368,43 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 	return nil
 }
 
+func (p *Pipeline) applyClassifierReaction(ctx context.Context, envelope types.SlackEnvelope, revision int64, decision classifier.DecisionRecord) {
+	reaction := decision.Result.Effective.Reaction
+	reactionLogger := p.deps.Logger.WithCtx(blackbox.Ctx{
+		"organization_id":   envelope.OrganizationID,
+		"observation_id":    decision.ObservationID,
+		"decision_id":       decision.ID,
+		"decision_revision": revision,
+		"channel_id":        envelope.ChannelID,
+		"message_ts":        envelope.MessageTS,
+		"emoji":             reaction,
+	})
+	result, err := p.deps.Transport.React(ctx, types.SlackReactionRequest{
+		IdempotencyKey: fmt.Sprintf("decision/%s/%d/reaction/%s", decision.ObservationID, revision, reaction),
+		TeamID:         envelope.TeamID, ChannelID: envelope.ChannelID, MessageTS: envelope.MessageTS, Emoji: reaction,
+	})
+	if err != nil {
+		reactionLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Error("classifier acknowledgement reaction failed")
+		p.appendReceipt(ctx, audit.AppendRequest{OrganizationID: envelope.OrganizationID, Type: "reaction.failed", ResourceID: decision.ID, IdempotencyKey: fmt.Sprintf("decision/%s/%d/reaction-failed", decision.ObservationID, revision), Metadata: map[string]any{"channel_id": envelope.ChannelID, "emoji": reaction}})
+		return
+	}
+	reactionLogger.WithCtx(blackbox.Ctx{"duplicate": result.Duplicate}).Info("classifier acknowledgement reaction completed")
+	p.appendReceipt(ctx, audit.AppendRequest{OrganizationID: envelope.OrganizationID, Type: "reaction.completed", ResourceID: decision.ID, IdempotencyKey: fmt.Sprintf("decision/%s/%d/reaction-completed", decision.ObservationID, revision), Metadata: map[string]any{"channel_id": envelope.ChannelID, "emoji": reaction, "duplicate": result.Duplicate}})
+	if p.deps.Usage != nil {
+		_ = p.deps.Usage.Record(ctx, usage.Event{OrganizationID: envelope.OrganizationID, Category: "slack_reaction", Calls: 1})
+	}
+}
+
 func (p *Pipeline) reconsiderLateQuestions(ctx context.Context, signal models.Observation) {
+	if signal.Restricted {
+		return
+	}
+	if p.deps.Scopes != nil {
+		policy, err := p.deps.Scopes.Resolve(ctx, signal.OrganizationID, signal.TeamID, signal.ChannelID)
+		if err != nil || policy.Restricted {
+			return
+		}
+	}
 	candidates, err := p.deps.Observations.LateCandidates(ctx, signal.OrganizationID, signal.SlackEventTime.Add(-15*time.Minute), signal.SlackEventTime, 10)
 	if err != nil {
 		p.deps.Logger.Error("find late reconsiderations", err)
@@ -346,6 +431,35 @@ func envelopeFromObservation(observation models.Observation) types.SlackEnvelope
 	}
 }
 
+func envelopeLogContext(envelope types.SlackEnvelope) blackbox.Ctx {
+	return blackbox.Ctx{
+		"organization_id": envelope.OrganizationID,
+		"team_id":         envelope.TeamID,
+		"event_id":        envelope.EventID,
+		"envelope_id":     envelope.EnvelopeID,
+		"channel_id":      envelope.ChannelID,
+		"message_ts":      envelope.MessageTS,
+		"thread_ts":       envelope.ThreadTS,
+		"event_kind":      string(envelope.Kind),
+		"event_subtype":   envelope.Subtype,
+		"is_mention":      envelope.IsMention,
+		"is_bot_event":    envelope.BotID != "",
+		"text_bytes":      len(envelope.Text),
+	}
+}
+
+func observationLogContext(observation models.Observation) blackbox.Ctx {
+	return blackbox.Ctx{
+		"organization_id": observation.OrganizationID,
+		"team_id":         observation.TeamID,
+		"observation_id":  observation.PublicID,
+		"event_id":        observation.EventID,
+		"channel_id":      observation.ChannelID,
+		"message_ts":      observation.MessageTS,
+		"event_kind":      observation.EventType,
+	}
+}
+
 func (p *Pipeline) buildContextPack(ctx context.Context, envelope types.SlackEnvelope, observationID string, watermark int64) (types.ContextPackRevision, error) {
 	now := time.Now().UTC()
 	channels := []string{}
@@ -360,11 +474,17 @@ func (p *Pipeline) buildContextPack(ctx context.Context, envelope types.SlackEnv
 			if !authorizedPolicy(policy, now) {
 				continue
 			}
-			channels = append(channels, policy.ChannelID)
 			restricted[policy.ChannelID] = policy.Restricted
 			if policy.ChannelID == envelope.ChannelID {
 				membershipRevision = policy.MembershipRevision
 			}
+			// A restricted channel is a destination-local context boundary. Its
+			// messages may be used inside that same channel, but the channel must
+			// not even enter another destination's observation query.
+			if policy.Restricted && policy.ChannelID != envelope.ChannelID {
+				continue
+			}
+			channels = append(channels, policy.ChannelID)
 		}
 	} else {
 		var err error
@@ -381,8 +501,8 @@ func (p *Pipeline) buildContextPack(ctx context.Context, envelope types.SlackEnv
 		return types.ContextPackRevision{}, err
 	}
 	candidates := []types.ContextCandidate{{
-		ID: "system/gating", Version: 1, OrganizationID: envelope.OrganizationID, Partition: types.PartitionSystem,
-		Text: "Tool-free chat gating. Select action and evidence IDs. Restricted signals cannot ground final prose.", Priority: 100, ObservedAt: now, DisclosureClass: types.DisclosureDestinationSafe, Required: true,
+		ID: "system/classifier", Version: 1, OrganizationID: envelope.OrganizationID, Partition: types.PartitionSystem,
+		Text: "Tool-free Slack classification. Select action, placement, reaction, agent profile, reasoning effort, and evidence IDs. Restricted signals cannot ground final prose.", Priority: 100, ObservedAt: now, DisclosureClass: types.DisclosureDestinationSafe, Required: true,
 	}}
 	if p.deps.ChannelConfig != nil {
 		if directive, err := p.deps.ChannelConfig.ActiveDirective(ctx, envelope.OrganizationID, envelope.ChannelID); err == nil {
@@ -394,6 +514,12 @@ func (p *Pipeline) buildContextPack(ctx context.Context, envelope types.SlackEnv
 		}
 	}
 	for _, message := range messages {
+		// Defend against stale policy metadata and non-policy test stores: a
+		// restricted message from another channel is never a context candidate,
+		// including as a content-free awareness signal.
+		if message.ChannelID != envelope.ChannelID && (message.Restricted || restricted[message.ChannelID]) {
+			continue
+		}
 		partition := types.PartitionRecentOrg
 		priority := 10
 		if message.ChannelID == envelope.ChannelID && message.RootThreadTS == envelope.RootThreadTS() {
@@ -403,17 +529,10 @@ func (p *Pipeline) buildContextPack(ctx context.Context, envelope types.SlackEnv
 		} else if containsIncident(message.Text) {
 			partition, priority = types.PartitionEvidence, 90
 		}
-		disclosure := types.DisclosureDestinationSafe
-		text := message.Text
-		if (message.Restricted || restricted[message.ChannelID]) && message.ChannelID != envelope.ChannelID {
-			disclosure = types.DisclosureRestrictedAwareness
-			text = "active_incident: true"
-			partition = types.PartitionSituation
-		}
 		candidates = append(candidates, types.ContextCandidate{
 			ID: message.ChannelID + "/" + message.MessageTS, Version: message.ProjectionVersion, OrganizationID: message.OrganizationID,
-			ChannelID: message.ChannelID, Partition: partition, Text: text, Priority: priority, ObservedAt: message.OriginalAt,
-			DisclosureClass: disclosure, Required: message.ChannelID == envelope.ChannelID && message.MessageTS == envelope.MessageTS, SourceExpiresAt: message.ExpiresAt,
+			ChannelID: message.ChannelID, Partition: partition, Text: message.Text, Priority: priority, ObservedAt: message.OriginalAt,
+			DisclosureClass: types.DisclosureDestinationSafe, Required: message.ChannelID == envelope.ChannelID && message.MessageTS == envelope.MessageTS, SourceExpiresAt: message.ExpiresAt,
 		})
 	}
 	return p.deps.ContextPacks.Build(contextpacks.Request{
@@ -434,19 +553,27 @@ func (p *Pipeline) runJobs(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.releaseRetryWait(ctx)
+			p.reconcileJobs(ctx)
 			for p.processOneJob(ctx) {
 			}
 		}
 	}
 }
 
-func (p *Pipeline) releaseRetryWait(ctx context.Context) {
+func (p *Pipeline) reconcileJobs(ctx context.Context) {
 	all, err := p.deps.Jobs.List(ctx)
 	if err != nil {
 		return
 	}
 	for _, job := range all {
+		// An expired preparing/running lease is deliberately fenced into
+		// needs_reconciliation by the durable queue. No writer remains active,
+		// so the channel admission slot must be released even while the job is
+		// retained for operator reconciliation. Complete is idempotent.
+		if job.State == jobs.StateNeedsReconciliation && p.deps.Admissions != nil {
+			p.deps.Admissions.Complete(ctx, job.AdmissionReservationID)
+			continue
+		}
 		if job.State == jobs.StateRetryWait && !job.AvailableAt.After(time.Now().UTC()) {
 			updated, releaseErr := p.deps.Jobs.ReleaseRetryWait(ctx, job.ID)
 			if releaseErr == nil && updated.State == jobs.StateFailed && p.deps.Admissions != nil {
@@ -465,14 +592,18 @@ func (p *Pipeline) processOneJob(ctx context.Context) bool {
 		p.deps.Logger.Error("claim job", err)
 		return false
 	}
+	jobLogger := p.deps.Logger.WithCtx(blackbox.Ctx{"organization_id": job.OrganizationID, "job_id": job.ID, "channel_id": job.ChannelID, "job_kind": job.Kind, "attempt": job.Attempt})
+	jobLogger.Info("agent job claimed")
 	job, err = p.deps.Jobs.Transition(ctx, job.ID, job.Lease.Token, jobs.StateRunning, nil)
 	if err != nil {
-		p.deps.Logger.Error("start job", err)
+		jobLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Error("agent job start failed")
 		return true
 	}
+	jobLogger.Info("agent job running")
 	if p.deps.Scopes != nil {
 		policy, scopeErr := p.deps.Scopes.Resolve(ctx, job.OrganizationID, job.WorkspaceID, job.ChannelID)
 		if scopeErr != nil || !policy.Enrolled || policy.KillSwitch {
+			jobLogger.Warn("agent job denied by live channel policy")
 			_, _ = p.deps.Jobs.Transition(ctx, job.ID, job.Lease.Token, jobs.StateFailed, func(job *jobs.Job) { job.FailureReason = "live_policy_denied" })
 			if p.deps.Admissions != nil {
 				p.deps.Admissions.Complete(ctx, job.AdmissionReservationID)
@@ -483,6 +614,7 @@ func (p *Pipeline) processOneJob(ctx context.Context) bool {
 	if job.ResolvedModel.ModelID == "" && p.deps.ModelRouter != nil {
 		resolved, trace, resolveErr := p.deps.ModelRouter.Resolve(ctx, types.ModelRouteContext{OrganizationID: job.OrganizationID, WorkspaceID: job.WorkspaceID, ChannelID: job.ChannelID, Phase: "routine", RoutineID: strings.TrimPrefix(job.IdempotencyKey, "routine/"), DataClasses: []string{"internal"}, Capabilities: []string{"structured"}, InputTokens: len(strings.Fields(job.Input))}, modelrouter.Constraints{})
 		if resolveErr != nil {
+			jobLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", resolveErr)}).Error("agent job model routing failed")
 			_, _ = p.deps.Jobs.Transition(ctx, job.ID, job.Lease.Token, jobs.StateFailed, func(job *jobs.Job) { job.FailureReason = "routine_model_route_failed" })
 			return true
 		}
@@ -492,6 +624,7 @@ func (p *Pipeline) processOneJob(ctx context.Context) bool {
 		}
 	}
 	if p.deps.ModelRouter != nil && !p.deps.ModelRouter.Allowed(job.ResolvedModel) {
+		jobLogger.Warn("agent job denied by live model policy")
 		_, _ = p.deps.Jobs.Transition(ctx, job.ID, job.Lease.Token, jobs.StateFailed, func(job *jobs.Job) { job.FailureReason = "model_hard_deny" })
 		if p.deps.Admissions != nil {
 			p.deps.Admissions.Complete(ctx, job.AdmissionReservationID)
@@ -500,6 +633,7 @@ func (p *Pipeline) processOneJob(ctx context.Context) bool {
 	}
 	result, runErr := p.runHarness(ctx, job)
 	if runErr != nil {
+		jobLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", runErr)}).Error("agent job execution failed")
 		if errors.Is(runErr, errExecutionRevoked) || errors.Is(runErr, jobs.ErrLeaseLost) {
 			current, getErr := p.deps.Jobs.Get(ctx, job.ID)
 			if getErr == nil && current.State == jobs.StateRunning {
@@ -513,10 +647,12 @@ func (p *Pipeline) processOneJob(ctx context.Context) bool {
 			}
 			return true
 		}
-		_, _ = p.deps.Jobs.Requeue(ctx, job.ID, job.Lease.Token, runErr.Error(), p.deps.Config.Jobs.Poll)
+		requeued, _ := p.deps.Jobs.Requeue(ctx, job.ID, job.Lease.Token, runErr.Error(), p.deps.Config.Jobs.Poll)
+		jobLogger.WithCtx(blackbox.Ctx{"next_state": requeued.State, "available_at": requeued.AvailableAt}).Warn("agent job requeued")
 		return true
 	}
 	if _, err := p.deps.Renderer.Render(result); err != nil {
+		jobLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Error("agent job produced invalid Slack result")
 		_, _ = p.deps.Jobs.Transition(ctx, job.ID, job.Lease.Token, jobs.StateFailed, func(job *jobs.Job) { job.FailureReason = "invalid_slack_result" })
 		if p.deps.Admissions != nil {
 			p.deps.Admissions.Complete(ctx, job.AdmissionReservationID)
@@ -525,24 +661,34 @@ func (p *Pipeline) processOneJob(ctx context.Context) bool {
 	}
 	job, err = p.deps.Jobs.Transition(ctx, job.ID, job.Lease.Token, jobs.StateSucceeded, func(job *jobs.Job) { job.Result = result })
 	if err != nil {
-		p.deps.Logger.Error("complete job", err)
+		jobLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Error("agent job completion failed")
 		if errors.Is(err, jobs.ErrLeaseLost) && p.deps.Admissions != nil {
 			p.deps.Admissions.Complete(ctx, job.AdmissionReservationID)
 		}
 		return true
 	}
+	jobLogger.WithCtx(blackbox.Ctx{"result_segment_count": len(job.Result.Segments)}).Info("agent job completed")
 	if p.deps.Admissions != nil && job.AdmissionReservationID != "" {
 		p.deps.Admissions.Complete(ctx, job.AdmissionReservationID)
 	}
 	_, _, err = p.deps.Deliveries.Enqueue(ctx, deliveries.Spec{
 		OrganizationID: job.OrganizationID, JobID: job.ID, IdempotencyKey: string(job.ID) + "/final",
-		Destination: types.SlackDestination{TeamID: job.WorkspaceID, ChannelID: job.ChannelID, ThreadTS: job.RootThreadTS},
+		Destination: types.SlackDestination{TeamID: job.WorkspaceID, ChannelID: job.ChannelID, ThreadTS: deliveryThreadTS(job)},
 		Result:      job.Result, MaxAttempts: p.deps.Config.Jobs.MaxAttempts, ExpiresAt: job.ExpiresAt,
 	})
 	if err != nil {
-		p.deps.Logger.Error("enqueue final delivery", err)
+		jobLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Error("final Slack delivery enqueue failed")
+	} else {
+		jobLogger.Info("final Slack delivery durably enqueued")
 	}
 	return true
+}
+
+func deliveryThreadTS(job jobs.Job) string {
+	if job.ReplyInChannel {
+		return ""
+	}
+	return job.RootThreadTS
 }
 
 func (p *Pipeline) runDeliveries(ctx context.Context) {
@@ -568,7 +714,10 @@ func (p *Pipeline) processOneDelivery(ctx context.Context) bool {
 		p.deps.Logger.Error("claim delivery", err)
 		return false
 	}
+	deliveryLogger := p.deps.Logger.WithCtx(blackbox.Ctx{"organization_id": record.OrganizationID, "delivery_id": record.ID, "job_id": record.JobID, "channel_id": record.Destination.ChannelID, "attempt": record.Attempt})
+	deliveryLogger.Info("Slack delivery claimed")
 	if _, err := p.deps.Renderer.Render(record.Result); err != nil {
+		deliveryLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Error("Slack delivery render validation failed")
 		updated, _ := p.deps.Deliveries.Retry(ctx, record.ID, record.Lease.Token, "invalid_render", 0)
 		if updated.Status == deliveries.StatusAbandoned {
 			_, _ = p.deps.Jobs.MarkCompletedUndelivered(ctx, record.JobID, "invalid_render")
@@ -578,6 +727,7 @@ func (p *Pipeline) processOneDelivery(ctx context.Context) bool {
 	if p.deps.Scopes != nil {
 		policy, scopeErr := p.deps.Scopes.Resolve(ctx, record.OrganizationID, record.Destination.TeamID, record.Destination.ChannelID)
 		if scopeErr != nil || !authorizedPolicy(policy, time.Now().UTC()) {
+			deliveryLogger.Warn("Slack delivery denied by live channel policy")
 			_, _ = p.deps.Deliveries.Abandon(ctx, record.ID, record.Lease.Token, "live_policy_denied")
 			_, _ = p.deps.Jobs.MarkCompletedUndelivered(ctx, record.JobID, "live_policy_denied")
 			return true
@@ -586,14 +736,16 @@ func (p *Pipeline) processOneDelivery(ctx context.Context) bool {
 	result, err := p.deps.Transport.Send(ctx, types.SlackDeliveryRequest{ID: record.ID, IdempotencyKey: record.IdempotencyKey, Destination: record.Destination, Result: record.Result})
 	if err != nil {
 		updated, _ := p.deps.Deliveries.Retry(ctx, record.ID, record.Lease.Token, err.Error(), p.deps.Config.Jobs.Poll)
+		deliveryLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "next_status": updated.Status}).Error("Slack delivery failed")
 		if updated.Status == deliveries.StatusAbandoned {
 			_, _ = p.deps.Jobs.MarkCompletedUndelivered(ctx, record.JobID, err.Error())
 		}
 		return true
 	}
 	if _, err := p.deps.Deliveries.Complete(ctx, record.ID, record.Lease.Token, result); err != nil {
-		p.deps.Logger.Error("complete delivery", err)
+		deliveryLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Error("Slack delivery completion persistence failed")
 	} else {
+		deliveryLogger.WithCtx(blackbox.Ctx{"message_ts": result.MessageTS, "duplicate": result.Duplicate}).Info("Slack delivery durably completed")
 		p.appendReceipt(ctx, audit.AppendRequest{OrganizationID: record.OrganizationID, Type: "delivery.completed", ResourceID: string(record.ID), RetentionEpoch: retentionEpoch(record.ExpiresAt), IdempotencyKey: "delivery/" + string(record.ID) + "/completed", Metadata: map[string]any{"channel_id": record.Destination.ChannelID, "attempt": record.Attempt}})
 	}
 	if p.deps.Usage != nil {
@@ -703,7 +855,7 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 	if p.deps.Usage != nil {
 		_ = p.deps.Usage.Record(ctx, usage.Event{OrganizationID: job.OrganizationID, JobID: string(job.ID), Category: "model", ProviderID: job.ResolvedModel.ProviderID, ModelID: job.ResolvedModel.ModelID, ProfileID: job.ResolvedModel.ProfileID, InputTokens: int64(len(strings.Fields(job.Input))), OutputTokens: int64(len(strings.Fields(text))), Calls: 1, DurationMS: time.Since(started).Milliseconds()})
 	}
-	return types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: text}}}, nil
+	return deliveries.ParseModelOutput(text)
 }
 
 func minExpiry(a, b time.Time) time.Time {
@@ -725,7 +877,7 @@ func buildAgentInput(request string, pack types.ContextPackRevision) string {
 		AuthorizedContext []source `json:"authorized_context"`
 	}{Request: request}
 	for _, item := range pack.Sources {
-		if item.DisclosureClass != types.DisclosureDestinationSafe || item.ID == "system/gating" {
+		if item.DisclosureClass != types.DisclosureDestinationSafe || item.ID == "system/classifier" {
 			continue
 		}
 		payload.AuthorizedContext = append(payload.AuthorizedContext, source{ID: item.ID, ChannelID: item.ChannelID, Partition: item.Partition, Text: item.Text})
@@ -737,7 +889,7 @@ func buildAgentInput(request string, pack types.ContextPackRevision) string {
 	return string(encoded)
 }
 
-func createsJob(outcome types.GatingOutcome) bool {
+func createsJob(outcome types.ClassificationOutcome) bool {
 	return outcome == types.OutcomeReplyInThread || outcome == types.OutcomeReplyInChannel || outcome == types.OutcomeStartBackgroundJob || outcome == types.OutcomeEscalateForApproval
 }
 

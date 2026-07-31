@@ -1,6 +1,6 @@
-// Package chatgating implements tool-free response selection and deterministic
+// Package classifier implements tool-free response selection and deterministic
 // admission. It cannot send Slack output or execute tools.
-package chatgating
+package classifier
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 var ErrInvalidClassifierDecision = errors.New("invalid classifier decision")
 
 type Classifier interface {
-	Decide(context.Context, Target, types.ContextPackRevision) (types.ChatGatingDecision, error)
+	Decide(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error)
 }
 
 type Target struct {
@@ -30,9 +30,9 @@ type Target struct {
 }
 
 type Result struct {
-	Predicted types.ChatGatingDecision `json:"predicted"`
-	Effective types.ChatGatingDecision `json:"effective"`
-	Shadowed  bool                     `json:"shadowed"`
+	Predicted types.ClassificationDecision `json:"predicted"`
+	Effective types.ClassificationDecision `json:"effective"`
+	Shadowed  bool                         `json:"shadowed"`
 }
 
 type Service struct {
@@ -47,7 +47,7 @@ func New(classifier Classifier, shadow bool, assistThreshold, channelReplyThresh
 		return nil, fmt.Errorf("classifier is required")
 	}
 	if assistThreshold < 0 || assistThreshold > 1 || channelReplyThreshold < assistThreshold || channelReplyThreshold > 1 {
-		return nil, fmt.Errorf("invalid gating thresholds")
+		return nil, fmt.Errorf("invalid classifier thresholds")
 	}
 	return &Service{classifier: classifier, shadow: shadow, assistThreshold: assistThreshold, channelReplyThreshold: channelReplyThreshold}, nil
 }
@@ -57,40 +57,56 @@ func (s *Service) Decide(ctx context.Context, target Target, pack types.ContextP
 		decision := silent(reason)
 		return Result{Predicted: decision, Effective: decision}
 	}
-	// Observe mode is an absolute no-output policy, including direct mentions
-	// and replies in an otherwise active thread.
+	// Observe mode is always an absolute no-output policy. With global shadow
+	// classification enabled, evaluate the same candidate an assist channel would have
+	// produced so operators can measure precision without expanding authority.
 	if target.Mode == types.ModeObserve {
+		if s.shadow {
+			shadowTarget := target
+			shadowTarget.Mode = types.ModeAssist
+			predicted := s.predict(ctx, shadowTarget, pack)
+			return Result{Predicted: predicted, Effective: silent("admission.channel_mode"), Shadowed: predicted.Outcome != types.OutcomeSilent}
+		}
 		decision := silent("admission.channel_mode")
 		return Result{Predicted: decision, Effective: decision}
 	}
+	predicted := s.predict(ctx, target, pack)
+	if target.Envelope.IsMention || target.ActiveThread || predicted.Outcome == types.OutcomeSilent {
+		return Result{Predicted: predicted, Effective: predicted}
+	}
+	if s.shadow {
+		return Result{Predicted: predicted, Effective: silent("admission.shadow_mode"), Shadowed: true}
+	}
+	return Result{Predicted: predicted, Effective: predicted}
+}
+
+func (s *Service) predict(ctx context.Context, target Target, pack types.ContextPackRevision) types.ClassificationDecision {
 	if target.Envelope.IsMention || target.ActiveThread {
 		reason := "hard.direct_mention"
 		if target.ActiveThread && !target.Envelope.IsMention {
 			reason = "hard.active_thread_reply"
 		}
-		decision := types.ChatGatingDecision{
+		decision := types.ClassificationDecision{
 			Outcome:           types.OutcomeReplyInThread,
 			Confidence:        1,
 			ReasonCodes:       []string{reason},
 			ResponseIntent:    "respond to the explicit request",
 			DisclosureClass:   types.DisclosureDestinationSafe,
 			RequiresFullAgent: true,
+			Reaction:          "eyes",
 		}
-		return Result{Predicted: decision, Effective: decision}
+		return decision
 	}
 	if target.Mode == types.ModeMention {
-		decision := silent("admission.channel_mode")
-		return Result{Predicted: decision, Effective: decision}
+		return silent("admission.channel_mode")
 	}
 
 	predicted, err := s.classifier.Decide(ctx, target, pack)
 	if err != nil {
-		decision := silent("classifier.error")
-		return Result{Predicted: decision, Effective: decision}
+		return silent("classifier.error")
 	}
 	if err := validateDecision(predicted, pack); err != nil {
-		decision := silent("classifier.invalid")
-		return Result{Predicted: decision, Effective: decision}
+		return silent("classifier.invalid")
 	}
 	if predicted.Outcome != types.OutcomeSilent && predicted.Confidence < s.assistThreshold {
 		predicted = silent("admission.low_confidence")
@@ -102,10 +118,7 @@ func (s *Service) Decide(ctx context.Context, target Target, pack types.ContextP
 	if outcomeNeedsEvidence(predicted.Outcome) && len(predicted.ReleasableEvidenceIDs) == 0 && len(predicted.RestrictedSignalIDs) > 0 {
 		predicted = silent("admission.destination_disclosure_denied")
 	}
-	if s.shadow && predicted.Outcome != types.OutcomeSilent {
-		return Result{Predicted: predicted, Effective: silent("admission.shadow_mode"), Shadowed: true}
-	}
-	return Result{Predicted: predicted, Effective: predicted}
+	return predicted
 }
 
 func hardSuppression(target Target) string {
@@ -127,7 +140,7 @@ func hardSuppression(target Target) string {
 	}
 }
 
-func validateDecision(decision types.ChatGatingDecision, pack types.ContextPackRevision) error {
+func validateDecision(decision types.ClassificationDecision, pack types.ContextPackRevision) error {
 	if decision.Confidence < 0 || decision.Confidence > 1 {
 		return fmt.Errorf("%w: confidence", ErrInvalidClassifierDecision)
 	}
@@ -138,6 +151,12 @@ func validateDecision(decision types.ChatGatingDecision, pack types.ContextPackR
 	}
 	if len(decision.ReasonCodes) == 0 {
 		return fmt.Errorf("%w: reason code", ErrInvalidClassifierDecision)
+	}
+	if decision.Outcome != types.OutcomeSilent && !validEmojiName(decision.Reaction) {
+		return fmt.Errorf("%w: reaction", ErrInvalidClassifierDecision)
+	}
+	if outcomeNeedsAgent(decision.Outcome) && !decision.RequiresFullAgent {
+		return fmt.Errorf("%w: full agent required", ErrInvalidClassifierDecision)
 	}
 	available := make(map[string]types.DisclosureClass, len(pack.Sources))
 	for _, source := range pack.Sources {
@@ -156,8 +175,8 @@ func validateDecision(decision types.ChatGatingDecision, pack types.ContextPackR
 	return nil
 }
 
-func silent(reason string) types.ChatGatingDecision {
-	return types.ChatGatingDecision{
+func silent(reason string) types.ClassificationDecision {
+	return types.ClassificationDecision{
 		Outcome:         types.OutcomeSilent,
 		Confidence:      1,
 		ReasonCodes:     []string{reason},
@@ -173,21 +192,36 @@ func Suppress(result Result, reason string) Result {
 	return result
 }
 
-func outcomeNeedsEvidence(outcome types.GatingOutcome) bool {
+func outcomeNeedsEvidence(outcome types.ClassificationOutcome) bool {
 	return outcome == types.OutcomeReplyInThread || outcome == types.OutcomeReplyInChannel || outcome == types.OutcomeStartBackgroundJob
+}
+
+func outcomeNeedsAgent(outcome types.ClassificationOutcome) bool {
+	return outcome == types.OutcomeReplyInThread || outcome == types.OutcomeReplyInChannel || outcome == types.OutcomeStartBackgroundJob || outcome == types.OutcomeEscalateForApproval
 }
 
 type DeterministicClassifier struct{}
 
-func (DeterministicClassifier) Decide(_ context.Context, target Target, pack types.ContextPackRevision) (types.ChatGatingDecision, error) {
+func (DeterministicClassifier) Decide(_ context.Context, target Target, pack types.ContextPackRevision) (types.ClassificationDecision, error) {
 	lower := strings.ToLower(target.Envelope.Text)
+	if target.Mode == types.ModeProactive && containsActionableSignal(lower) {
+		return types.ClassificationDecision{
+			Outcome:           types.OutcomeReplyInChannel,
+			Confidence:        0.99,
+			ReasonCodes:       []string{"ambient.proactive_actionable_signal"},
+			ResponseIntent:    "offer help on the actionable channel signal",
+			DisclosureClass:   types.DisclosureDestinationSafe,
+			RequiresFullAgent: true,
+			Reaction:          "eyes",
+		}, nil
+	}
 	if strings.Contains(lower, "is the system down") || strings.Contains(lower, "is it down") {
 		for _, source := range pack.Sources {
 			if source.Partition != types.PartitionEvidence && source.Partition != types.PartitionSituation {
 				continue
 			}
 			if source.DisclosureClass == types.DisclosureDestinationSafe && containsIncident(source.Text) {
-				return types.ChatGatingDecision{
+				return types.ClassificationDecision{
 					Outcome:               types.OutcomeReplyInThread,
 					Confidence:            0.99,
 					ReasonCodes:           []string{"ambient.cross_channel_incident_match"},
@@ -195,10 +229,11 @@ func (DeterministicClassifier) Decide(_ context.Context, target Target, pack typ
 					ResponseIntent:        "answer with the current incident evidence",
 					DisclosureClass:       types.DisclosureDestinationSafe,
 					RequiresFullAgent:     true,
+					Reaction:              "rotating_light",
 				}, nil
 			}
 			if source.DisclosureClass == types.DisclosureRestrictedAwareness && containsIncident(source.Text) {
-				return types.ChatGatingDecision{
+				return types.ClassificationDecision{
 					Outcome:             types.OutcomeReplyInThread,
 					Confidence:          0.99,
 					ReasonCodes:         []string{"ambient.cross_channel_incident_match"},
@@ -206,21 +241,32 @@ func (DeterministicClassifier) Decide(_ context.Context, target Target, pack typ
 					ResponseIntent:      "incident awareness exists but is not disclosable",
 					DisclosureClass:     types.DisclosureRestrictedAwareness,
 					RequiresFullAgent:   true,
+					Reaction:            "warning",
 				}, nil
 			}
 		}
 	}
 	if strings.HasSuffix(strings.TrimSpace(lower), "?") {
-		return types.ChatGatingDecision{
+		return types.ClassificationDecision{
 			Outcome:           types.OutcomeReplyInThread,
 			Confidence:        0.91,
 			ReasonCodes:       []string{"ambient.clear_unanswered_question"},
 			ResponseIntent:    "answer the clear unresolved question",
 			DisclosureClass:   types.DisclosureDestinationSafe,
 			RequiresFullAgent: true,
+			Reaction:          "thinking_face",
 		}, nil
 	}
 	return silent("ambient.social_chatter"), nil
+}
+
+func containsActionableSignal(text string) bool {
+	for _, signal := range []string{"incident", "outage", " is down", " failed", " failure", " error", " blocked", "needs attention"} {
+		if strings.Contains(text, signal) {
+			return true
+		}
+	}
+	return false
 }
 
 func containsIncident(text string) bool {
