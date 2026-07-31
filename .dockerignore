@@ -1,0 +1,14 @@
+.git
+.github
+.artifacts
+.cache
+.testruns
+bin
+dist
+coverage.out
+runtime.env
+.env
+*.local.toml
+*.log
+*.pem
+*.key

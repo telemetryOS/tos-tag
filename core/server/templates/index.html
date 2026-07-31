@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tos-tag management</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; background: #0b1020; color: #e8edf7; }
+    body { margin: 0; }
+    header { padding: 2rem clamp(1rem, 5vw, 5rem); background: linear-gradient(120deg, #18213d, #102f38); border-bottom: 1px solid #33415f; }
+    nav { display: flex; flex-wrap: wrap; gap: .45rem; padding: 1rem clamp(1rem, 5vw, 5rem); background: #0e1628; border-bottom: 1px solid #273654; }
+    nav a { color: #a8c9ff; text-decoration: none; border: 1px solid #344768; border-radius: .4rem; padding: .35rem .55rem; }
+    nav a:hover { background: #1a2944; }
+    main { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); padding: 1.5rem clamp(1rem, 5vw, 5rem); }
+    section { background: #121a2d; border: 1px solid #2b3959; border-radius: .8rem; padding: 1rem; box-shadow: 0 .8rem 2rem #0005; }
+    h1, h2 { margin-top: 0; } h1 { letter-spacing: -.04em; } code { color: #73e0cc; }
+    .metric { font-size: 2rem; font-weight: 700; color: #8bb8ff; }
+    label { display: block; margin: .7rem 0 .25rem; color: #bac6da; }
+    input, select, textarea, button { box-sizing: border-box; width: 100%; border-radius: .4rem; border: 1px solid #405170; padding: .65rem; background: #0b1222; color: inherit; }
+    textarea { min-height: 7rem; resize: vertical; } button { margin-top: .8rem; cursor: pointer; background: #276c62; border-color: #4da394; font-weight: 700; }
+    button:hover { background: #328174; } .muted { color: #93a0b7; } .wide { grid-column: 1 / -1; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 28rem; overflow: auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>tos-tag</h1>
+    <p>Cross-channel Slack intelligence · shadow gating · dynamic model routes</p>
+    <p class="muted">Stubbed Slack control plane remains available for pre-live testing; external model providers are opt-in.</p>
+  </header>
+  <nav aria-label="Management sections">
+    <a href="/admin">Overview</a><a href="/admin/channels">Channels</a><a href="/admin/observations">Observations</a><a href="/admin/decisions">Decisions</a><a href="/admin/context">Context</a><a href="/admin/jobs">Jobs</a><a href="/admin/routes">Routes</a><a href="/admin/marketplaces">Skills</a><a href="/admin/tools">Tools</a><a href="/admin/approvals">Approvals</a><a href="/admin/routines">Routines</a><a href="/admin/notes">Notes</a><a href="/admin/directives">Directives</a><a href="/admin/keystore">Keystore</a><a href="/admin/retention">Retention</a><a href="/admin/audit">Audit</a><a href="/admin/usage">Usage</a>
+  </nav>
+  <main>
+    {{if eq .Page "overview"}}
+    <section><h2>Jobs</h2><div class="metric" id="jobs">—</div><span class="muted">durable work records</span></section>
+    <section><h2>Deliveries</h2><div class="metric" id="deliveries">—</div><span class="muted">stub delivery records</span></section>
+    <section><h2>Decisions</h2><div class="metric" id="decisions">—</div><span class="muted">gating receipts</span></section>
+    <section class="wide">
+      <h2>Inject deterministic Slack fixture</h2>
+      <form id="inject"><label for="payload">Normalized envelope JSON</label><textarea id="payload"></textarea><button type="submit">Inject fixture</button></form>
+      <pre id="result" aria-live="polite"></pre>
+    </section>
+    <section class="wide"><h2>Redacted status</h2><pre id="status">Loading…</pre></section>
+    <section class="wide"><h2>Model routes</h2><pre id="routes">Loading…</pre></section>
+    <section class="wide">
+      <h2>Route preview</h2>
+      <form id="preview"><label for="previewPayload">Route context JSON</label><textarea id="previewPayload"></textarea><button type="submit">Preview effective model</button></form>
+      <pre id="previewResult" aria-live="polite"></pre>
+    </section>
+    <section class="wide"><h2>Retention reconciler</h2><pre id="retention">Loading…</pre></section>
+    {{else if eq .Page "keystore"}}
+    <section class="wide">
+      <h2>Write-only keystore</h2>
+      <p class="muted">Secret values are encrypted at rest, injected only into declared tool subprocess ENV, and never returned by this interface.</p>
+      <form id="secretForm">
+        <label for="secretOrg">Organization ID</label><input id="secretOrg" required>
+        <label for="secretName">ENV name</label><input id="secretName" placeholder="LINEAR_API_KEY" required>
+        <label for="secretPurpose">Purpose</label><input id="secretPurpose" required>
+        <label for="secretValue">Secret value</label><input id="secretValue" type="password" autocomplete="new-password" required>
+        <button type="submit">Store secret reference</button>
+      </form>
+      <pre id="pageData">Keystore is write-only. Enter an organization to store or refresh a reference.</pre>
+    </section>
+    {{else}}
+    <section class="wide">
+      <h2>{{.Page}}</h2>
+      <p class="muted">Redacted management data from <code>{{.Endpoint}}</code>.</p>
+      <form id="queryForm">
+        <label for="queryOrg">Organization ID</label><input id="queryOrg" placeholder="org-local">
+        <label for="queryChannel">Channel ID (optional)</label><input id="queryChannel" placeholder="C012345">
+        <button type="submit">Load scoped records</button>
+      </form>
+      <pre id="pageData">Loading…</pre>
+    </section>
+    <section class="wide" id="mutationSection">
+      <h2>Managed mutation</h2>
+      <p class="muted">Mutations are authenticated, CSRF protected, schema validated, tenant scoped, and audit-receipted. Use only an endpoint shown by the page template.</p>
+      <form id="mutationForm">
+        <label for="mutationPreset">Operation</label><select id="mutationPreset"></select>
+        <label for="mutationEndpoint">Endpoint</label><input id="mutationEndpoint" readonly>
+        <label for="mutationMethod">Method</label><input id="mutationMethod" readonly>
+        <label for="mutationPayload">JSON payload</label><textarea id="mutationPayload"></textarea>
+        <button type="submit">Apply mutation</button>
+      </form>
+      <pre id="mutationResult" aria-live="polite"></pre>
+    </section>
+    {{end}}
+  </main>
+  <script>
+    const page = {{printf "%q" .Page}};
+    const endpoint = {{printf "%q" .Endpoint}};
+    if (page !== 'overview' && page !== 'keystore') {
+      const mutations = {
+        channels:[
+          {label:'Create/update organization',endpoint:'/admin/api/organizations',method:'PUT',payload:{public_id:'org-local',name:'Local organization',enrollment_mode:'explicit',kill_switch:false,default_model_profile:'profile-default'}},
+          {label:'Create/update workspace',endpoint:'/admin/api/workspaces',method:'PUT',payload:{organization_id:'org-local',team_id:'team-local',name:'Local workspace',enabled:true}},
+          {label:'Create/update channel policy',endpoint:'/admin/api/channels',method:'PUT',payload:{organization_id:'org-local',team_id:'team-local',channel_id:'C012345',enrolled:true,restricted:false,participation_mode:'observe',membership_revision:'manual/v1',membership_refreshed_at:new Date().toISOString()}}
+        ],
+        routes:[
+          {label:'Create/update model profile',endpoint:'/admin/api/routes/profiles?organization_id=org-local',method:'PUT',payload:{id:'profile-default',organization_id:'org-local',provider_id:'anthropic',model_id:'claude-sonnet',variant:'medium',required_capabilities:['structured'],allowed_data_classes:['internal'],max_input_tokens:200000,max_output_tokens:16000,enabled:true}},
+          {label:'Create/update route rule',endpoint:'/admin/api/routes/rules',method:'PUT',payload:{id:'product-route',organization_id:'org-local',workspace_id:'team-local',channel_id:'C012345',phase:'response',profile_id:'profile-default',priority:100,enabled:true}}
+        ],
+        directives:[{label:'Draft directive',endpoint:'/admin/api/directives',method:'POST',payload:{organization_id:'org-local',channel_id:'C012345',prompt:'Use concise incident-response language.',actor_id:'admin'}},{label:'Activate directive revision',endpoint:'/admin/api/directives/activate',method:'POST',payload:{organization_id:'org-local',channel_id:'C012345',revision_id:'directive-revision-id'}}],
+        notes:[{label:'Propose source-linked note',endpoint:'/admin/api/notes',method:'POST',payload:{organization_id:'org-local',channel_id:'C012345',text:'Reviewed channel note',source_ids:['C012345/100.001'],actor_id:'admin'}},{label:'Review note',endpoint:'/admin/api/notes/review',method:'POST',payload:{organization_id:'org-local',channel_id:'C012345',note_id:'note-id',reviewer_id:'human-admin',approve:true}}],
+        approvals:[{label:'Approve pending tool action',endpoint:'/admin/api/approvals/approve',method:'POST',payload:{organization_id:'org-local',approval_id:'approval-id',approver_id:'human-admin'}}],
+        routines:[{label:'Create/update routine',endpoint:'/admin/api/routines',method:'PUT',payload:{id:'daily-brief',organization_id:'org-local',workspace_id:'team-local',channel_id:'C012345',root_thread_ts:'',session_id:'session-id',generation:1,owner_id:'human-admin',input:'Prepare the daily channel brief.',interval_seconds:86400,next_run:new Date().toISOString(),enabled:true}}]
+      };
+      async function loadScoped() {
+        const params = new URLSearchParams();
+        if (queryOrg.value) params.set('organization_id',queryOrg.value);
+        if (queryChannel.value) params.set('channel_id',queryChannel.value);
+        const suffix = params.toString() ? '?'+params.toString() : '';
+        const response = await fetch(endpoint+suffix);
+        pageData.textContent = JSON.stringify(await response.json(),null,2);
+      }
+      queryForm.addEventListener('submit',e=>{e.preventDefault();loadScoped().catch(x=>{pageData.textContent=String(x)})});
+      const choices = mutations[page];
+      if (!choices) {
+        mutationSection.hidden = true;
+      } else {
+        choices.forEach((choice,index)=>mutationPreset.add(new Option(choice.label,String(index))));
+        function selectMutation(){const mutation=choices[Number(mutationPreset.value||0)];mutationEndpoint.value=mutation.endpoint;mutationMethod.value=mutation.method;mutationPayload.value=JSON.stringify(mutation.payload,null,2)}
+        mutationPreset.addEventListener('change',selectMutation); selectMutation();
+        mutationForm.addEventListener('submit',async e=>{e.preventDefault();const c=await(await fetch('/admin/api/csrf')).json();const response=await fetch(mutationEndpoint.value,{method:mutationMethod.value,headers:{'content-type':'application/json','x-tos-tag-csrf':c.token},body:mutationPayload.value});mutationResult.textContent=JSON.stringify(await response.json(),null,2);if(response.ok)await loadScoped()});
+      }
+      if (['marketplaces','tools','retention'].includes(page)) loadScoped().catch(x=>{pageData.textContent=String(x)}); else pageData.textContent='Enter an organization ID to load tenant-scoped records.';
+    }
+    if (page === 'keystore') {
+      secretForm.addEventListener('submit', async e => {
+        e.preventDefault();
+        const csrf = await (await fetch('/admin/api/csrf')).json();
+        const body = {organization_id:secretOrg.value,name:secretName.value,purpose:secretPurpose.value,value:secretValue.value};
+        const response = await fetch('/admin/api/keystore',{method:'PUT',headers:{'content-type':'application/json','x-tos-tag-csrf':csrf.token},body:JSON.stringify(body)});
+        secretValue.value = '';
+        const stored = await response.json();
+        const refs = response.ok ? await (await fetch('/admin/api/keystore?organization_id='+encodeURIComponent(secretOrg.value))).json() : stored;
+        pageData.textContent = JSON.stringify(refs, null, 2);
+      });
+    }
+    if (page === 'overview') {
+    const sample = {organization_id:"org-local", envelope_id:"env-demo", event_id:"event-demo", team_id:"team-local", channel_id:"product", message_ts:"100.001", user_id:"user-local", kind:"message", text:"<@tos-tag> hello from the stub", event_time:new Date().toISOString(), received_at:new Date().toISOString(), is_mention:true};
+    payload.value = JSON.stringify(sample, null, 2);
+    previewPayload.value = JSON.stringify({route:{organization_id:"org-local",workspace_id:"team-local",channel_id:"product",phase:"response",data_classes:["internal"],capabilities:["structured"],input_tokens:1000},constraints:{}},null,2);
+    async function load() {
+      const r = await fetch('/admin/api/status'); const x = await r.json();
+      status.textContent = JSON.stringify(x, null, 2); jobs.textContent=x.counts.jobs; deliveries.textContent=x.counts.deliveries; decisions.textContent=x.counts.decisions;
+      routes.textContent=JSON.stringify(await (await fetch('/admin/api/routes')).json(),null,2);
+      retention.textContent=JSON.stringify(await (await fetch('/admin/api/retention')).json(),null,2);
+    }
+    inject.addEventListener('submit', async e => { e.preventDefault(); const c=await (await fetch('/admin/api/csrf')).json(); const r=await fetch('/admin/api/stub/envelopes',{method:'POST',headers:{'content-type':'application/json','x-tos-tag-csrf':c.token},body:payload.value}); result.textContent=JSON.stringify(await r.json(),null,2); await load(); });
+    preview.addEventListener('submit',async e=>{e.preventDefault();const c=await(await fetch('/admin/api/csrf')).json();const r=await fetch('/admin/api/routes/preview',{method:'POST',headers:{'content-type':'application/json','x-tos-tag-csrf':c.token},body:previewPayload.value});previewResult.textContent=JSON.stringify(await r.json(),null,2)});
+    new EventSource('/admin/events').addEventListener('refresh',()=>load());
+    load();
+    }
+  </script>
+</body>
+</html>

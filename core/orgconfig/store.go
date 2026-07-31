@@ -1,0 +1,306 @@
+// Package orgconfig owns organization, Slack workspace, and channel policy.
+package orgconfig
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"sync"
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"github.com/telemetryos/tos-tag/core/database"
+	"github.com/telemetryos/tos-tag/models"
+	"github.com/telemetryos/tos-tag/types"
+)
+
+var ErrNotFound = errors.New("organization scope not found")
+
+type ChannelPolicy struct {
+	OrganizationID        string                  `json:"organization_id"`
+	TeamID                string                  `json:"team_id"`
+	ChannelID             string                  `json:"channel_id"`
+	Name                  string                  `json:"name,omitempty"`
+	Enrolled              bool                    `json:"enrolled"`
+	Restricted            bool                    `json:"restricted"`
+	ParticipationMode     types.ParticipationMode `json:"participation_mode"`
+	KillSwitch            bool                    `json:"kill_switch"`
+	Cooldown              time.Duration           `json:"cooldown"`
+	MaxResponsesPerHour   int                     `json:"max_responses_per_hour"`
+	MaxConcurrentJobs     int                     `json:"max_concurrent_jobs"`
+	DefaultModelProfile   string                  `json:"default_model_profile,omitempty"`
+	WorkspaceEnabled      bool                    `json:"workspace_enabled"`
+	MembershipRevision    string                  `json:"membership_revision"`
+	MembershipRefreshedAt time.Time               `json:"membership_refreshed_at"`
+	Version               int64                   `json:"version"`
+}
+
+type Resolver interface {
+	Resolve(context.Context, string, string, string) (ChannelPolicy, error)
+}
+
+type Store interface {
+	Resolver
+	GetOrganization(context.Context, string) (models.Organization, error)
+	GetWorkspace(context.Context, string, string) (models.Workspace, error)
+	PutOrganization(context.Context, models.Organization) (models.Organization, error)
+	PutWorkspace(context.Context, models.Workspace) (models.Workspace, error)
+	PutChannel(context.Context, ChannelPolicy) (ChannelPolicy, error)
+	ListChannels(context.Context, string) ([]ChannelPolicy, error)
+}
+
+func ValidateChannel(policy ChannelPolicy) error {
+	if policy.OrganizationID == "" || policy.TeamID == "" || policy.ChannelID == "" || policy.MembershipRevision == "" || policy.MembershipRefreshedAt.IsZero() {
+		return fmt.Errorf("channel scope and membership revision are required")
+	}
+	switch policy.ParticipationMode {
+	case types.ModeObserve, types.ModeMention, types.ModeAssist, types.ModeProactive:
+	default:
+		return fmt.Errorf("invalid participation mode %q", policy.ParticipationMode)
+	}
+	if policy.Cooldown < 0 || policy.MaxResponsesPerHour <= 0 || policy.MaxConcurrentJobs <= 0 {
+		return fmt.Errorf("invalid channel admission limits")
+	}
+	return nil
+}
+
+type Memory struct {
+	mu            sync.RWMutex
+	organizations map[string]models.Organization
+	workspaces    map[string]models.Workspace
+	channels      map[string]ChannelPolicy
+}
+
+func NewMemory() *Memory {
+	return &Memory{organizations: make(map[string]models.Organization), workspaces: make(map[string]models.Workspace), channels: make(map[string]ChannelPolicy)}
+}
+func scopeKey(org, team, channel string) string { return org + "/" + team + "/" + channel }
+func (s *Memory) Resolve(_ context.Context, org, team, channel string) (ChannelPolicy, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	value, ok := s.channels[scopeKey(org, team, channel)]
+	if !ok {
+		return ChannelPolicy{}, ErrNotFound
+	}
+	if organization, exists := s.organizations[org]; exists && organization.KillSwitch {
+		value.KillSwitch = true
+	}
+	if workspace, exists := s.workspaces[org+"/"+team]; exists {
+		value.WorkspaceEnabled = workspace.Enabled
+		value.KillSwitch = value.KillSwitch || !workspace.Enabled
+	} else {
+		value.WorkspaceEnabled = true
+	}
+	return value, nil
+}
+func (s *Memory) GetOrganization(_ context.Context, organizationID string) (models.Organization, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	value, ok := s.organizations[organizationID]
+	if !ok {
+		return models.Organization{}, ErrNotFound
+	}
+	return value, nil
+}
+func (s *Memory) PutOrganization(_ context.Context, value models.Organization) (models.Organization, error) {
+	if value.PublicID == "" {
+		return models.Organization{}, ErrNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if old, ok := s.organizations[value.PublicID]; ok {
+		value.Version = old.Version + 1
+	} else {
+		value.Version = 1
+	}
+	s.organizations[value.PublicID] = value
+	return value, nil
+}
+func (s *Memory) PutWorkspace(_ context.Context, value models.Workspace) (models.Workspace, error) {
+	if value.OrganizationID == "" || value.TeamID == "" {
+		return models.Workspace{}, ErrNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := value.OrganizationID + "/" + value.TeamID
+	if old, ok := s.workspaces[key]; ok {
+		value.Version = old.Version + 1
+	} else {
+		value.Version = 1
+	}
+	s.workspaces[key] = value
+	return value, nil
+}
+func (s *Memory) GetWorkspace(_ context.Context, organizationID, teamID string) (models.Workspace, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	value, ok := s.workspaces[organizationID+"/"+teamID]
+	if !ok {
+		return models.Workspace{}, ErrNotFound
+	}
+	return value, nil
+}
+func (s *Memory) PutChannel(_ context.Context, value ChannelPolicy) (ChannelPolicy, error) {
+	if err := ValidateChannel(value); err != nil {
+		return ChannelPolicy{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := scopeKey(value.OrganizationID, value.TeamID, value.ChannelID)
+	if old, ok := s.channels[key]; ok {
+		value.Version = old.Version + 1
+	} else {
+		value.Version = 1
+	}
+	s.channels[key] = value
+	return value, nil
+}
+func (s *Memory) ListChannels(_ context.Context, org string) ([]ChannelPolicy, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []ChannelPolicy
+	for _, v := range s.channels {
+		if v.OrganizationID == org {
+			if organization, ok := s.organizations[org]; ok && organization.KillSwitch {
+				v.KillSwitch = true
+			}
+			if workspace, ok := s.workspaces[org+"/"+v.TeamID]; ok {
+				v.WorkspaceEnabled = workspace.Enabled
+				v.KillSwitch = v.KillSwitch || !workspace.Enabled
+			} else {
+				v.WorkspaceEnabled = true
+			}
+			out = append(out, v)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ChannelID < out[j].ChannelID })
+	return out, nil
+}
+
+type Mongo struct {
+	db  *database.Database
+	now func() time.Time
+}
+
+func NewMongo(db *database.Database) *Mongo { return &Mongo{db: db, now: time.Now} }
+
+func (s *Mongo) GetOrganization(ctx context.Context, organizationID string) (models.Organization, error) {
+	var value models.Organization
+	err := s.db.Collection(models.CollectionOrganizations).FindOne(ctx, bson.M{"public_id": organizationID}).Decode(&value)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return models.Organization{}, ErrNotFound
+	}
+	if err != nil {
+		return models.Organization{}, err
+	}
+	return value, nil
+}
+
+func (s *Mongo) GetWorkspace(ctx context.Context, organizationID, teamID string) (models.Workspace, error) {
+	var value models.Workspace
+	err := s.db.Collection(models.CollectionWorkspaces).FindOne(ctx, bson.M{"organization_id": organizationID, "team_id": teamID}).Decode(&value)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return models.Workspace{}, ErrNotFound
+	}
+	if err != nil {
+		return models.Workspace{}, err
+	}
+	return value, nil
+}
+
+func (s *Mongo) PutOrganization(ctx context.Context, value models.Organization) (models.Organization, error) {
+	if value.PublicID == "" || value.Name == "" || (value.EnrollmentMode != "allowlist" && value.EnrollmentMode != "all_joined") {
+		return models.Organization{}, fmt.Errorf("invalid organization")
+	}
+	now := s.now().UTC()
+	after := options.After
+	err := s.db.Collection(models.CollectionOrganizations).FindOneAndUpdate(ctx, bson.M{"public_id": value.PublicID}, bson.M{"$set": bson.M{"name": value.Name, "enrollment_mode": value.EnrollmentMode, "kill_switch": value.KillSwitch, "default_model_profile": value.DefaultModelProfile, "updated_at": now}, "$setOnInsert": bson.M{"public_id": value.PublicID, "created_at": now}, "$inc": bson.M{"version": 1}}, options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(after)).Decode(&value)
+	return value, err
+}
+func (s *Mongo) PutWorkspace(ctx context.Context, value models.Workspace) (models.Workspace, error) {
+	if value.OrganizationID == "" || value.TeamID == "" {
+		return models.Workspace{}, fmt.Errorf("invalid workspace")
+	}
+	now := s.now().UTC()
+	after := options.After
+	err := s.db.Collection(models.CollectionWorkspaces).FindOneAndUpdate(ctx, bson.M{"organization_id": value.OrganizationID, "team_id": value.TeamID}, bson.M{"$set": bson.M{"name": value.Name, "enabled": value.Enabled, "updated_at": now}, "$setOnInsert": bson.M{"public_id": types.NewID("workspace"), "organization_id": value.OrganizationID, "team_id": value.TeamID, "created_at": now}, "$inc": bson.M{"version": 1}}, options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(after)).Decode(&value)
+	return value, err
+}
+func (s *Mongo) PutChannel(ctx context.Context, value ChannelPolicy) (ChannelPolicy, error) {
+	if err := ValidateChannel(value); err != nil {
+		return ChannelPolicy{}, err
+	}
+	now := s.now().UTC()
+	after := options.After
+	var doc models.Channel
+	err := s.db.Collection(models.CollectionChannels).FindOneAndUpdate(ctx, bson.M{"organization_id": value.OrganizationID, "team_id": value.TeamID, "channel_id": value.ChannelID}, bson.M{"$set": bson.M{"name": value.Name, "enrolled": value.Enrolled, "restricted": value.Restricted, "participation_mode": string(value.ParticipationMode), "kill_switch": value.KillSwitch, "cooldown_seconds": int(value.Cooldown.Seconds()), "max_responses_per_hour": value.MaxResponsesPerHour, "max_concurrent_jobs": value.MaxConcurrentJobs, "default_model_profile": value.DefaultModelProfile, "membership_revision": value.MembershipRevision, "membership_refreshed_at": value.MembershipRefreshedAt, "updated_at": now}, "$setOnInsert": bson.M{"public_id": types.NewID("channel"), "organization_id": value.OrganizationID, "team_id": value.TeamID, "channel_id": value.ChannelID, "created_at": now}, "$inc": bson.M{"version": 1}}, options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(after)).Decode(&doc)
+	if err != nil {
+		return ChannelPolicy{}, err
+	}
+	return channelFromModel(doc), nil
+}
+func (s *Mongo) Resolve(ctx context.Context, org, team, channel string) (ChannelPolicy, error) {
+	organization, err := s.GetOrganization(ctx, org)
+	if err != nil {
+		return ChannelPolicy{}, err
+	}
+	workspace, err := s.GetWorkspace(ctx, org, team)
+	if err != nil {
+		return ChannelPolicy{}, err
+	}
+	var doc models.Channel
+	err = s.db.Collection(models.CollectionChannels).FindOne(ctx, bson.M{"organization_id": org, "team_id": team, "channel_id": channel}).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return ChannelPolicy{}, ErrNotFound
+	}
+	if err != nil {
+		return ChannelPolicy{}, err
+	}
+	policy := channelFromModel(doc)
+	policy.WorkspaceEnabled = workspace.Enabled
+	policy.KillSwitch = policy.KillSwitch || organization.KillSwitch || !workspace.Enabled
+	return policy, nil
+}
+func (s *Mongo) ListChannels(ctx context.Context, org string) ([]ChannelPolicy, error) {
+	organization, err := s.GetOrganization(ctx, org)
+	if err != nil {
+		return nil, err
+	}
+	cursor, err := s.db.Collection(models.CollectionChannels).Find(ctx, bson.M{"organization_id": org}, options.Find().SetSort(bson.D{{Key: "channel_id", Value: 1}}))
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+	var docs []models.Channel
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, err
+	}
+	out := make([]ChannelPolicy, len(docs))
+	workspaceEnabled := make(map[string]bool)
+	workspaceCursor, err := s.db.Collection(models.CollectionWorkspaces).Find(ctx, bson.M{"organization_id": org})
+	if err != nil {
+		return nil, err
+	}
+	defer workspaceCursor.Close(ctx)
+	var workspaces []models.Workspace
+	if err := workspaceCursor.All(ctx, &workspaces); err != nil {
+		return nil, err
+	}
+	for _, workspace := range workspaces {
+		workspaceEnabled[workspace.TeamID] = workspace.Enabled
+	}
+	for i, d := range docs {
+		out[i] = channelFromModel(d)
+		enabled, exists := workspaceEnabled[d.TeamID]
+		out[i].WorkspaceEnabled = enabled && exists
+		out[i].KillSwitch = out[i].KillSwitch || organization.KillSwitch || !out[i].WorkspaceEnabled
+	}
+	return out, nil
+}
+func channelFromModel(d models.Channel) ChannelPolicy {
+	return ChannelPolicy{OrganizationID: d.OrganizationID, TeamID: d.TeamID, ChannelID: d.ChannelID, Name: d.Name, Enrolled: d.Enrolled, Restricted: d.Restricted, ParticipationMode: types.ParticipationMode(d.ParticipationMode), KillSwitch: d.KillSwitch, Cooldown: time.Duration(d.CooldownSeconds) * time.Second, MaxResponsesPerHour: d.MaxResponsesPerHour, MaxConcurrentJobs: d.MaxConcurrentJobs, DefaultModelProfile: d.DefaultModelProfile, MembershipRevision: d.MembershipRevision, MembershipRefreshedAt: d.MembershipRefreshedAt, Version: d.Version}
+}

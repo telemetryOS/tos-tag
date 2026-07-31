@@ -1,0 +1,13 @@
+/bin/
+/dist/
+/.cache/
+/.testruns/
+/*.local.toml
+/.env
+/runtime.env
+/coverage.out
+/eval-results.json
+*.log
+*.pem
+*.key
+.artifacts/

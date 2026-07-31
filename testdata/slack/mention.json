@@ -1,0 +1,14 @@
+{
+  "organization_id": "org-local-eval",
+  "envelope_id": "envelope-local-mention-2",
+  "event_id": "event-local-mention-2",
+  "team_id": "team-local-eval",
+  "channel_id": "product",
+  "message_ts": "1000.002",
+  "user_id": "user-local-eval",
+  "kind": "message",
+  "text": "<@tos-tag> confirm the deterministic stub path",
+  "event_time": "2026-07-30T23:00:00Z",
+  "received_at": "2026-07-30T23:00:00Z",
+  "is_mention": true
+}
