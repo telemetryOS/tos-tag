@@ -25,6 +25,23 @@ func TestDeliveryQueueDoesNotDuplicateLogicalSend(t *testing.T) {
 	}
 }
 
+func TestDeliveryQueueAcceptsExactlyOneDurableSource(t *testing.T) {
+	queue := NewMemoryQueue(nil)
+	direct := deliverySpec()
+	direct.JobID = ""
+	direct.DecisionID = "decision-1"
+	direct.IdempotencyKey = "decision/1/direct"
+	record, created, err := queue.Enqueue(context.Background(), direct)
+	if err != nil || !created || record.DecisionID != "decision-1" || record.JobID != "" {
+		t.Fatalf("direct decision delivery = %#v, created=%v, err=%v", record, created, err)
+	}
+	invalid := direct
+	invalid.JobID = "job-1"
+	if _, _, err := queue.Enqueue(context.Background(), invalid); err == nil {
+		t.Fatal("delivery with both job and decision sources was accepted")
+	}
+}
+
 func TestDeliveryRetryDoesNotCreateNewRecord(t *testing.T) {
 	queue := NewMemoryQueue(nil)
 	record, _, _ := queue.Enqueue(context.Background(), deliverySpec())

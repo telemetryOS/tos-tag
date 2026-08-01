@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,7 +43,7 @@ func TestBridgeFencesReadToolAndRequiresIndependentApprovalForWrite(t *testing.T
 	if err := os.WriteFile(script, []byte("printf 'ok:%s' \"$1\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	bundle := Bundle{Root: root, Manifest: Manifest{ID: "demo", Version: "v1", Script: "tool.sh", Operations: []Operation{{ID: "read", Risk: "read", TimeoutSeconds: 2, MaxOutputBytes: 1024}, {ID: "write", Risk: "write", TimeoutSeconds: 2, MaxOutputBytes: 1024}}}}
+	bundle := Bundle{Root: root, Manifest: Manifest{ID: "demo", Version: "v1", Script: "tool.sh", Operations: []Operation{{ID: "read", Risk: "read", TimeoutSeconds: 2, MaxOutputBytes: 1024}, {ID: "write", Risk: "write", TimeoutSeconds: 2, MaxOutputBytes: 1024}, {ID: "trusted-write", Risk: "write", Approval: ApprovalNever, TimeoutSeconds: 2, MaxOutputBytes: 1024}}}}
 	data, err := os.ReadFile(script)
 	if err != nil {
 		t.Fatal(err)
@@ -88,12 +89,46 @@ func TestBridgeFencesReadToolAndRequiresIndependentApprovalForWrite(t *testing.T
 		t.Fatalf("status=%d body=%s", status, body)
 	}
 
+	status, body = bridgeCall(t, bridge, capability, bridgeRequest{ToolID: "demo", OperationID: "trusted-write", Arguments: []string{"three"}})
+	if status != http.StatusOK || !bytes.Contains(body, []byte("ok:three")) {
+		t.Fatalf("trusted write status=%d body=%s", status, body)
+	}
+	storedApprovals, err := approvalStore.List(ctx, "org")
+	if err != nil || len(storedApprovals) != 1 {
+		t.Fatalf("trusted write created an approval: approvals=%d err=%v", len(storedApprovals), err)
+	}
+	var foundNeverPolicy bool
+	for _, receipt := range auditLog.List("org") {
+		if receipt.Type == "tool.execution.requested" && receipt.Metadata["operation_id"] == "trusted-write" && receipt.Metadata["approval_policy"] == "never" {
+			foundNeverPolicy = true
+		}
+	}
+	if !foundNeverPolicy {
+		t.Fatal("trusted write did not record its approval policy in the audit receipt")
+	}
+
 	if err := bridge.RevokeAttempt(ctx, "attempt"); err != nil {
 		t.Fatal(err)
 	}
 	status, _ = bridgeCall(t, bridge, capability, bridgeRequest{ToolID: "demo", OperationID: "read"})
 	if status != http.StatusUnauthorized {
 		t.Fatalf("revoked capability status=%d", status)
+	}
+}
+
+func TestBridgeRejectsModelSuppliedSecretReferences(t *testing.T) {
+	secrets, err := keystore.New([]byte("01234567890123456789012345678901"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := &Bridge{gateway: Gateway{Registry: &Registry{bundles: map[string]Bundle{}}, Secrets: secrets, Executor: Executor{Enabled: true}}, scopes: map[string]JobScope{"capability": {OrganizationID: "org", JobID: "job", AttemptID: "attempt", LeaseToken: "lease", SteeringEpoch: 1, ExpiresAt: time.Now().Add(time.Minute)}}}
+	request := httptest.NewRequest(http.MethodPost, "/execute", strings.NewReader(`{"tool_id":"demo","operation_id":"read","secret_references":{"API_TOKEN":"chosen-by-model"}}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer capability")
+	recorder := httptest.NewRecorder()
+	bridge.serve(recorder, request)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "invalid_request") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -111,7 +146,7 @@ func TestTriggerBridgeIsChannelScopedAndResumesExactApprovedMutation(t *testing.
 		t.Fatal(err)
 	}
 	triggerStore := triggers.NewStore(nil)
-	job, _, err := queue.Enqueue(ctx, jobs.Spec{OrganizationID: "org", WorkspaceID: "team", ChannelID: "channel", RootThreadTS: "100.1", SessionID: "session", Generation: 1, IdempotencyKey: "job-trigger", Kind: "agent", MaxAttempts: 3})
+	job, _, err := queue.Enqueue(ctx, jobs.Spec{OrganizationID: "org", WorkspaceID: "team", ChannelID: "channel", RootThreadTS: "100.1", SessionID: "session", Generation: 1, RequesterID: "human", IdempotencyKey: "job-trigger", Kind: "agent", MaxAttempts: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +171,13 @@ func TestTriggerBridgeIsChannelScopedAndResumesExactApprovedMutation(t *testing.
 	}
 	if err := json.Unmarshal(body, &requested); err != nil || requested.ApprovalID == "" {
 		t.Fatalf("approval response=%s err=%v", body, err)
+	}
+	requestedApproval, err := approvalStore.GetContext(ctx, "org", requested.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestedApproval.RequesterID != "agent:"+string(job.ID) {
+		t.Fatalf("tool action requester = %q, want executing agent", requestedApproval.RequesterID)
 	}
 	if err := coordinator.HandleSlackDecision(ctx, approvals.SlackDecision{OrganizationID: "org", WorkspaceID: "team", ChannelID: "channel", UserID: "human", ApprovalID: requested.ApprovalID, Approve: true}); err != nil {
 		t.Fatal(err)

@@ -2,8 +2,14 @@ package channelconfig
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/telemetryos/tos-tag/core/audit"
+	"github.com/telemetryos/tos-tag/core/orgconfig"
+	"github.com/telemetryos/tos-tag/types"
 )
 
 func TestDirectiveActivationAndRollback(t *testing.T) {
@@ -24,6 +30,57 @@ func TestDirectiveActivationAndRollback(t *testing.T) {
 	}
 	if active, _ := store.ActiveDirective(context.Background(), "org", "alerts"); active.ID != first.ID {
 		t.Fatal("rollback did not restore prior directive")
+	}
+}
+
+func TestPublishDirectiveIsIdempotentAndActive(t *testing.T) {
+	store := NewStore()
+	first, err := store.PublishDirective(context.Background(), "org", "alerts", "Investigate every alert.", "U1", "view-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.PublishDirective(context.Background(), "org", "alerts", "forged retry content", "U1", "view-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != second.ID || second.Prompt != "Investigate every alert." || !second.Active {
+		t.Fatalf("first=%#v second=%#v", first, second)
+	}
+	values, _ := store.ListDirectives(context.Background(), "org", "alerts")
+	if len(values) != 1 {
+		t.Fatalf("directive count=%d", len(values))
+	}
+}
+
+func TestEditorRequiresChannelApproverAndAuditsContentCommitment(t *testing.T) {
+	ctx := context.Background()
+	scopes := orgconfig.NewMemory()
+	_, err := scopes.PutChannel(ctx, orgconfig.ChannelPolicy{
+		OrganizationID: "org", TeamID: "team", ChannelID: "alerts", Enrolled: true,
+		ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 8,
+		ApproverUserIDs: []string{"U_APPROVER"}, MembershipRevision: "m1", MembershipRefreshedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appender, err := audit.NewMemoryAppender([]byte("01234567890123456789012345678901"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	editor, err := NewEditor(NewStore(), scopes, appender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := editor.Load(ctx, EditRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "alerts", ActorID: "U_OTHER"}); !errors.Is(err, ErrDirectiveForbidden) {
+		t.Fatalf("unauthorized load error=%v", err)
+	}
+	saved, err := editor.Save(ctx, EditRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "alerts", ActorID: "U_APPROVER", Prompt: "Investigate each alert using OTel evidence.", SourceID: "view-1"})
+	if err != nil || saved.Revision != 1 {
+		t.Fatalf("saved=%#v err=%v", saved, err)
+	}
+	receipts := appender.List("org")
+	if len(receipts) != 1 || receipts[0].ContentCommitment == "" || strings.Contains(receipts[0].ContentCommitment, "Investigate") {
+		t.Fatalf("receipt=%#v", receipts)
 	}
 }
 

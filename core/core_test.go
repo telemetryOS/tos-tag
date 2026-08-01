@@ -30,6 +30,28 @@ func TestLoggedClassifierUsesConservativeDeterministicFallback(t *testing.T) {
 	}
 }
 
+func TestDefaultResponseProfilesExposeLowMediumAndMaxEffort(t *testing.T) {
+	profiles := defaultResponseProfiles(config.DefaultConfiguration.Models)
+	if len(profiles) != 3 {
+		t.Fatalf("profile count = %d", len(profiles))
+	}
+	want := map[string]string{
+		"chatgpt-luna-low":    "light",
+		"chatgpt-luna-medium": "standard",
+		"chatgpt-luna-max":    "strong",
+	}
+	for _, profile := range profiles {
+		strength, _ := profile.ProviderOptions["strength"].(string)
+		if want[profile.ID] != strength || profile.Variant == "" || !profile.Enabled {
+			t.Fatalf("unexpected profile: %#v", profile)
+		}
+		delete(want, profile.ID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing profiles: %#v", want)
+	}
+}
+
 func TestCompleteObjectGraphConstructionHasNoNetworkSideEffects(t *testing.T) {
 	cfg := config.DefaultConfiguration
 	cfg.Marketplaces.HeadlessRoot = filepath.Clean(filepath.Join("..", "..", "telemetryos-agent-skills"))
@@ -59,7 +81,7 @@ func TestConfiguredBehavioralPluginsAreAutomaticallyInjected(t *testing.T) {
 	if len(available) < 10 || len(injected) != len(available) {
 		t.Fatalf("available=%d injected=%d", len(available), len(injected))
 	}
-	foundTagTriggers := false
+	foundTagTriggers, foundTeamAlignment := false, false
 	for _, snapshot := range injected {
 		if snapshot.MarketplaceID != "telemetryos/telemetryos-automation" && snapshot.MarketplaceID != "tos-tag/base" {
 			t.Fatalf("unexpected automatically injected source: %#v", snapshot)
@@ -67,9 +89,12 @@ func TestConfiguredBehavioralPluginsAreAutomaticallyInjected(t *testing.T) {
 		if snapshot.MarketplaceID == "tos-tag/base" && snapshot.Name == "tag-triggers" {
 			foundTagTriggers = true
 		}
+		if snapshot.MarketplaceID == "tos-tag/base" && snapshot.Name == "team-alignment" {
+			foundTeamAlignment = true
+		}
 	}
-	if !foundTagTriggers {
-		t.Fatal("tag-triggers was not automatically injected from the base plugin")
+	if !foundTagTriggers || !foundTeamAlignment {
+		t.Fatalf("base skills were not automatically injected: tag-triggers=%v team-alignment=%v", foundTagTriggers, foundTeamAlignment)
 	}
 
 	cfg.BasePlugin = "missing"

@@ -22,6 +22,7 @@ type DirectiveRevision struct {
 	Prompt         string    `json:"prompt" bson:"prompt"`
 	CreatedBy      string    `json:"created_by" bson:"created_by"`
 	CreatedAt      time.Time `json:"created_at" bson:"created_at"`
+	SourceID       string    `json:"source_id,omitempty" bson:"source_id,omitempty"`
 	Active         bool      `json:"active" bson:"-"`
 }
 
@@ -48,6 +49,7 @@ type NoteRevision struct {
 
 type Repository interface {
 	DraftDirective(context.Context, string, string, string, string) (DirectiveRevision, error)
+	PublishDirective(context.Context, string, string, string, string, string) (DirectiveRevision, error)
 	ActivateDirective(context.Context, string, string, string) (DirectiveRevision, error)
 	ActiveDirective(context.Context, string, string) (DirectiveRevision, error)
 	ListDirectives(context.Context, string, string) ([]DirectiveRevision, error)
@@ -68,13 +70,42 @@ func NewStore() *Store {
 }
 
 func (s *Store) DraftDirective(_ context.Context, organizationID, channelID, prompt, actorID string) (DirectiveRevision, error) {
-	if organizationID == "" || channelID == "" || strings.TrimSpace(prompt) == "" || actorID == "" {
-		return DirectiveRevision{}, errors.New("directive scope, prompt, and actor are required")
+	prompt, err := validateDirective(organizationID, channelID, prompt, actorID)
+	if err != nil {
+		return DirectiveRevision{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := scopeKey(organizationID, channelID)
 	revision := DirectiveRevision{ID: types.NewID("dirrev"), OrganizationID: organizationID, ChannelID: channelID, Revision: int64(len(s.directives[key]) + 1), Prompt: prompt, CreatedBy: actorID, CreatedAt: time.Now().UTC()}
+	s.directives[key] = append(s.directives[key], revision)
+	return revision, nil
+}
+
+func (s *Store) PublishDirective(_ context.Context, organizationID, channelID, prompt, actorID, sourceID string) (DirectiveRevision, error) {
+	prompt, err := validateDirective(organizationID, channelID, prompt, actorID)
+	if err != nil {
+		return DirectiveRevision{}, err
+	}
+	if strings.TrimSpace(sourceID) == "" {
+		return DirectiveRevision{}, errors.New("directive source ID is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := scopeKey(organizationID, channelID)
+	for index := range s.directives[key] {
+		if s.directives[key][index].SourceID != sourceID {
+			continue
+		}
+		for other := range s.directives[key] {
+			s.directives[key][other].Active = other == index
+		}
+		return s.directives[key][index], nil
+	}
+	for index := range s.directives[key] {
+		s.directives[key][index].Active = false
+	}
+	revision := DirectiveRevision{ID: types.NewID("dirrev"), OrganizationID: organizationID, ChannelID: channelID, Revision: int64(len(s.directives[key]) + 1), Prompt: prompt, CreatedBy: actorID, CreatedAt: time.Now().UTC(), SourceID: sourceID, Active: true}
 	s.directives[key] = append(s.directives[key], revision)
 	return revision, nil
 }
@@ -183,3 +214,14 @@ func DelimitedNoteData(note NoteRevision) string {
 }
 
 func scopeKey(organizationID, channelID string) string { return organizationID + "/" + channelID }
+
+func validateDirective(organizationID, channelID, prompt, actorID string) (string, error) {
+	prompt = strings.TrimSpace(prompt)
+	if organizationID == "" || channelID == "" || prompt == "" || actorID == "" {
+		return "", errors.New("directive scope, prompt, and actor are required")
+	}
+	if len([]rune(prompt)) > 3000 {
+		return "", errors.New("directive prompt exceeds 3000 characters")
+	}
+	return prompt, nil
+}

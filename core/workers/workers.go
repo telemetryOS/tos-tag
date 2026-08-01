@@ -4,6 +4,7 @@ package workers
 import (
 	"context"
 	"errors"
+	"io"
 	"time"
 
 	"github.com/telemetryos/tos-tag/core/marketplace"
@@ -20,18 +21,8 @@ type Spec struct {
 	AttemptID      string
 	Command        []string
 	Environment    map[string]string
-	Provider       *ProviderRoute
 	Skills         []marketplace.SkillSnapshot
-	CustomTools    map[string][]byte
 	WallTime       time.Duration
-}
-
-// ProviderRoute is a short-lived capability to a control-plane model gateway.
-// Token is never an upstream provider credential.
-type ProviderRoute struct {
-	ID      string
-	BaseURL string
-	Token   string
 }
 
 type CapabilityRevoker interface {
@@ -67,4 +58,18 @@ type Manager interface {
 	Provision(context.Context, Spec) (Workspace, error)
 	ExportArtifacts(context.Context, Workspace, []ArtifactSpec) ([]Artifact, error)
 	Terminate(context.Context, Workspace) error
+}
+
+// ConnectedManager starts a disposable worker while retaining its JSONL stdio
+// transport. Codex App Server is the only process that receives these pipes;
+// model tools never receive them or any control-plane credential.
+type ConnectedManager interface {
+	Manager
+	ProvisionConnected(context.Context, Spec) (Connection, error)
+}
+
+type Connection struct {
+	Workspace Workspace
+	Stdin     io.WriteCloser
+	Stdout    io.ReadCloser
 }

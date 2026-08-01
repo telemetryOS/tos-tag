@@ -1,16 +1,33 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 
+	"github.com/telemetryos/tos-tag/core/config"
 	"github.com/telemetryos/tos-tag/evals"
 )
 
 func main() {
-	score, err := evals.Run()
+	live := flag.Bool("live", false, "run the naturalistic suite against the configured live OpenAI classifier")
+	flag.Parse()
+	var (
+		score evals.Score
+		err   error
+	)
+	if *live {
+		cfg, loadErr := config.Load()
+		if loadErr != nil {
+			fail(loadErr)
+		}
+		score, err = evals.RunLive(context.Background(), *cfg)
+	} else {
+		score, err = evals.Run()
+	}
 	if err != nil {
 		fail(err)
 	}
@@ -21,7 +38,11 @@ func main() {
 	if err := os.MkdirAll(".artifacts", 0o750); err != nil {
 		fail(err)
 	}
-	path := filepath.Join(".artifacts", "eval-score.json")
+	name := "eval-score.json"
+	if *live {
+		name = "eval-score-live.json"
+	}
+	path := filepath.Join(".artifacts", name)
 	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
 		fail(err)
 	}

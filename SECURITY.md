@@ -6,11 +6,18 @@ marketplace artifacts as untrusted input.
 
 ## Current initiative
 
-Slack defaults to a deterministic stub; fake inference remains available for
-tests and evals. Live Slack, credentialed provider calls, and connector effects
-are opt-in integration modes. No Slack token, provider credential, connector
-secret, or live customer content is required or permitted in normal tests,
-fixtures, or behavioral evals.
+Checked-in configuration defaults to a deterministic Slack stub, shadow
+classification, disabled Codex, disabled helper execution, and empty secrets;
+fake inference remains available for tests and evals. Live Slack, credentialed
+provider calls, and connector effects are opt-in integration modes. No Slack
+token, provider credential, connector secret, or live customer content is
+required or permitted in normal tests, fixtures, or behavioral evals.
+
+The explicitly approved local development deployment may observe all
+user-authorized conversations and backfill bounded history, but newly discovered
+conversations are observe-only. Only `#tos-tag` is in assist mode and all
+reactions/messages are hard-restricted to that destination. This local authority
+does not become a tracked default or production authorization.
 
 ## Non-negotiable boundaries
 
@@ -18,11 +25,80 @@ fixtures, or behavioral evals.
   it.
 - Tenant and scope predicates are required before data retrieval.
 - Ambient observations cannot authorize writes.
+- Public cross-channel context may inform classification when policy allows;
+  private channels, DMs, and group DMs are destination-local before and after
+  the content query. Do not reveal even content-free awareness of another
+  private conversation.
+- Ambient alignment may cite only classifier-selected destination-safe public
+  evidence. Human reports remain attributed rather than promoted to verified
+  facts, recent participation never becomes a membership claim, and opinions,
+  stale conflicts, restricted sources, and unverified agent output do not
+  justify intervention.
 - Workers receive no long-lived credentials or MongoDB connection string.
 - Tool secrets may enter only the exact reviewed subprocess that declares them.
+- Workers receive no direct Aion source mount or shell. `telemetryos.code` is a
+  server-side read capability limited to bounded list/search/read requests and
+  rejects traversal, symlinks, environment files, credential ledgers, and
+  private tool state.
 - Output destinations derive from admitted server state, never model output.
+- Model-created Slack mentions are denied by default. The renderer accepts only
+  exact user/channel IDs attached by the control plane from selected releasable
+  evidence; broadcast, user-group, unselected, and self-authorized mentions are
+  rejected.
 - Every sensitive transition is fenced by live lease and kill-switch state.
 - Audit receipts contain redacted metadata, not copies of secret/message data.
+
+## Credential handling
+
+- Keep live values only in ignored mode-`0600` `runtime.env`, the private Codex
+  home, or the encrypted organization keystore. Never place them in examples,
+  tracked config, Compose interpolation, prompts, tool argv, Slack blocks,
+  fixtures, screenshots, or diagnostic artifacts.
+- The user OAuth token is read-only context-ingestion authority; the app-level
+  and bot-user tokens operate Socket Mode and bot actions. Possessing any token
+  does not bypass enrollment, participation, membership, destination, approval,
+  or kill-switch checks.
+- The direct OpenAI classifier key is control-plane-only and is never reused for
+  Codex App Server. Codex authenticates through its private persisted home.
+- Rotate development Slack and provider credentials before production use, and
+  immediately after suspected disclosure.
+
+## Tool and approval boundary
+
+Every reviewed operation declares an exact ID, risk class, approval policy,
+timeout, output limit, permitted environment names, and immutable script hash.
+If approval is omitted, the conservative risk-based default applies: `write`
+and `destructive` suspend and require an independent exact-action Slack
+approval. Admin-risk worker operations are rejected at manifest load and denied
+again by the executor. Only source-reviewed manifests can opt out. Agent Wiki
+page read/write operations are the current explicit `never` exception; the
+separately typed recoverable page soft-delete always requires approval.
+Namespace, asset, publish-file, cascading move, activity, generic undo, and
+admin Wiki operations are unavailable. All permitted calls remain constrained
+by job-scoped capabilities, the selected tool/version/operation, exact argv,
+environment allowlists, kill switches, bounds, and tamper-evident execution
+receipts. The model cannot alter approval policy at runtime.
+
+When approval applies, inline document bodies are included in the canonical
+action hash and Slack cards replace them with a byte count and digest. Wiki
+read/write operations do not require approval, but the same exact body is committed by the
+execution audit receipt without exposing it in broad audit listings.
+Long-form delivery may invoke that reviewed Wiki write proactively, but it does
+not gain namespace, asset, file-publish, admin, or arbitrary-write authority.
+The Slack response may link only the HTTPS URL returned by a successful write;
+failed or unavailable publication must not produce a guessed URL or success
+claim. Artifact segments are control-plane checked against successful reviewed
+tool results from the same disposable attempt, so model instructions alone
+cannot authorize a fabricated artifact link.
+
+## Logging and retention
+
+Correlate observations, classifier decisions, deliveries, jobs, tool calls,
+approvals, triggers, and routines without logging raw Slack envelopes, message
+text, prompts, model/provider bodies, secrets, tool credentials, lease tokens,
+or unbounded results. Keep owner-readable JSONL diagnostics outside Git, retain
+durable audit receipts in MongoDB, and honor TTL/source deletion across derived
+messages, context packs, prompts, and delivery state.
 
 Report security issues privately to the repository owners. Do not include live
 credentials, private Slack excerpts, or customer data in an issue.

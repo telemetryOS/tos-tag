@@ -14,7 +14,7 @@ import (
 func TestToolExecutionUsesExactArgvAndDeclaredEnvironmentOnly(t *testing.T) {
 	root := t.TempDir()
 	script := filepath.Join(root, "linear.sh")
-	content := "#!/bin/sh\nprintf 'arg=%s\\n' \"$1\"\nprintf 'linear=%s\\n' \"$LINEAR_API_KEY\"\nprintf 'slack=%s\\n' \"${SLACK_BOT_TOKEN-unset}\"\n"
+	content := "#!/bin/sh\nprintf 'arg=%s\\n' \"$1\"\nprintf 'operation=%s\\n' \"$TOS_TAG_OPERATION_ID\"\nprintf 'linear=%s\\n' \"$LINEAR_API_KEY\"\nprintf 'slack=%s\\n' \"${SLACK_BOT_TOKEN-unset}\"\n"
 	if err := os.WriteFile(script, []byte(content), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +31,7 @@ func TestToolExecutionUsesExactArgvAndDeclaredEnvironmentOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Output, "arg=value; echo injection") || !strings.Contains(result.Output, "linear=[REDACTED]") || !strings.Contains(result.Output, "slack=unset") {
+	if !strings.Contains(result.Output, "arg=value; echo injection") || !strings.Contains(result.Output, "operation=read") || !strings.Contains(result.Output, "linear=[REDACTED]") || !strings.Contains(result.Output, "slack=unset") {
 		t.Fatalf("unexpected output: %q", result.Output)
 	}
 }
@@ -118,6 +118,106 @@ func TestLoadBundleRejectsUnknownRisk(t *testing.T) {
 	}
 	if _, err := LoadBundle(root, "tool.json"); err == nil {
 		t.Fatal("unknown risk was accepted")
+	}
+}
+
+func TestLoadBundleRejectsAdminRisk(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "run.sh"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"id":"tool","version":"v1","script":"run.sh","operations":[{"id":"admin","timeout_seconds":1,"max_output_bytes":10,"risk":"admin"}]}`
+	if err := os.WriteFile(filepath.Join(root, "tool.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadBundle(root, "tool.json"); err == nil {
+		t.Fatal("admin-risk operation was accepted")
+	}
+
+	bundle := Bundle{Manifest: Manifest{ID: "tool", Version: "v1", Operations: []Operation{{ID: "admin", Risk: "admin"}}}}
+	if _, err := (Executor{Enabled: true}).Execute(context.Background(), bundle, Request{OperationID: "admin"}); err == nil || !strings.Contains(err.Error(), "admin tool operations are disabled") {
+		t.Fatalf("executor admin-risk error=%v", err)
+	}
+}
+
+func TestLoadBundleValidatesExplicitApprovalPolicy(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "run.sh"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"id":"tool","version":"v1","script":"run.sh","operations":[{"id":"op","timeout_seconds":1,"max_output_bytes":10,"risk":"write","approval":"never"}]}`
+	if err := os.WriteFile(filepath.Join(root, "tool.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := LoadBundle(root, "tool.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.Manifest.Operations[0].RequiresApproval() {
+		t.Fatal("reviewed approval=never operation still requires approval")
+	}
+
+	invalid := strings.Replace(manifest, `"approval":"never"`, `"approval":"sometimes"`, 1)
+	if err := os.WriteFile(filepath.Join(root, "tool.json"), []byte(invalid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadBundle(root, "tool.json"); err == nil {
+		t.Fatal("unknown approval policy was accepted")
+	}
+}
+
+func TestLoadBundleRejectsReservedControlEnvironment(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "run.sh"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"id":"tool","version":"v1","script":"run.sh","operations":[{"id":"read","env":["TOS_TAG_OPERATION_ID"],"timeout_seconds":1,"max_output_bytes":10,"risk":"read"}]}`
+	if err := os.WriteFile(filepath.Join(root, "tool.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadBundle(root, "tool.json"); err == nil {
+		t.Fatal("reserved control environment was accepted")
+	}
+}
+
+func TestExecutorRunsReviewedBashHelpers(t *testing.T) {
+	root := t.TempDir()
+	content := "#!/usr/bin/env bash\nvalues=(one two)\n[[ $TOS_TAG_OPERATION_ID == read ]]\nprintf '%s' \"${values[1]}\"\n"
+	if err := os.WriteFile(filepath.Join(root, "run.sh"), []byte(content), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"id":"bash","version":"v1","script":"run.sh","operations":[{"id":"read","timeout_seconds":2,"max_output_bytes":4096,"risk":"read"}]}`
+	if err := os.WriteFile(filepath.Join(root, "tool.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := LoadBundle(root, "tool.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (Executor{Enabled: true}).Execute(context.Background(), bundle, Request{OperationID: "read", Capability: Capability{ToolID: "bash", ToolVersion: "v1", OperationID: "read", AttemptToken: "attempt", SteeringEpoch: 1, ExpiresAt: time.Now().Add(time.Minute)}})
+	if err != nil || result.Output != "two" {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
+func TestToolExecutionReceivesPrivateTemporaryHome(t *testing.T) {
+	root := writeBundle(t, `#!/bin/sh
+[ -n "$HOME" ] || exit 10
+[ "$HOME" = "$TMPDIR" ] || exit 11
+case "$HOME" in
+  "$HOST_HOME") exit 12 ;;
+esac
+[ -d "$HOME" ] || exit 13
+printf 'private-home-ready'
+`)
+	bundle, err := LoadBundle(root, "tool.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Request{OperationID: "read", SecretValues: map[string]string{"API_TOKEN": "value"}, Capability: Capability{ToolID: "linear", ToolVersion: "v1", OperationID: "read", AttemptToken: "lease", SteeringEpoch: 1, ExpiresAt: time.Now().Add(time.Minute)}}
+	result, err := (Executor{Enabled: true}).Execute(context.Background(), bundle, request)
+	if err != nil || result.Output != "private-home-ready" {
+		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }
 

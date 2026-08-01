@@ -68,9 +68,39 @@ sync_repository() {
   git -C "${destination}" pull --ff-only
 }
 
+sync_pinned_repository() {
+  local repository="$1" destination="$2" commit="$3"
+  if [[ ! -d "${destination}/.git" ]]; then
+    gh repo clone "${repository}" "${destination}"
+  elif [[ "${update_repositories}" = true ]]; then
+    if [[ -n "$(git -C "${destination}" status --porcelain)" ]]; then
+      echo "cannot update dirty pinned tool repository: ${destination}" >&2
+      exit 1
+    fi
+    git -C "${destination}" fetch origin
+  fi
+  if ! git -C "${destination}" cat-file -e "${commit}^{commit}" 2>/dev/null; then
+    git -C "${destination}" fetch origin "${commit}"
+  fi
+  if [[ "$(git -C "${destination}" rev-parse HEAD)" != "${commit}" ]]; then
+    if [[ -n "$(git -C "${destination}" status --porcelain)" ]]; then
+      echo "pinned tool repository is dirty at the wrong revision: ${destination}" >&2
+      exit 1
+    fi
+    git -C "${destination}" checkout --detach "${commit}"
+  fi
+}
+
 sync_repository telemetryOS/tos-tag "${projects_root}/tos-tag"
 sync_repository telemetryOS/telemetryos-agent-skills "${skills_root}/telemetryos-agent-skills"
 sync_repository telemetryOS/tag-agent-skills "${skills_root}/tag-agent-skills"
+sync_pinned_repository telemetryOS/telemetry-otel-fetch "${tools_root}/telemetry-otel-fetch" 0e94e929c39d4f1b9d76bce2a096eab1bca0582e
+sync_pinned_repository telemetryOS/Device-Log-Analyzer "${tools_root}/Device-Log-Analyzer" d885c144bc6548554534346618feb5144690dfdd
+sync_pinned_repository telemetryOS/TelemetryOS-Mongo-Fetch "${tools_root}/TelemetryOS-Mongo-Fetch" 4c39e78970df2e084d37d0d378777bad65be067d
+
+"${tools_root}/telemetry-otel-fetch/install.sh" --user
+"${tools_root}/Device-Log-Analyzer/install.sh" --user
+"${tools_root}/TelemetryOS-Mongo-Fetch/install.sh" --user
 
 aion_source="${tools_root}/Aion"
 if [[ ! -d "${aion_source}/.git" ]]; then
@@ -97,3 +127,4 @@ echo "workspace ready: ${workspace_root}"
 echo "tos-tag: ${projects_root}/tos-tag"
 echo "Aion-managed code: ${aion_developer_path}"
 echo "skills: ${skills_root}"
+echo "reviewed helper executables: ${HOME}/.local/bin"

@@ -1,0 +1,9 @@
+{
+  "id": "telemetryos.device-logs",
+  "version": "1.0.0",
+  "script": "run.sh",
+  "operations": [
+    {"id": "read", "env": ["DLA_API_BASE_URL", "DLA_API_KEY", "DLA_ENV"], "timeout_seconds": 120, "max_output_bytes": 1048576, "risk": "read"},
+    {"id": "write", "env": ["DLA_API_BASE_URL", "DLA_API_KEY", "DLA_ENV"], "timeout_seconds": 45, "max_output_bytes": 262144, "risk": "write"}
+  ]
+}

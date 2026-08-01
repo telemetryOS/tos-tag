@@ -61,6 +61,10 @@ func (m *MemoryAppender) Append(_ context.Context, request AppendRequest) (Recei
 	return m.chain.Append(request)
 }
 
+func (m *MemoryAppender) List(organizationID string) []Receipt {
+	return m.chain.List(organizationID)
+}
+
 type Chain struct {
 	mu       sync.Mutex
 	hmacKey  []byte

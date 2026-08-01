@@ -34,6 +34,23 @@ type ApprovalInteraction struct {
 
 type ApprovalInteractionHandler func(context.Context, ApprovalInteraction) error
 
+type DirectiveConfigurationRequest struct {
+	OrganizationID string
+	WorkspaceID    string
+	ChannelID      string
+	UserID         string
+	Prompt         string
+	InteractionID  string
+}
+
+type DirectiveConfiguration struct {
+	Prompt   string
+	Revision int64
+}
+
+type DirectiveLoadHandler func(context.Context, DirectiveConfigurationRequest) (DirectiveConfiguration, error)
+type DirectiveSaveHandler func(context.Context, DirectiveConfigurationRequest) (DirectiveConfiguration, error)
+
 type Ingress interface {
 	Start(context.Context, Handler) error
 	Stop(context.Context) error

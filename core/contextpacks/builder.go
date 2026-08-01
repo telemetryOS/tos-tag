@@ -142,11 +142,14 @@ func (b *Builder) Build(request Request) (types.ContextPackRevision, error) {
 				ID:              candidate.ID,
 				Version:         candidate.Version,
 				ChannelID:       candidate.ChannelID,
+				ChannelName:     candidate.ChannelName,
+				AuthorID:        candidate.AuthorID,
 				Partition:       partition,
 				Provenance:      candidate.Provenance,
 				TokenCount:      tokens,
 				DisclosureClass: candidate.DisclosureClass,
 				Text:            candidate.Text,
+				ObservedAt:      candidate.ObservedAt,
 			})
 			pack.PartitionTokens[partition] += tokens
 			pack.TotalTokens += tokens

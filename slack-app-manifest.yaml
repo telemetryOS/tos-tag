@@ -6,6 +6,11 @@ features:
   bot_user:
     display_name: tag
     always_online: true
+  slash_commands:
+    - command: /tag-directive
+      description: Configure tag's operating directive for this channel
+      usage_hint: Opens a channel configuration form
+      should_escape: false
   agent_view:
     agent_description: Cross-channel AI teammate for investigation, planning, and durable agent work.
     suggested_prompts:
@@ -33,6 +38,7 @@ oauth_config:
       - chat:write
       - chat:write.customize
       - chat:write.public
+      - commands
       - conversations.connect:manage
       - conversations.connect:read
       - conversations.connect:write

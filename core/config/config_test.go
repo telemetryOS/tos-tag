@@ -16,6 +16,31 @@ func TestDefaultConfigurationValid(t *testing.T) {
 	if cfg.Models.DefaultProfile != "chatgpt-luna-max" || cfg.Models.DefaultProvider != "openai" || cfg.Models.DefaultModel != "gpt-5.6-luna" || cfg.Models.DefaultVariant != "max" {
 		t.Fatalf("unexpected default model configuration: %#v", cfg.Models)
 	}
+	if cfg.Classifier.MaxResponsesPerHour != 120 || cfg.Classifier.MaxConcurrentJobs != 8 {
+		t.Fatalf("unexpected default classifier admission bounds: %#v", cfg.Classifier)
+	}
+	if cfg.Jobs.WorkerConcurrency != 8 {
+		t.Fatalf("unexpected default job worker concurrency: %#v", cfg.Jobs)
+	}
+}
+
+func TestLoadJobWorkerConcurrencyEnvironment(t *testing.T) {
+	t.Setenv("TAG__JOBS__WORKER_CONCURRENCY", "7")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Jobs.WorkerConcurrency != 7 {
+		t.Fatalf("job worker concurrency = %d", cfg.Jobs.WorkerConcurrency)
+	}
+}
+
+func TestValidateRejectsUnboundedJobWorkerConcurrency(t *testing.T) {
+	cfg := DefaultConfiguration
+	cfg.Jobs.WorkerConcurrency = 65
+	if err := Validate(&cfg); err == nil {
+		t.Fatal("expected excessive job worker concurrency to fail")
+	}
 }
 
 func TestValidateRequiresAuthOffLoopback(t *testing.T) {
@@ -163,25 +188,27 @@ func TestLoadSlackTokenNamesMatchSlackLabels(t *testing.T) {
 	}
 }
 
-func TestLoadOpenCodeAndLiveClassifierEnvironment(t *testing.T) {
-	t.Setenv("TAG__OPENCODE__ENABLED", "true")
-	t.Setenv("TAG__OPENCODE__COMMAND", "/opt/opencode")
-	t.Setenv("TAG__OPENCODE__TIMEOUT", "45s")
-	t.Setenv("TAG__MODELS__DEFAULT_PROVIDER", "opencode")
+func TestLoadCodexAndLiveClassifierEnvironment(t *testing.T) {
+	t.Setenv("TAG__CODEX__ENABLED", "true")
+	t.Setenv("TAG__CODEX__COMMAND", "/opt/codex")
+	t.Setenv("TAG__CODEX__HOME", "/var/lib/tos-tag/codex")
+	t.Setenv("TAG__CODEX__TIMEOUT", "45s")
+	t.Setenv("TAG__MODELS__DEFAULT_PROVIDER", "openai")
 	t.Setenv("TAG__CLASSIFIER__MODE", "live")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("load configuration: %v", err)
 	}
-	if !cfg.OpenCode.Enabled || cfg.OpenCode.Command != "/opt/opencode" || cfg.OpenCode.Timeout != 45*time.Second || cfg.Classifier.Mode != "live" {
-		t.Fatalf("OpenCode/classifier environment did not map: %#v %#v", cfg.OpenCode, cfg.Classifier)
+	if !cfg.Codex.Enabled || cfg.Codex.Command != "/opt/codex" || cfg.Codex.Home != "/var/lib/tos-tag/codex" || cfg.Codex.Timeout != 45*time.Second || cfg.Classifier.Mode != "live" {
+		t.Fatalf("Codex/classifier environment did not map: %#v %#v", cfg.Codex, cfg.Classifier)
 	}
 }
 
-func TestOpenCodeDoesNotReuseOpenAIClassifierCredential(t *testing.T) {
-	t.Setenv("TAG__OPENCODE__ENABLED", "true")
-	t.Setenv("TAG__MODELS__DEFAULT_PROVIDER", "opencode")
+func TestCodexDoesNotReuseOpenAIClassifierCredential(t *testing.T) {
+	t.Setenv("TAG__CODEX__ENABLED", "true")
+	t.Setenv("TAG__CODEX__HOME", "/var/lib/tos-tag/codex")
+	t.Setenv("TAG__MODELS__DEFAULT_PROVIDER", "openai")
 	t.Setenv("TAG__CLASSIFIER__PROVIDER", "openai")
 	t.Setenv("TAG__CLASSIFIER__OPENAI_API_KEY", "shared-openai-key")
 
@@ -189,23 +216,22 @@ func TestOpenCodeDoesNotReuseOpenAIClassifierCredential(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load configuration: %v", err)
 	}
-	if strings.Contains(fmt.Sprint(cfg.OpenCode), "shared-openai-key") || strings.Contains(fmt.Sprint(cfg.RedactedStatus()), "shared-openai-key") {
-		t.Fatal("classifier credential crossed into the OpenCode configuration boundary")
+	if strings.Contains(fmt.Sprint(cfg.Codex), "shared-openai-key") || strings.Contains(fmt.Sprint(cfg.RedactedStatus()), "shared-openai-key") {
+		t.Fatal("classifier credential crossed into the Codex configuration boundary")
 	}
 }
 
-func TestLocalWorkerRejectsCredentialedProvider(t *testing.T) {
+func TestCodexWorkerRequiresOpenAIProviderButNotClassifierCredential(t *testing.T) {
 	cfg := DefaultConfiguration
-	cfg.OpenCode.Enabled = true
-	cfg.OpenCode.Mode = "local_worker"
-	cfg.Models.DefaultProvider = "openai"
-	if err := Validate(&cfg); err == nil || !strings.Contains(err.Error(), "control-plane OpenAI model gateway") {
-		t.Fatalf("credentialed local worker validation error = %v", err)
+	cfg.Codex.Enabled = true
+	cfg.Codex.Home = "/var/lib/tos-tag/codex"
+	cfg.Models.DefaultProvider = "fake"
+	if err := Validate(&cfg); err == nil || !strings.Contains(err.Error(), "OpenAI model provider") {
+		t.Fatalf("provider validation error = %v", err)
 	}
-	cfg.Classifier.Provider = "openai"
-	cfg.Classifier.OpenAIAPIKey = "control-plane-only"
+	cfg.Models.DefaultProvider = "openai"
 	if err := Validate(&cfg); err != nil {
-		t.Fatalf("model-gateway-backed local worker rejected: %v", err)
+		t.Fatalf("Codex worker incorrectly depends on classifier credentials: %v", err)
 	}
 }
 
@@ -216,13 +242,15 @@ func TestLoadOpenAIClassifierEnvironment(t *testing.T) {
 	t.Setenv("TAG__CLASSIFIER__REASONING_EFFORT", "high")
 	t.Setenv("TAG__CLASSIFIER__TIMEOUT", "12s")
 	t.Setenv("TAG__CLASSIFIER__MAX_OUTPUT_TOKENS", "1234")
+	t.Setenv("TAG__CLASSIFIER__MAX_RESPONSES_PER_HOUR", "90")
+	t.Setenv("TAG__CLASSIFIER__MAX_CONCURRENT_JOBS", "7")
 	t.Setenv("TAG__CLASSIFIER__REACTION_EMOJIS", "eyes, warning")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("load configuration: %v", err)
 	}
-	if cfg.Classifier.Provider != "openai" || cfg.Classifier.OpenAIAPIKey != "test-openai-key" || cfg.Classifier.Model != "gpt-test" || cfg.Classifier.ReasoningEffort != "high" || cfg.Classifier.Timeout != 12*time.Second || cfg.Classifier.MaxOutputTokens != 1234 || !reflect.DeepEqual(cfg.Classifier.ReactionEmojis, []string{"eyes", "warning"}) {
+	if cfg.Classifier.Provider != "openai" || cfg.Classifier.OpenAIAPIKey != "test-openai-key" || cfg.Classifier.Model != "gpt-test" || cfg.Classifier.ReasoningEffort != "high" || cfg.Classifier.Timeout != 12*time.Second || cfg.Classifier.MaxOutputTokens != 1234 || cfg.Classifier.MaxResponsesPerHour != 90 || cfg.Classifier.MaxConcurrentJobs != 7 || !reflect.DeepEqual(cfg.Classifier.ReactionEmojis, []string{"eyes", "warning"}) {
 		t.Fatalf("OpenAI classifier environment did not map: %#v", cfg.Classifier)
 	}
 	status := fmt.Sprint(cfg.RedactedStatus())
@@ -231,10 +259,10 @@ func TestLoadOpenAIClassifierEnvironment(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsInvalidDocumentedOpenCodeEnvironment(t *testing.T) {
-	t.Setenv("TAG__OPENCODE__ENABLED", "sometimes")
+func TestLoadRejectsInvalidDocumentedCodexEnvironment(t *testing.T) {
+	t.Setenv("TAG__CODEX__ENABLED", "sometimes")
 	if _, err := Load(); err == nil {
-		t.Fatal("invalid documented OpenCode boolean was accepted")
+		t.Fatal("invalid documented Codex boolean was accepted")
 	}
 }
 
@@ -247,6 +275,21 @@ func TestLoadInjectedSkillFromEnvironment(t *testing.T) {
 	}
 	if want := []string{"linear"}; !reflect.DeepEqual(cfg.Marketplaces.InjectedSkills, want) {
 		t.Fatalf("injected skills = %#v, want %#v", cfg.Marketplaces.InjectedSkills, want)
+	}
+}
+
+func TestLoadInjectedToolsAndDeterministicPathFromEnvironment(t *testing.T) {
+	t.Setenv("TAG__MARKETPLACES__INJECTED_TOOLS", "telemetryos.linear,telemetryos.wiki")
+	t.Setenv("TAG__MARKETPLACES__TOOL_PATH", "/safe/bin:/usr/bin:/bin")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"telemetryos.linear", "telemetryos.wiki"}; !reflect.DeepEqual(cfg.Marketplaces.InjectedTools, want) {
+		t.Fatalf("injected tools = %#v, want %#v", cfg.Marketplaces.InjectedTools, want)
+	}
+	if cfg.Marketplaces.ToolPath != "/safe/bin:/usr/bin:/bin" {
+		t.Fatalf("tool path=%q", cfg.Marketplaces.ToolPath)
 	}
 }
 

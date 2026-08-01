@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/telemetryos/tos-tag/types"
 )
@@ -81,24 +83,56 @@ func (s *Service) Decide(ctx context.Context, target Target, pack types.ContextP
 }
 
 func (s *Service) predict(ctx context.Context, target Target, pack types.ContextPackRevision) types.ClassificationDecision {
-	if target.ActiveThread && !target.Envelope.IsMention && isSocialAcknowledgement(target.Envelope.Text) {
-		return silent("thread.social_acknowledgement")
-	}
-	if target.Envelope.IsMention || target.ActiveThread {
-		reason := "hard.direct_mention"
-		if target.ActiveThread && !target.Envelope.IsMention {
-			reason = "hard.active_thread_reply"
+	if target.ActiveThread {
+		predicted, err := s.classifier.Decide(ctx, target, pack)
+		predicted = enforceDirectReplyPlacement(predicted, target)
+		if err == nil && validateDecision(predicted, pack) == nil && predicted.Outcome != types.OutcomeSilent && predicted.Outcome != types.OutcomeReact {
+			if predicted.DirectReply != "" {
+				if predicted.Confidence >= s.assistThreshold && validateDirectReplyForTarget(predicted, target) == nil {
+					return predicted
+				}
+			} else {
+				if predicted.Outcome == types.OutcomeReplyInChannel {
+					predicted.Outcome = types.OutcomeReplyInThread
+					predicted.ReasonCodes = append(predicted.ReasonCodes, "policy.active_thread_placement")
+				}
+				return predicted
+			}
 		}
-		decision := types.ClassificationDecision{
+		// An active thread is a hard participation trigger, but the direct
+		// classifier still gets the first chance to recognize natural social
+		// language and answer without starting a worker. If that decision is
+		// unavailable, preserve the prior fail-safe behavior below.
+		if isDirectSocialCandidate(target.Envelope.Text) {
+			return silent("thread.social_acknowledgement")
+		}
+		return types.ClassificationDecision{
 			Outcome:           types.OutcomeReplyInThread,
 			Confidence:        1,
-			ReasonCodes:       []string{reason},
-			ResponseIntent:    "respond to the explicit request",
+			ReasonCodes:       []string{"hard.active_thread_reply"},
+			ResponseIntent:    "continue the active thread",
 			DisclosureClass:   types.DisclosureDestinationSafe,
 			RequiresFullAgent: true,
 			Reaction:          "eyes",
 		}
-		return decision
+	}
+	if target.Envelope.IsMention {
+		predicted, err := s.classifier.Decide(ctx, target, pack)
+		predicted = enforceDirectReplyPlacement(predicted, target)
+		// A direct mention is already a hard participation trigger. The ambient
+		// confidence threshold must not discard an otherwise valid placement and
+		// model-routing recommendation, or simple mentioned questions fall back to
+		// the deployment-default (usually max-effort) profile.
+		if err == nil && validateDecision(predicted, pack) == nil && predicted.Outcome != types.OutcomeSilent && predicted.Outcome != types.OutcomeReact && (predicted.DirectReply == "" || predicted.Confidence >= s.channelReplyThreshold) {
+			predicted = enforceDirectMentionPlacement(predicted, target.Envelope.Text)
+			if predicted.DirectReply == "" || validateDirectReplyForTarget(predicted, target) == nil {
+				return predicted
+			}
+		}
+		if isDirectSocialCandidate(target.Envelope.Text) {
+			return silent("classifier.direct_reply_unavailable")
+		}
+		return directMentionFallback(target.Envelope.Text)
 	}
 	if target.Mode == types.ModeMention {
 		return silent("admission.channel_mode")
@@ -108,24 +142,137 @@ func (s *Service) predict(ctx context.Context, target Target, pack types.Context
 	if err != nil {
 		return silent("classifier.error")
 	}
+	predicted = enforceDirectReplyPlacement(predicted, target)
 	if err := validateDecision(predicted, pack); err != nil {
 		return silent("classifier.invalid")
+	}
+	if predicted.DirectReply != "" && validateDirectReplyForTarget(predicted, target) != nil {
+		return silent("classifier.invalid_direct_reply")
 	}
 	if predicted.Outcome != types.OutcomeSilent && predicted.Confidence < s.assistThreshold {
 		predicted = silent("admission.low_confidence")
 	}
-	if predicted.Outcome == types.OutcomeReplyInChannel && predicted.Confidence < s.channelReplyThreshold {
+	if predicted.Outcome == types.OutcomeReplyInChannel && predicted.DirectReply != "" && predicted.Confidence < s.channelReplyThreshold {
+		predicted = silent("admission.direct_reply_threshold")
+	} else if predicted.Outcome == types.OutcomeReplyInChannel && predicted.Confidence < s.channelReplyThreshold {
 		predicted.Outcome = types.OutcomeReplyInThread
 		predicted.ReasonCodes = append(predicted.ReasonCodes, "admission.channel_reply_threshold")
 	}
-	if outcomeNeedsEvidence(predicted.Outcome) && len(predicted.ReleasableEvidenceIDs) == 0 && len(predicted.RestrictedSignalIDs) > 0 {
+	if predicted.DirectReply == "" && outcomeNeedsEvidence(predicted.Outcome) && len(predicted.ReleasableEvidenceIDs) == 0 && len(predicted.RestrictedSignalIDs) > 0 {
 		predicted = silent("admission.destination_disclosure_denied")
 	}
 	return predicted
 }
 
+func enforceDirectReplyPlacement(decision types.ClassificationDecision, target Target) types.ClassificationDecision {
+	if decision.DirectReply == "" {
+		return decision
+	}
+	want := types.OutcomeReplyInChannel
+	if target.ActiveThread {
+		want = types.OutcomeReplyInThread
+	}
+	if decision.Outcome != want {
+		decision.Outcome = want
+		decision.ReasonCodes = append(decision.ReasonCodes, "policy.direct_reply_placement")
+	}
+	return decision
+}
+
+func directMentionFallback(text string) types.ClassificationDecision {
+	outcome := types.OutcomeReplyInThread
+	reason := "hard.direct_mention_deeper_reply"
+	intent := "respond to the explicit request in a focused thread"
+	if requested, requestedReason, ok := requestedReplyPlacement(text); ok {
+		outcome = requested
+		reason = requestedReason
+		if requested == types.OutcomeReplyInChannel {
+			intent = "honor the explicit request for a channel-level answer"
+		} else {
+			intent = "honor the explicit request for a threaded answer"
+		}
+	} else if briefSelfContainedMention(text) {
+		outcome = types.OutcomeReplyInChannel
+		reason = "hard.direct_mention_brief_reply"
+		intent = "give a brief self-contained answer in the channel"
+	}
+	return types.ClassificationDecision{
+		Outcome:           outcome,
+		Confidence:        1,
+		ReasonCodes:       []string{reason},
+		ResponseIntent:    intent,
+		DisclosureClass:   types.DisclosureDestinationSafe,
+		RequiresFullAgent: true,
+		Reaction:          "eyes",
+	}
+}
+
+func enforceDirectMentionPlacement(decision types.ClassificationDecision, text string) types.ClassificationDecision {
+	if requested, reason, ok := requestedReplyPlacement(text); ok {
+		if decision.Outcome != requested {
+			decision.Outcome = requested
+			decision.ReasonCodes = append(decision.ReasonCodes, reason)
+		}
+		return decision
+	}
+	if decision.Outcome == types.OutcomeReplyInChannel && requiresThreadSurface(text) {
+		decision.Outcome = types.OutcomeReplyInThread
+		decision.ReasonCodes = append(decision.ReasonCodes, "policy.deep_surface_thread")
+	}
+	return decision
+}
+
+func requestedReplyPlacement(text string) (types.ClassificationOutcome, string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	threadRequested := containsAny(normalized,
+		"reply in a thread", "reply in thread", "answer in a thread", "answer in thread",
+		"respond in a thread", "respond in thread", "put the answer in a thread", "start a thread",
+	)
+	channelRequested := containsAny(normalized,
+		"reply in the channel", "reply in channel", "answer in the channel", "answer in channel",
+		"respond in the channel", "respond in channel", "post in the channel", "post in channel",
+		"reply at channel level", "answer at channel level", "in-channel", "channel-level",
+	)
+	channelRequested = channelRequested || (containsAny(normalized, "in the channel", "in channel") && containsAny(normalized, "not a thread", "rather than a thread", "instead of a thread"))
+	if threadRequested == channelRequested {
+		return "", "", false
+	}
+	if threadRequested {
+		return types.OutcomeReplyInThread, "hard.explicit_thread_request", true
+	}
+	return types.OutcomeReplyInChannel, "hard.explicit_channel_request", true
+}
+
+func briefSelfContainedMention(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	if len([]rune(normalized)) > 180 || strings.Count(normalized, "?") > 1 || requiresThreadSurface(normalized) {
+		return false
+	}
+	return strings.Count(normalized, "?") == 1 || containsAny(normalized, "tell me", "give me", "name the", "state the", "identify the", "confirm the", "convert ", "define ")
+}
+
+func requiresThreadSurface(text string) bool {
+	normalized := strings.ToLower(text)
+	return containsAny(normalized,
+		"analyze", "debug", "deep dive", "explain in detail", "figure out", "implement",
+		"investigate", "look into", "review", "step by step", "walk me through",
+		"compare", "comparison", "native table", "table with", "structured report", "artifact",
+		"research", "multiple sections", "code sample", "code block", "long-form",
+		"architecture document", "design document", "reference guide", "white paper",
+	)
+}
+
+func containsAny(text string, markers ...string) bool {
+	for _, marker := range markers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func isSocialAcknowledgement(text string) bool {
-	normalized := strings.Trim(strings.ToLower(text), " \t\r\n.!?,;:")
+	normalized := normalizedSocialText(text)
 	switch normalized {
 	case "thanks", "thanks again", "thank you", "thank you!", "thx", "ty",
 		"perfect", "great", "awesome", "cool", "nice", "cheers",
@@ -137,13 +284,141 @@ func isSocialAcknowledgement(text string) bool {
 	}
 }
 
+func isDirectSocialCandidate(text string) bool {
+	if strings.ContainsRune(text, '?') {
+		return false
+	}
+	normalized := normalizedSocialText(text)
+	if normalized == "" || utf8.RuneCountInString(normalized) > 120 {
+		return false
+	}
+	if isSocialAcknowledgement(normalized) {
+		return true
+	}
+	words := strings.Fields(strings.Map(func(character rune) rune {
+		switch character {
+		case ',', '.', '!', ';', ':', '-', '—', '–':
+			return ' '
+		default:
+			return character
+		}
+	}, normalized))
+	natural := strings.Join(words, " ")
+	for _, prefix := range []string{"morning tag", "good morning tag", "hello tag", "hi tag", "hey tag", "afternoon tag", "good afternoon tag", "evening tag", "good evening tag"} {
+		if strings.HasPrefix(natural, prefix) && !hasSubstantiveSocialTail(natural) {
+			return true
+		}
+	}
+	for _, prefix := range []string{"thanks ", "thank you ", "appreciate ", "great work ", "nice work ", "good work ", "well done "} {
+		if strings.HasPrefix(natural, prefix) && !hasSubstantiveSocialTail(natural) {
+			return true
+		}
+	}
+	switch normalized {
+	case "hi", "hello", "hey", "hiya", "morning", "good morning", "afternoon", "good afternoon",
+		"evening", "good evening", "how are you", "how are you doing", "how's it going", "whats up", "what's up",
+		"bye", "goodbye", "see you", "see you later", "later", "good bot", "nice work", "well done",
+		"you're great", "you are great", "love it", "lol", "lmao", "haha", "hahaha", "😂", "😄":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasSubstantiveSocialTail(text string) bool {
+	tail := strings.TrimSpace(text)
+	for _, prefix := range []string{
+		"good afternoon tag", "good morning tag", "good evening tag",
+		"afternoon tag", "morning tag", "evening tag", "hello tag", "hey tag", "hi tag",
+		"thanks again", "thank you", "thanks", "appreciate", "great work", "nice work", "good work", "well done",
+	} {
+		if tail == prefix {
+			return false
+		}
+		if strings.HasPrefix(tail, prefix+" ") {
+			tail = strings.TrimSpace(strings.TrimPrefix(tail, prefix))
+			break
+		}
+	}
+	if tail == "tag" {
+		return false
+	}
+	if strings.HasPrefix(tail, "tag ") {
+		tail = strings.TrimSpace(strings.TrimPrefix(tail, "tag"))
+	}
+	for _, prefix := range []string{
+		"please ", "tell me", "give me", "name the", "state the", "identify the", "confirm the",
+		"can you", "could you", "would you", "check ", "investigate", "update ", "create ", "delete ",
+		"run ", "compare ", "explain ", "summarize ", "what ", "why ", "how ", "which ", "when ", "where ",
+	} {
+		if strings.HasPrefix(tail, prefix) {
+			return true
+		}
+	}
+	return containsAny(tail,
+		" is down", " error", " failed", " failing", " outage", " incident", " exposed", " leaked", " broken", " blocked", " need attention", " needs attention",
+	)
+}
+
+func normalizedSocialText(text string) string {
+	text = strings.ToLower(strings.TrimSpace(text))
+	for {
+		start := strings.Index(text, "<@")
+		if start < 0 {
+			break
+		}
+		end := strings.Index(text[start:], ">")
+		if end < 0 {
+			break
+		}
+		text = text[:start] + " " + text[start+end+1:]
+	}
+	text = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), "tag"))
+	return strings.Trim(text, " \t\r\n.!?,;:")
+}
+
+func validateDirectReplyForTarget(decision types.ClassificationDecision, target Target) error {
+	if decision.DirectReply == "" {
+		return errors.New("direct reply is empty")
+	}
+	if !isDirectSocialCandidate(target.Envelope.Text) {
+		return errors.New("target is not an allowlisted social message")
+	}
+	if decision.RequiresFullAgent || len(decision.ReleasableEvidenceIDs) != 0 || len(decision.RestrictedSignalIDs) != 0 {
+		return errors.New("direct reply requested agent or evidence")
+	}
+	if decision.DisclosureClass != types.DisclosureDestinationSafe {
+		return errors.New("direct reply is not destination safe")
+	}
+	if target.ActiveThread && decision.Outcome != types.OutcomeReplyInThread {
+		return errors.New("active-thread direct reply escaped its thread")
+	}
+	if !target.ActiveThread && decision.Outcome != types.OutcomeReplyInChannel {
+		return errors.New("top-level direct reply did not stay in channel")
+	}
+	return validateDirectReplyText(decision.DirectReply)
+}
+
+func validateDirectReplyText(reply string) error {
+	if reply != strings.TrimSpace(reply) || reply == "" || utf8.RuneCountInString(reply) > 240 || strings.ContainsAny(reply, "\r\n\t") {
+		return errors.New("direct reply must be one trimmed line of at most 240 characters")
+	}
+	lower := strings.ToLower(reply)
+	for _, forbidden := range []string{"http://", "https://", "www.", "<", ">", "`", "*", "_", "~", "@", "#"} {
+		if strings.Contains(lower, forbidden) {
+			return errors.New("direct reply contains disallowed formatting or addressing")
+		}
+	}
+	return nil
+}
+
 func hardSuppression(target Target) string {
 	switch {
 	case target.KillSwitched:
 		return "suppress.kill_switch"
 	case target.SelfAuthored:
 		return "suppress.self_message"
-	case target.WorkflowLoop || target.Envelope.OriginTag != "":
+	case target.WorkflowLoop:
 		return "suppress.workflow_loop"
 	case target.Deleted || target.Envelope.Kind == types.SlackEventDelete:
 		return "suppress.deleted"
@@ -171,7 +446,17 @@ func validateDecision(decision types.ClassificationDecision, pack types.ContextP
 	if decision.Outcome != types.OutcomeSilent && !validEmojiName(decision.Reaction) {
 		return fmt.Errorf("%w: reaction", ErrInvalidClassifierDecision)
 	}
-	if outcomeNeedsAgent(decision.Outcome) && !decision.RequiresFullAgent {
+	if decision.DirectReply != "" {
+		if decision.Outcome != types.OutcomeReplyInThread && decision.Outcome != types.OutcomeReplyInChannel {
+			return fmt.Errorf("%w: direct reply outcome", ErrInvalidClassifierDecision)
+		}
+		if decision.RequiresFullAgent || decision.AgentModelProfile != "" || (decision.AgentModelStrength != "" && decision.AgentModelStrength != "none") || decision.AgentReasoningEffort != "" {
+			return fmt.Errorf("%w: direct reply agent recommendation", ErrInvalidClassifierDecision)
+		}
+		if err := validateDirectReplyText(decision.DirectReply); err != nil {
+			return fmt.Errorf("%w: direct reply text", ErrInvalidClassifierDecision)
+		}
+	} else if outcomeNeedsAgent(decision.Outcome) && !decision.RequiresFullAgent {
 		return fmt.Errorf("%w: full agent required", ErrInvalidClassifierDecision)
 	}
 	available := make(map[string]types.DisclosureClass, len(pack.Sources))
@@ -220,6 +505,52 @@ type DeterministicClassifier struct{}
 
 func (DeterministicClassifier) Decide(_ context.Context, target Target, pack types.ContextPackRevision) (types.ClassificationDecision, error) {
 	lower := strings.ToLower(target.Envelope.Text)
+	if isDirectSocialCandidate(target.Envelope.Text) {
+		outcome := types.OutcomeReplyInChannel
+		if target.ActiveThread {
+			outcome = types.OutcomeReplyInThread
+		}
+		return types.ClassificationDecision{
+			Outcome:         outcome,
+			Confidence:      0.99,
+			ReasonCodes:     []string{"social.direct_reply"},
+			ResponseIntent:  "brief social acknowledgement",
+			DirectReply:     "You're welcome!",
+			DisclosureClass: types.DisclosureDestinationSafe,
+			Reaction:        "white_check_mark",
+		}, nil
+	}
+	if target.Envelope.IsMention {
+		return directMentionFallback(target.Envelope.Text), nil
+	}
+	if target.Mode == types.ModeAssist || target.Mode == types.ModeProactive {
+		if isStableNonUrgentMetricObservation(target.Envelope.Text) {
+			return types.ClassificationDecision{
+				Outcome:            types.OutcomeReact,
+				Confidence:         0.99,
+				ReasonCodes:        []string{"ambient.stable_metric_reaction_only"},
+				DisclosureClass:    types.DisclosureDestinationSafe,
+				Reaction:           "warning",
+				AgentModelStrength: "none",
+			}, nil
+		}
+		if source, ok := alignmentConflict(target, pack); ok {
+			reaction := "speech_balloon"
+			if operationalStance(source.Text) < 0 || operationalStance(target.Envelope.Text) < 0 {
+				reaction = "warning"
+			}
+			return types.ClassificationDecision{
+				Outcome:               types.OutcomeReplyInChannel,
+				Confidence:            0.995,
+				ReasonCodes:           []string{"ambient.cross_channel_alignment_conflict"},
+				ReleasableEvidenceIDs: []string{source.ID},
+				ResponseIntent:        fmt.Sprintf("briefly surface and reconcile the conflicting public report from <@%s> in <#%s> without assigning blame or treating the report as verified fact", source.AuthorID, source.ChannelID),
+				DisclosureClass:       types.DisclosureDestinationSafe,
+				RequiresFullAgent:     true,
+				Reaction:              reaction,
+			}, nil
+		}
+	}
 	if target.Mode == types.ModeProactive && containsActionableSignal(lower) {
 		return types.ClassificationDecision{
 			Outcome:           types.OutcomeReplyInChannel,
@@ -231,7 +562,7 @@ func (DeterministicClassifier) Decide(_ context.Context, target Target, pack typ
 			Reaction:          "eyes",
 		}, nil
 	}
-	if strings.Contains(lower, "is the system down") || strings.Contains(lower, "is it down") {
+	if asksOperationalStatus(lower) {
 		for _, source := range pack.Sources {
 			if source.Partition != types.PartitionEvidence && source.Partition != types.PartitionSituation {
 				continue
@@ -276,6 +607,63 @@ func (DeterministicClassifier) Decide(_ context.Context, target Target, pack typ
 	return silent("ambient.social_chatter"), nil
 }
 
+func alignmentConflict(target Target, pack types.ContextPackRevision) (types.ContextSource, bool) {
+	currentStance := operationalStance(target.Envelope.Text)
+	if currentStance == 0 || target.Envelope.ChannelID == "" || target.Envelope.UserID == "" {
+		return types.ContextSource{}, false
+	}
+	now := target.Envelope.EventTime
+	for _, source := range pack.Sources {
+		if source.DisclosureClass != types.DisclosureDestinationSafe || source.Provenance != "human_message" || source.AuthorID == "" || source.AuthorID == target.Envelope.UserID || source.ChannelID == "" || source.ChannelID == target.Envelope.ChannelID {
+			continue
+		}
+		if !now.IsZero() && !source.ObservedAt.IsZero() && source.ObservedAt.Before(now.Add(-48*time.Hour)) {
+			continue
+		}
+		if sourceAuthorRecentlyParticipated(source.AuthorID, target.Envelope.ChannelID, pack.Sources) {
+			continue
+		}
+		if sourceStance := operationalStance(source.Text); sourceStance == 0 || sourceStance == currentStance {
+			continue
+		}
+		if !sharesOperationalSubject(target.Envelope.Text, source.Text) {
+			continue
+		}
+		return source, true
+	}
+	return types.ContextSource{}, false
+}
+
+func sourceAuthorRecentlyParticipated(authorID, channelID string, sources []types.ContextSource) bool {
+	for _, source := range sources {
+		if source.ChannelID == channelID && source.AuthorID == authorID && source.Provenance == "human_message" {
+			return true
+		}
+	}
+	return false
+}
+
+func operationalStance(text string) int {
+	lower := strings.ToLower(text)
+	if containsAny(lower, "healthy", "working again", "back up", "recovered", "resolved", "all clear", "stable again", "fine now") {
+		return 1
+	}
+	if containsAny(lower, "incident", "outage", " is down", " unavailable", "degraded", "failing", " failed", "timeout", "timing out", " errors") {
+		return -1
+	}
+	return 0
+}
+
+func sharesOperationalSubject(left, right string) bool {
+	left, right = strings.ToLower(left), strings.ToLower(right)
+	for _, subject := range []string{"checkout", "login", "sign-in", "signin", "api", "server", "gateway", "database", "deploy", "production", "prod", "staging", "build"} {
+		if strings.Contains(left, subject) && strings.Contains(right, subject) {
+			return true
+		}
+	}
+	return false
+}
+
 func containsActionableSignal(text string) bool {
 	for _, signal := range []string{"incident", "outage", " is down", " failed", " failure", " error", " blocked", "needs attention"} {
 		if strings.Contains(text, signal) {
@@ -287,5 +675,23 @@ func containsActionableSignal(text string) bool {
 
 func containsIncident(text string) bool {
 	lower := strings.ToLower(text)
-	return strings.Contains(lower, "incident") || strings.Contains(lower, "outage") || strings.Contains(lower, "down")
+	return containsAny(lower,
+		"incident", "outage", " down", "failure", "failing", "failed",
+		"error", "degraded", "unavailable", "timeout",
+	)
+}
+
+func asksOperationalStatus(text string) bool {
+	trimmed := strings.TrimSpace(strings.ToLower(text))
+	if !strings.HasSuffix(trimmed, "?") {
+		return false
+	}
+	return containsAny(trimmed,
+		"is the system down", "is it down", "is it working", "is this working",
+		"still able to", "anyone else seeing", "anybody else seeing",
+		"seeing errors", "seeing failures", "seeing timeouts", "having trouble",
+		"is production healthy", "is prod healthy", "is the api healthy",
+		"is checkout failing", "is login failing", "is sign-in failing",
+		"is signin failing", "is it offline", "is it unavailable",
+	)
 }

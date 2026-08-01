@@ -2,9 +2,9 @@ ARG NODE_VERSION=24.7.0
 ARG GH_VERSION=2.96.0
 
 FROM node:${NODE_VERSION}-bookworm-slim@sha256:0104d9447ea3ddf7373643be7f9915fc7b7c896e41d0d33229338e457217cd78 AS node-tools
-ARG OPENCODE_VERSION=1.18.10
+ARG CODEX_VERSION=0.146.0
 ARG PNPM_VERSION=11.18.0
-RUN npm install --global "opencode-ai@${OPENCODE_VERSION}" "pnpm@${PNPM_VERSION}"
+RUN npm install --global "@openai/codex@${CODEX_VERSION}" "pnpm@${PNPM_VERSION}"
 
 FROM golang:1.26.5@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647
 
@@ -21,7 +21,9 @@ RUN apt-get update \
         git \
         jq \
         make \
+        openssl \
         openssh-client \
+        python3 \
         ripgrep \
         tini \
         unzip \

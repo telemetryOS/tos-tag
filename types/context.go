@@ -18,6 +18,8 @@ type ContextCandidate struct {
 	Version         int64            `json:"version"`
 	OrganizationID  string           `json:"organization_id"`
 	ChannelID       string           `json:"channel_id,omitempty"`
+	ChannelName     string           `json:"channel_name,omitempty"`
+	AuthorID        string           `json:"author_id,omitempty"`
 	Partition       ContextPartition `json:"partition"`
 	Provenance      string           `json:"provenance"`
 	Text            string           `json:"text"`
@@ -32,11 +34,14 @@ type ContextSource struct {
 	ID              string           `json:"id"`
 	Version         int64            `json:"version"`
 	ChannelID       string           `json:"channel_id,omitempty"`
+	ChannelName     string           `json:"channel_name,omitempty"`
+	AuthorID        string           `json:"author_id,omitempty"`
 	Partition       ContextPartition `json:"partition"`
 	Provenance      string           `json:"provenance"`
 	TokenCount      int              `json:"token_count"`
 	DisclosureClass DisclosureClass  `json:"disclosure_class"`
 	Text            string           `json:"text"`
+	ObservedAt      time.Time        `json:"observed_at,omitempty"`
 }
 
 type ContextPackRevision struct {

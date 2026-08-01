@@ -35,6 +35,7 @@ type ClassificationDecision struct {
 	ReleasableEvidenceIDs     []string              `json:"releasable_evidence_ids,omitempty"`
 	RestrictedSignalIDs       []string              `json:"restricted_signal_ids,omitempty"`
 	ResponseIntent            string                `json:"response_intent,omitempty"`
+	DirectReply               string                `json:"direct_reply,omitempty"`
 	DisclosureClass           DisclosureClass       `json:"disclosure_class"`
 	RequiresFullAgent         bool                  `json:"requires_full_agent"`
 	Reaction                  string                `json:"reaction,omitempty"`

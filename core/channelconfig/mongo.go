@@ -34,11 +34,12 @@ func NewMongoStore(db *database.Database) *MongoStore {
 }
 
 func (s *MongoStore) DraftDirective(ctx context.Context, organizationID, channelID, prompt, actorID string) (DirectiveRevision, error) {
-	if organizationID == "" || channelID == "" || strings.TrimSpace(prompt) == "" || actorID == "" {
-		return DirectiveRevision{}, errors.New("directive scope, prompt, and actor are required")
+	prompt, err := validateDirective(organizationID, channelID, prompt, actorID)
+	if err != nil {
+		return DirectiveRevision{}, err
 	}
 	var state projection
-	err := s.db.Collection(models.CollectionDirectives).FindOneAndUpdate(ctx,
+	err = s.db.Collection(models.CollectionDirectives).FindOneAndUpdate(ctx,
 		bson.M{"organization_id": organizationID, "channel_id": channelID},
 		bson.M{"$inc": bson.M{"next_revision": 1}, "$setOnInsert": bson.M{"organization_id": organizationID, "channel_id": channelID}},
 		options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After),
@@ -51,6 +52,42 @@ func (s *MongoStore) DraftDirective(ctx context.Context, organizationID, channel
 		return DirectiveRevision{}, err
 	}
 	return revision, nil
+}
+
+func (s *MongoStore) PublishDirective(ctx context.Context, organizationID, channelID, prompt, actorID, sourceID string) (DirectiveRevision, error) {
+	prompt, err := validateDirective(organizationID, channelID, prompt, actorID)
+	if err != nil {
+		return DirectiveRevision{}, err
+	}
+	if strings.TrimSpace(sourceID) == "" {
+		return DirectiveRevision{}, errors.New("directive source ID is required")
+	}
+	filter := bson.M{"organization_id": organizationID, "source_id": sourceID}
+	var existing DirectiveRevision
+	if err := s.db.Collection(models.CollectionDirectiveRevisions).FindOne(ctx, filter).Decode(&existing); err == nil {
+		return s.ActivateDirective(ctx, organizationID, channelID, existing.ID)
+	} else if !errors.Is(err, mongo.ErrNoDocuments) {
+		return DirectiveRevision{}, err
+	}
+	var state projection
+	err = s.db.Collection(models.CollectionDirectives).FindOneAndUpdate(ctx,
+		bson.M{"organization_id": organizationID, "channel_id": channelID},
+		bson.M{"$inc": bson.M{"next_revision": 1}, "$setOnInsert": bson.M{"organization_id": organizationID, "channel_id": channelID}},
+		options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After),
+	).Decode(&state)
+	if err != nil {
+		return DirectiveRevision{}, err
+	}
+	revision := DirectiveRevision{ID: types.NewID("dirrev"), OrganizationID: organizationID, ChannelID: channelID, Revision: state.NextRevision, Prompt: prompt, CreatedBy: actorID, CreatedAt: s.now().UTC(), SourceID: sourceID}
+	if _, err := s.db.Collection(models.CollectionDirectiveRevisions).InsertOne(ctx, revision); err != nil {
+		if !mongo.IsDuplicateKeyError(err) {
+			return DirectiveRevision{}, err
+		}
+		if err := s.db.Collection(models.CollectionDirectiveRevisions).FindOne(ctx, filter).Decode(&revision); err != nil {
+			return DirectiveRevision{}, err
+		}
+	}
+	return s.ActivateDirective(ctx, organizationID, channelID, revision.ID)
 }
 
 func (s *MongoStore) ActivateDirective(ctx context.Context, organizationID, channelID, revisionID string) (DirectiveRevision, error) {

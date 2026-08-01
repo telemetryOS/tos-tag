@@ -1,0 +1,12 @@
+{
+  "id": "telemetryos-agent-tools",
+  "version": "0.2.0",
+  "tools": [
+    {"name": "linear", "path": "tools/linear"},
+    {"name": "wiki", "path": "tools/wiki"},
+    {"name": "otel", "path": "tools/otel"},
+    {"name": "device-logs", "path": "tools/device-logs"},
+    {"name": "mongo", "path": "tools/mongo"},
+    {"name": "code", "path": "tools/code"}
+  ]
+}

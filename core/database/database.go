@@ -153,6 +153,7 @@ func RequiredIndexes() []IndexSpec {
 		{models.CollectionDirectives, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "channel_id", Value: 1}}, Options: unique("channel_directive_unique")}},
 		{models.CollectionDirectiveRevisions, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "channel_id", Value: 1}, {Key: "revision", Value: 1}}, Options: unique("channel_directive_revision_unique")}},
 		{models.CollectionDirectiveRevisions, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "public_id", Value: 1}}, Options: unique("channel_directive_public_unique")}},
+		{models.CollectionDirectiveRevisions, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "source_id", Value: 1}}, Options: partialUnique("channel_directive_source_unique", bson.M{"source_id": bson.M{"$exists": true}})}},
 		{models.CollectionNotes, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "channel_id", Value: 1}}, Options: unique("channel_note_unique")}},
 		{models.CollectionNoteRevisions, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "channel_id", Value: 1}, {Key: "revision", Value: 1}}, Options: unique("channel_note_revision_unique")}},
 		{models.CollectionNoteRevisions, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "public_id", Value: 1}}, Options: unique("channel_note_public_unique")}},

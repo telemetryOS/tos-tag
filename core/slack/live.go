@@ -19,6 +19,13 @@ import (
 	"github.com/telemetryos/tos-tag/types"
 )
 
+const (
+	directiveSlashCommand   = "/tag-directive"
+	directiveCallbackID     = "tos_tag_channel_directive_v1"
+	directivePromptBlockID  = "channel_directive"
+	directivePromptActionID = "prompt"
+)
+
 type LiveOptions struct {
 	OrganizationID    string
 	AppID             string
@@ -32,17 +39,27 @@ type LiveOptions struct {
 type LiveIngress struct {
 	options LiveOptions
 	client  socketModeTransport
+	views   viewAPI
 
 	mu                 sync.Mutex
 	cancel             context.CancelFunc
 	done               chan struct{}
 	started            bool
 	interactionHandler ApprovalInteractionHandler
+	directiveLoad      DirectiveLoadHandler
+	directiveSave      DirectiveSaveHandler
 }
 
 func (s *LiveIngress) SetApprovalInteractionHandler(handler ApprovalInteractionHandler) {
 	s.mu.Lock()
 	s.interactionHandler = handler
+	s.mu.Unlock()
+}
+
+func (s *LiveIngress) SetDirectiveConfigurationHandlers(load DirectiveLoadHandler, save DirectiveSaveHandler) {
+	s.mu.Lock()
+	s.directiveLoad = load
+	s.directiveSave = save
 	s.mu.Unlock()
 }
 
@@ -54,6 +71,10 @@ type socketModeTransport interface {
 
 type managedSocketModeTransport struct {
 	client *socketmode.Client
+}
+
+type viewAPI interface {
+	OpenViewContext(context.Context, string, slackapi.ModalViewRequest) (*slackapi.ViewResponse, error)
 }
 
 func (t managedSocketModeTransport) RunContext(ctx context.Context) error {
@@ -98,7 +119,7 @@ func NewLive(options LiveOptions, renderer *deliveries.Renderer) (*LiveIngress, 
 		options.Logger = blackbox.New()
 	}
 	options.Logger = options.Logger.WithCtx(blackbox.Ctx{"component": "slack", "slack_app_id": options.AppID, "slack_team_id": options.TeamID})
-	return &LiveIngress{options: options, client: client}, &LiveDelivery{teamID: options.TeamID, api: api, renderer: renderer, logger: options.Logger}, nil
+	return &LiveIngress{options: options, client: client, views: api}, &LiveDelivery{teamID: options.TeamID, api: api, renderer: renderer, logger: options.Logger}, nil
 }
 
 func (s *LiveIngress) Start(parent context.Context, handler Handler) error {
@@ -175,9 +196,77 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 				continue
 			case socketmode.EventTypeEventsAPI:
 				eventLogger.Info("Slack Events API envelope received")
+			case socketmode.EventTypeSlashCommand:
+				if event.Request == nil {
+					eventLogger.Error("Slack slash command missing request metadata")
+					continue
+				}
+				command, eligible, normalizeErr := NormalizeDirectiveCommand(s.options, event.Data)
+				if normalizeErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", normalizeErr)}).Error("Slack directive command rejected")
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralCommandResponse("This command is not available in this workspace or channel."))
+					continue
+				}
+				if !eligible {
+					eventLogger.Debug("Slack slash command ignored")
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, nil)
+					continue
+				}
+				s.mu.Lock()
+				loadDirective := s.directiveLoad
+				s.mu.Unlock()
+				if loadDirective == nil || s.views == nil {
+					eventLogger.Error("Slack directive command has no configuration handler")
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralCommandResponse("Channel directives are not available right now."))
+					continue
+				}
+				configuration, loadErr := loadDirective(ctx, command.Request)
+				if loadErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"channel_id": command.Request.ChannelID, "actor_id": command.Request.UserID, "error_type": fmt.Sprintf("%T", loadErr)}).Warn("Slack directive command authorization failed")
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralCommandResponse("You are not authorized to configure this channel's directive."))
+					continue
+				}
+				if ackErr := s.client.AckCtx(ctx, event.Request.EnvelopeID, nil); ackErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", ackErr)}).Error("Slack directive command acknowledgement failed")
+					continue
+				}
+				if _, openErr := s.views.OpenViewContext(ctx, command.TriggerID, directiveModal(command.Request, configuration)); openErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"channel_id": command.Request.ChannelID, "actor_id": command.Request.UserID, "error_type": fmt.Sprintf("%T", openErr)}).Error("Slack directive modal open failed")
+					continue
+				}
+				eventLogger.WithCtx(blackbox.Ctx{"channel_id": command.Request.ChannelID, "actor_id": command.Request.UserID, "active_revision": configuration.Revision}).Info("Slack directive modal opened")
+				continue
 			case socketmode.EventTypeInteractive:
 				if event.Request == nil {
 					eventLogger.Error("Slack interaction missing request metadata")
+					continue
+				}
+				directive, directiveEligible, directiveErr := NormalizeDirectiveSubmission(s.options, event.Data)
+				if directiveErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", directiveErr)}).Error("Slack directive submission rejected")
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, slackapi.NewErrorsViewSubmissionResponse(map[string]string{directivePromptBlockID: "The directive could not be validated. Reopen the form and try again."}))
+					continue
+				}
+				if directiveEligible {
+					s.mu.Lock()
+					saveDirective := s.directiveSave
+					s.mu.Unlock()
+					if saveDirective == nil {
+						eventLogger.Error("Slack directive submission has no durable handler")
+						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, slackapi.NewErrorsViewSubmissionResponse(map[string]string{directivePromptBlockID: "Channel directives are unavailable right now."}))
+						continue
+					}
+					saved, saveErr := saveDirective(ctx, directive)
+					if saveErr != nil {
+						eventLogger.WithCtx(blackbox.Ctx{"channel_id": directive.ChannelID, "actor_id": directive.UserID, "error_type": fmt.Sprintf("%T", saveErr)}).Error("Slack directive submission persistence failed")
+						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, slackapi.NewErrorsViewSubmissionResponse(map[string]string{directivePromptBlockID: "The directive was not saved. Check your channel authorization and try again."}))
+						continue
+					}
+					if ackErr := s.client.AckCtx(ctx, event.Request.EnvelopeID, nil); ackErr != nil {
+						eventLogger.WithCtx(blackbox.Ctx{"channel_id": directive.ChannelID, "directive_revision": saved.Revision, "error_type": fmt.Sprintf("%T", ackErr)}).Error("Slack directive submission acknowledgement failed")
+						continue
+					}
+					eventLogger.WithCtx(blackbox.Ctx{"channel_id": directive.ChannelID, "actor_id": directive.UserID, "directive_revision": saved.Revision, "prompt_bytes": len(saved.Prompt)}).Info("Slack channel directive saved and activated")
 					continue
 				}
 				interaction, eligible, normalizeErr := NormalizeApprovalInteraction(s.options, event.Data)
@@ -197,7 +286,7 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 					continue
 				}
 				if handleErr := interactionHandler(ctx, interaction); handleErr != nil {
-					eventLogger.WithCtx(blackbox.Ctx{"approval_id": interaction.ApprovalID, "approver_id": interaction.UserID, "error_type": fmt.Sprintf("%T", handleErr)}).Error("Slack approval interaction persistence failed; acknowledgement withheld")
+					eventLogger.WithCtx(blackbox.Ctx{"approval_id": interaction.ApprovalID, "approver_id": interaction.UserID, "diagnostic_code": approvalInteractionDiagnosticCode(handleErr), "error_type": fmt.Sprintf("%T", handleErr)}).Error("Slack approval interaction persistence failed; acknowledgement withheld")
 					continue
 				}
 				if ackErr := s.client.AckCtx(ctx, event.Request.EnvelopeID, nil); ackErr != nil {
@@ -248,6 +337,129 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 			envelopeLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "duplicate": accepted.Duplicate, "ignored": false}).Info("Slack event durably accepted and acknowledged")
 		}
 	}
+}
+
+func approvalInteractionDiagnosticCode(err error) string {
+	if err == nil {
+		return "none"
+	}
+	message := strings.ToLower(err.Error())
+	for fragment, code := range map[string]string{
+		"decision is incomplete":        "incomplete_decision",
+		"destination does not match":    "destination_mismatch",
+		"approver is not authorized":    "approver_not_authorized",
+		"independent approver required": "independent_approver_required",
+		"load approval job":             "job_load_failed",
+		"job does not match":            "job_scope_mismatch",
+		"record slack approval":         "audit_write_failed",
+		"not approvable":                "approval_state_conflict",
+		"not deniable":                  "approval_state_conflict",
+		"resume approved job":           "job_resume_failed",
+		"cancel denied job":             "job_cancel_failed",
+		"enqueue":                       "delivery_enqueue_failed",
+	} {
+		if strings.Contains(message, fragment) {
+			return code
+		}
+	}
+	return "persistence_failed"
+}
+
+type directiveCommand struct {
+	Request   DirectiveConfigurationRequest
+	TriggerID string
+}
+
+type directiveModalMetadata struct {
+	WorkspaceID string `json:"workspace_id"`
+	ChannelID   string `json:"channel_id"`
+}
+
+func NormalizeDirectiveCommand(options LiveOptions, data any) (directiveCommand, bool, error) {
+	var command slackapi.SlashCommand
+	switch value := data.(type) {
+	case slackapi.SlashCommand:
+		command = value
+	case *slackapi.SlashCommand:
+		if value == nil {
+			return directiveCommand{}, false, errors.New("Slack slash command payload is nil")
+		}
+		command = *value
+	default:
+		return directiveCommand{}, false, nil
+	}
+	if command.Command != directiveSlashCommand {
+		return directiveCommand{}, false, nil
+	}
+	if command.TeamID != options.TeamID || (command.APIAppID != "" && command.APIAppID != options.AppID) || command.ChannelID == "" || command.UserID == "" || command.TriggerID == "" {
+		return directiveCommand{}, false, errors.New("Slack directive command scope is invalid")
+	}
+	return directiveCommand{Request: DirectiveConfigurationRequest{OrganizationID: options.OrganizationID, WorkspaceID: command.TeamID, ChannelID: command.ChannelID, UserID: command.UserID}, TriggerID: command.TriggerID}, true, nil
+}
+
+func NormalizeDirectiveSubmission(options LiveOptions, data any) (DirectiveConfigurationRequest, bool, error) {
+	var callback slackapi.InteractionCallback
+	switch value := data.(type) {
+	case slackapi.InteractionCallback:
+		callback = value
+	case *slackapi.InteractionCallback:
+		if value == nil {
+			return DirectiveConfigurationRequest{}, false, errors.New("Slack interaction payload is nil")
+		}
+		callback = *value
+	default:
+		return DirectiveConfigurationRequest{}, false, nil
+	}
+	if callback.Type != slackapi.InteractionTypeViewSubmission || callback.View.CallbackID != directiveCallbackID {
+		return DirectiveConfigurationRequest{}, false, nil
+	}
+	if callback.APIAppID != "" && callback.APIAppID != options.AppID {
+		return DirectiveConfigurationRequest{}, false, errors.New("Slack directive submission app does not match installation")
+	}
+	if callback.Team.ID != options.TeamID || callback.User.ID == "" || callback.View.ID == "" || callback.View.State == nil {
+		return DirectiveConfigurationRequest{}, false, errors.New("Slack directive submission scope is invalid")
+	}
+	var metadata directiveModalMetadata
+	if err := json.Unmarshal([]byte(callback.View.PrivateMetadata), &metadata); err != nil || metadata.WorkspaceID != options.TeamID || metadata.ChannelID == "" {
+		return DirectiveConfigurationRequest{}, false, errors.New("Slack directive modal metadata is invalid")
+	}
+	actions := callback.View.State.Values[directivePromptBlockID]
+	prompt := strings.TrimSpace(actions[directivePromptActionID].Value)
+	if prompt == "" || len([]rune(prompt)) > 3000 {
+		return DirectiveConfigurationRequest{}, false, errors.New("Slack directive prompt is invalid")
+	}
+	return DirectiveConfigurationRequest{OrganizationID: options.OrganizationID, WorkspaceID: metadata.WorkspaceID, ChannelID: metadata.ChannelID, UserID: callback.User.ID, Prompt: prompt, InteractionID: callback.View.ID}, true, nil
+}
+
+func directiveModal(request DirectiveConfigurationRequest, current DirectiveConfiguration) slackapi.ModalViewRequest {
+	metadata, _ := json.Marshal(directiveModalMetadata{WorkspaceID: request.WorkspaceID, ChannelID: request.ChannelID})
+	plain := slackapi.NewPlainTextInputBlockElement(slackapi.NewTextBlockObject("plain_text", "Describe how tag should behave in this channel", false, false), directivePromptActionID)
+	plain.Multiline = true
+	plain.MinLength = 1
+	plain.MaxLength = 3000
+	plain.FocusOnLoad = true
+	if current.Prompt != "" {
+		plain.InitialValue = current.Prompt
+	}
+	revision := "No active directive."
+	if current.Revision > 0 {
+		revision = fmt.Sprintf("Editing active revision %d.", current.Revision)
+	}
+	intro := slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", "Set the operating directive for this channel. It guides both the ambient classifier and any admitted full-agent work, but cannot grant tools or override safety policy.\n\n"+revision, false, false), nil, nil)
+	input := slackapi.NewInputBlock(directivePromptBlockID, slackapi.NewTextBlockObject("plain_text", "Channel directive", false, false), slackapi.NewTextBlockObject("plain_text", "Example: Investigate each alert, correlate it with OpenTelemetry and related systems, and report the most likely root cause with evidence.", false, false), plain)
+	return slackapi.ModalViewRequest{
+		Type:            slackapi.VTModal,
+		Title:           slackapi.NewTextBlockObject("plain_text", "Channel directive", false, false),
+		Submit:          slackapi.NewTextBlockObject("plain_text", "Save directive", false, false),
+		Close:           slackapi.NewTextBlockObject("plain_text", "Cancel", false, false),
+		Blocks:          slackapi.Blocks{BlockSet: []slackapi.Block{intro, input}},
+		PrivateMetadata: string(metadata),
+		CallbackID:      directiveCallbackID,
+	}
+}
+
+func ephemeralCommandResponse(message string) map[string]any {
+	return map[string]any{"response_type": "ephemeral", "text": message}
 }
 
 func NormalizeApprovalInteraction(options LiveOptions, data any) (ApprovalInteraction, bool, error) {

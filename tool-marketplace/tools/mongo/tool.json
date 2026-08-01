@@ -1,0 +1,8 @@
+{
+  "id": "telemetryos.mongo",
+  "version": "1.0.0",
+  "script": "run.sh",
+  "operations": [
+    {"id": "read", "env": ["MONGO_QA_URI"], "timeout_seconds": 90, "max_output_bytes": 1048576, "risk": "read"}
+  ]
+}

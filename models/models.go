@@ -282,6 +282,7 @@ type Delivery struct {
 	PublicID       string        `bson:"public_id"`
 	OrganizationID string        `bson:"organization_id"`
 	JobID          string        `bson:"job_id"`
+	DecisionID     string        `bson:"decision_id,omitempty"`
 	IdempotencyKey string        `bson:"idempotency_key"`
 	TeamID         string        `bson:"team_id"`
 	ChannelID      string        `bson:"channel_id"`

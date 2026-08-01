@@ -1,6 +1,7 @@
 package workers
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"os"
@@ -27,8 +28,8 @@ func TestLocalWorkerHasCleanEnvironmentAndTerminatesProcessGroup(t *testing.T) {
 	if workspace.PID <= 0 {
 		t.Fatal("worker PID missing")
 	}
-	policy, err := os.ReadFile(filepath.Join(workspace.WorkDir, "opencode.json"))
-	if err != nil || !strings.Contains(string(policy), `"*":"deny"`) || !strings.Contains(string(policy), `"skill":"allow"`) {
+	policy, err := os.ReadFile(filepath.Join(workspace.WorkDir, "AGENTS.md"))
+	if err != nil || !strings.Contains(string(policy), "disposable Codex worker") || !strings.Contains(string(policy), "tos_tag_tool") || !strings.Contains(string(policy), "Current full-agent work runs through Codex App Server") {
 		t.Fatalf("worker policy=%q err=%v", policy, err)
 	}
 	if err := manager.Terminate(context.Background(), workspace); err != nil {
@@ -131,56 +132,22 @@ func TestSharedSkillReferencesAreHashVerifiedReadOnlyAndScriptsStayExcluded(t *t
 	}
 }
 
-func TestCustomToolIsReadOnlyAndNarrowlyAllowed(t *testing.T) {
+func TestConnectedWorkerExposesOnlyProcessJSONLStdio(t *testing.T) {
 	manager, _ := NewLocal(t.TempDir(), "/usr/bin:/bin")
-	workspace, err := manager.Provision(context.Background(), Spec{JobID: "j", AttemptID: "a", Command: []string{"/bin/sh", "-c", "sleep 30"}, CustomTools: map[string][]byte{"tos_tag_tool.ts": []byte("export default {}\n")}, WallTime: time.Minute})
+	connection, err := manager.ProvisionConnected(context.Background(), Spec{JobID: "j", AttemptID: "a", Command: []string{"/bin/sh", "-c", `IFS= read -r line; printf '%s\n' "$line"; sleep 30`}, WallTime: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer manager.Terminate(context.Background(), workspace)
-	toolPath := filepath.Join(workspace.WorkDir, ".opencode", "tools", "tos_tag_tool.ts")
-	info, err := os.Stat(toolPath)
-	if err != nil || info.Mode().Perm() != 0o400 {
-		t.Fatalf("tool info=%v err=%v", info, err)
-	}
-	policy, err := os.ReadFile(filepath.Join(workspace.WorkDir, "opencode.json"))
-	if err != nil || !strings.Contains(string(policy), `"tos_tag_tool":"allow"`) || !strings.Contains(string(policy), `"tos_tag_trigger":"allow"`) || !strings.Contains(string(policy), `"*":"deny"`) {
-		t.Fatalf("policy=%s err=%v", policy, err)
-	}
-}
-
-func TestWorkerReceivesOnlyProviderGatewayCapability(t *testing.T) {
-	t.Setenv("TOS_TAG_PROVIDER_CREDENTIAL", "provider-secret")
-	manager, _ := NewLocal(t.TempDir(), "/usr/bin:/bin")
-	workspace, err := manager.Provision(context.Background(), Spec{
-		JobID: "j", AttemptID: "a",
-		Command:  []string{"/bin/sh", "-c", `env > "$TOS_TAG_ARTIFACTS/provider-env.txt"; sleep 30`},
-		Provider: &ProviderRoute{ID: "openai", BaseURL: "http://127.0.0.1:43123/v1", Token: "attempt-capability"}, WallTime: time.Minute,
-	})
-	if err != nil {
+	defer manager.Terminate(context.Background(), connection.Workspace)
+	if _, err := connection.Stdin.Write([]byte(`{"method":"initialize"}` + "\n")); err != nil {
 		t.Fatal(err)
 	}
-	defer manager.Terminate(context.Background(), workspace)
-	policy, err := os.ReadFile(filepath.Join(workspace.WorkDir, "opencode.json"))
-	if err != nil {
-		t.Fatal(err)
+	line, err := bufio.NewReader(connection.Stdout).ReadString('\n')
+	if err != nil || strings.TrimSpace(line) != `{"method":"initialize"}` {
+		t.Fatalf("stdio line=%q err=%v", line, err)
 	}
-	if strings.Contains(string(policy), "provider-secret") || !strings.Contains(string(policy), "attempt-capability") || !strings.Contains(string(policy), "http://127.0.0.1:43123/v1") {
-		t.Fatal("worker policy does not contain only the provider gateway capability")
-	}
-	deadline := time.Now().Add(time.Second)
-	for {
-		environment, readErr := os.ReadFile(filepath.Join(workspace.ArtifactsDir, "provider-env.txt"))
-		if readErr == nil {
-			if strings.Contains(string(environment), "TOS_TAG_PROVIDER_CREDENTIAL") || strings.Contains(string(environment), "provider-secret") {
-				t.Fatal("worker inherited the provider credential")
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("worker environment artifact unavailable: %v", readErr)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if !strings.Contains(connection.Workspace.SkillsDir, filepath.Join(".agents", "skills")) {
+		t.Fatalf("skills directory = %q", connection.Workspace.SkillsDir)
 	}
 }
 

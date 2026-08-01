@@ -231,7 +231,7 @@ func loadPluginMarketplace(root, catalogPath, selectedPlugin string) ([]SkillSna
 			if err != nil {
 				return nil, err
 			}
-			// OpenCode discovers skills at .opencode/skills/<skill>/SKILL.md, so
+			// Codex discovers skills at .agents/skills/<skill>/SKILL.md, so
 			// retain the plugin in MarketplaceID and keep the skill's runtime
 			// name flat. Combining plugins then fails closed on name collisions.
 			snapshot, err := snapshotSkill(absolute, Catalog{ID: catalog.Name + "/" + plugin.Name, Version: version}, SkillEntry{Name: entry.Name(), Path: relative})

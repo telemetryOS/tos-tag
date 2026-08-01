@@ -57,6 +57,15 @@ type Bridge struct {
 
 func (b *Bridge) SetTriggerRepository(repository triggers.Repository) { b.triggers = repository }
 
+func (b *Bridge) ImportEnvironmentBindings(ctx context.Context, organizationID string, toolIDs []string) error {
+	bindings, err := ImportEnvironmentBindings(ctx, b.gateway.Registry, toolIDs, b.gateway.Secrets, organizationID, nil)
+	if err != nil {
+		return err
+	}
+	b.gateway.Bindings = bindings
+	return nil
+}
+
 func NewBridge(gateway Gateway, queue jobs.Queue, approvalStore approvals.Repository, auditAppender audit.Appender, coordinators ...interface {
 	SuspendAndNotify(context.Context, approvals.RequestScope, approvals.Approval) error
 }) (*Bridge, error) {
@@ -133,11 +142,10 @@ func (b *Bridge) RevokeAttempt(_ context.Context, attemptID string) error {
 }
 
 type bridgeRequest struct {
-	ToolID           string            `json:"tool_id"`
-	OperationID      string            `json:"operation_id"`
-	Arguments        []string          `json:"arguments"`
-	SecretReferences map[string]string `json:"secret_references"`
-	ApprovalID       string            `json:"approval_id"`
+	ToolID      string   `json:"tool_id"`
+	OperationID string   `json:"operation_id"`
+	Arguments   []string `json:"arguments"`
+	ApprovalID  string   `json:"approval_id"`
 }
 
 func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
@@ -186,8 +194,8 @@ func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
 		writeBridge(w, http.StatusForbidden, map[string]any{"error": "tool_not_admitted"})
 		return
 	}
-	action := approvals.Action{OrganizationID: scope.OrganizationID, JobID: scope.JobID, WorkspaceID: scope.WorkspaceID, ChannelID: scope.ChannelID, ThreadTS: scope.ThreadTS, ToolID: bundle.Manifest.ID, ToolVersion: bundle.Manifest.Version, OperationID: operation.ID, Arguments: map[string]any{"argv": input.Arguments, "secret_references": input.SecretReferences}, Destination: scope.WorkspaceID + "/" + scope.ChannelID, Risk: operation.Risk}
-	if operation.Risk != "read" {
+	action := approvals.Action{OrganizationID: scope.OrganizationID, JobID: scope.JobID, WorkspaceID: scope.WorkspaceID, ChannelID: scope.ChannelID, ThreadTS: scope.ThreadTS, ToolID: bundle.Manifest.ID, ToolVersion: bundle.Manifest.Version, OperationID: operation.ID, Arguments: map[string]any{"argv": input.Arguments}, Destination: scope.WorkspaceID + "/" + scope.ChannelID, Risk: operation.Risk}
+	if operation.RequiresApproval() {
 		if input.ApprovalID == "" {
 			requesterID := b.approvalRequester(r.Context(), scope)
 			approval, err := b.approvals.RequestContext(r.Context(), action, requesterID, approvalTTL(scope))
@@ -216,11 +224,11 @@ func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	actionBytes, _ := json.Marshal(action)
 	executionID := types.NewID("toolrun")
-	if _, err := b.audit.Append(r.Context(), audit.AppendRequest{OrganizationID: scope.OrganizationID, Type: "tool.execution.requested", ActorID: "agent:" + scope.JobID, ResourceID: executionID, RetentionEpoch: time.Now().UTC().Format("2006-01"), IdempotencyKey: "tool-execution/" + executionID + "/requested", Metadata: map[string]any{"tool_id": input.ToolID, "operation_id": input.OperationID, "risk": operation.Risk}, Content: actionBytes}); err != nil {
+	if _, err := b.audit.Append(r.Context(), audit.AppendRequest{OrganizationID: scope.OrganizationID, Type: "tool.execution.requested", ActorID: "agent:" + scope.JobID, ResourceID: executionID, RetentionEpoch: time.Now().UTC().Format("2006-01"), IdempotencyKey: "tool-execution/" + executionID + "/requested", Metadata: map[string]any{"tool_id": input.ToolID, "operation_id": input.OperationID, "risk": operation.Risk, "approval_policy": effectiveApprovalPolicy(operation)}, Content: actionBytes}); err != nil {
 		writeBridge(w, http.StatusServiceUnavailable, map[string]any{"error": "audit_unavailable"})
 		return
 	}
-	result, err := b.gateway.Execute(r.Context(), input.ToolID, GatewayRequest{Request: Request{OrganizationID: scope.OrganizationID, JobID: scope.JobID, OperationID: input.OperationID, Args: input.Arguments, Capability: Capability{ToolID: bundle.Manifest.ID, ToolVersion: bundle.Manifest.Version, OperationID: input.OperationID, AttemptToken: scope.AttemptID, SteeringEpoch: scope.SteeringEpoch, ExpiresAt: minTime(scope.ExpiresAt, time.Now().UTC().Add(time.Duration(operation.TimeoutSeconds)*time.Second))}}, SecretReferences: input.SecretReferences})
+	result, err := b.gateway.Execute(r.Context(), input.ToolID, GatewayRequest{Request: Request{OrganizationID: scope.OrganizationID, JobID: scope.JobID, OperationID: input.OperationID, Args: input.Arguments, Capability: Capability{ToolID: bundle.Manifest.ID, ToolVersion: bundle.Manifest.Version, OperationID: input.OperationID, AttemptToken: scope.AttemptID, SteeringEpoch: scope.SteeringEpoch, ExpiresAt: minTime(scope.ExpiresAt, time.Now().UTC().Add(time.Duration(operation.TimeoutSeconds)*time.Second))}}})
 	if err != nil {
 		writeBridge(w, http.StatusUnprocessableEntity, map[string]any{"error": "tool_failed", "detail": err.Error()})
 		return
@@ -230,6 +238,13 @@ func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeBridge(w, http.StatusOK, result)
+}
+
+func effectiveApprovalPolicy(operation Operation) string {
+	if operation.Approval != "" {
+		return operation.Approval
+	}
+	return "risk_based"
 }
 
 type triggerSubscriptionRequest struct {
@@ -408,11 +423,10 @@ func containsTool(values []string, target string) bool {
 	return false
 }
 
-func (b *Bridge) approvalRequester(ctx context.Context, scope JobScope) string {
-	job, err := b.jobs.Get(ctx, jobsID(scope.JobID))
-	if err == nil && job.RequesterID != "" {
-		return job.RequesterID
-	}
+func (b *Bridge) approvalRequester(_ context.Context, scope JobScope) string {
+	// The executing agent is the requester of the concrete tool action. The
+	// human who asked for the higher-level Slack task must remain eligible to
+	// approve the exact immutable action the agent subsequently proposed.
 	return "agent:" + scope.JobID
 }
 

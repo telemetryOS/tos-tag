@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -98,21 +99,20 @@ type ClassifierConfig struct {
 	AssistThreshold       float64       `config:"assistThreshold"`
 	ChannelReplyThreshold float64       `config:"channelReplyThreshold"`
 	MaxResponsesPerHour   int           `config:"maxResponsesPerHour"`
+	MaxConcurrentJobs     int           `config:"maxConcurrentJobs"`
 }
 
 type JobsConfig struct {
-	Lease       time.Duration `config:"lease"`
-	Poll        time.Duration `config:"poll"`
-	MaxAttempts int           `config:"maxAttempts"`
+	Lease             time.Duration `config:"lease"`
+	Poll              time.Duration `config:"poll"`
+	MaxAttempts       int           `config:"maxAttempts"`
+	WorkerConcurrency int           `config:"workerConcurrency"`
 }
 
-type OpenCodeConfig struct {
+type CodexConfig struct {
 	Enabled    bool          `config:"enabled"`
-	Mode       string        `config:"mode"`
-	BaseURL    string        `config:"baseUrl"`
-	Username   string        `config:"username"`
-	Password   string        `config:"password"`
 	Command    string        `config:"command"`
+	Home       string        `config:"home"`
 	WorkerRoot string        `config:"workerRoot"`
 	Timeout    time.Duration `config:"timeout"`
 }
@@ -136,6 +136,7 @@ type MarketplaceConfig struct {
 	InjectedTools       []string `config:"injectedTools"`
 	ToolRoot            string   `config:"toolRoot"`
 	ToolCatalogPath     string   `config:"toolCatalogPath"`
+	ToolPath            string   `config:"toolPath"`
 	ToolsEnabled        bool     `config:"toolsEnabled"`
 }
 type KeystoreConfig struct {
@@ -155,7 +156,7 @@ type Config struct {
 	ContextPacks ContextPackConfig `config:"contextPacks"`
 	Classifier   ClassifierConfig  `config:"classifier"`
 	Jobs         JobsConfig        `config:"jobs"`
-	OpenCode     OpenCodeConfig    `config:"openCode"`
+	Codex        CodexConfig       `config:"codex"`
 	Models       ModelConfig       `config:"models"`
 	Marketplaces MarketplaceConfig `config:"marketplaces"`
 	Keystore     KeystoreConfig    `config:"keystore"`
@@ -212,14 +213,16 @@ var DefaultConfiguration = Config{
 		ReactionEmojis:        []string{"eyes", "thinking_face", "white_check_mark", "warning", "rotating_light", "hammer_and_wrench", "speech_balloon"},
 		AssistThreshold:       0.90,
 		ChannelReplyThreshold: 0.98,
-		MaxResponsesPerHour:   6,
+		MaxResponsesPerHour:   120,
+		MaxConcurrentJobs:     8,
 	},
 	Jobs: JobsConfig{
-		Lease:       30 * time.Second,
-		Poll:        250 * time.Millisecond,
-		MaxAttempts: 3,
+		Lease:             30 * time.Second,
+		Poll:              250 * time.Millisecond,
+		MaxAttempts:       3,
+		WorkerConcurrency: 8,
 	},
-	OpenCode: OpenCodeConfig{Mode: "local_worker", BaseURL: "http://127.0.0.1:4096", Username: "opencode", Command: "opencode", WorkerRoot: "/tmp/tos-tag-workers", Timeout: 5 * time.Minute},
+	Codex: CodexConfig{Command: "codex", WorkerRoot: "/tmp/tos-tag-workers", Timeout: 5 * time.Minute},
 	Models: ModelConfig{
 		DefaultProfile:  "chatgpt-luna-max",
 		DefaultProvider: "openai",
@@ -237,11 +240,15 @@ func Load() (*Config, error) {
 	if err := loader.GetAll(&cfg); err != nil {
 		return nil, fmt.Errorf("read tag configuration: %w", err)
 	}
-	if err := applyOpenCodeEnvironment(&cfg.OpenCode); err != nil {
+	if err := applyCodexEnvironment(&cfg.Codex); err != nil {
 		return nil, err
 	}
 	applySlackEnvironment(&cfg.Slack)
+	applyMarketplaceEnvironment(&cfg.Marketplaces)
 	if err := applyClassifierEnvironment(&cfg.Classifier); err != nil {
+		return nil, err
+	}
+	if err := applyJobsEnvironment(&cfg.Jobs); err != nil {
 		return nil, err
 	}
 	if env := strings.TrimSpace(os.Getenv("DEPLOYMENT_ENVIRONMENT")); env != "" {
@@ -253,41 +260,57 @@ func Load() (*Config, error) {
 	return &cfg, nil
 }
 
+func applyMarketplaceEnvironment(cfg *MarketplaceConfig) {
+	if raw, ok := os.LookupEnv("TAG__MARKETPLACES__INJECTED_SKILLS"); ok {
+		cfg.InjectedSkills = splitNonEmpty(raw)
+	}
+	if raw, ok := os.LookupEnv("TAG__MARKETPLACES__INJECTED_TOOLS"); ok {
+		cfg.InjectedTools = splitNonEmpty(raw)
+	}
+	if raw, ok := os.LookupEnv("TAG__MARKETPLACES__TOOL_PATH"); ok {
+		cfg.ToolPath = strings.TrimSpace(raw)
+	}
+}
+
 func applySlackEnvironment(cfg *SlackConfig) {
 	if raw, ok := os.LookupEnv("TAG__SLACK__OUTPUT_CHANNEL_IDS"); ok {
 		cfg.OutputChannelIDs = splitNonEmpty(raw)
 	}
 }
 
-// Orale tokenizes the Go field name OpenCode as OPEN_CODE. The public runtime
-// contract predates that detail and documents TAG__OPENCODE__*, so preserve
-// those names explicitly rather than silently leaving the fake harness active.
-func applyOpenCodeEnvironment(cfg *OpenCodeConfig) error {
-	if raw, ok := os.LookupEnv("TAG__OPENCODE__ENABLED"); ok {
+func applyCodexEnvironment(cfg *CodexConfig) error {
+	if raw, ok := os.LookupEnv("TAG__CODEX__ENABLED"); ok {
 		value, err := strconv.ParseBool(strings.TrimSpace(raw))
 		if err != nil {
-			return fmt.Errorf("TAG__OPENCODE__ENABLED must be a boolean: %w", err)
+			return fmt.Errorf("TAG__CODEX__ENABLED must be a boolean: %w", err)
 		}
 		cfg.Enabled = value
 	}
 	for name, target := range map[string]*string{
-		"TAG__OPENCODE__MODE":        &cfg.Mode,
-		"TAG__OPENCODE__BASE_URL":    &cfg.BaseURL,
-		"TAG__OPENCODE__USERNAME":    &cfg.Username,
-		"TAG__OPENCODE__PASSWORD":    &cfg.Password,
-		"TAG__OPENCODE__COMMAND":     &cfg.Command,
-		"TAG__OPENCODE__WORKER_ROOT": &cfg.WorkerRoot,
+		"TAG__CODEX__COMMAND":     &cfg.Command,
+		"TAG__CODEX__HOME":        &cfg.Home,
+		"TAG__CODEX__WORKER_ROOT": &cfg.WorkerRoot,
 	} {
 		if value, ok := os.LookupEnv(name); ok {
 			*target = strings.TrimSpace(value)
 		}
 	}
-	if raw, ok := os.LookupEnv("TAG__OPENCODE__TIMEOUT"); ok {
+	if raw, ok := os.LookupEnv("TAG__CODEX__TIMEOUT"); ok {
 		value, err := time.ParseDuration(strings.TrimSpace(raw))
 		if err != nil {
-			return fmt.Errorf("TAG__OPENCODE__TIMEOUT must be a duration: %w", err)
+			return fmt.Errorf("TAG__CODEX__TIMEOUT must be a duration: %w", err)
 		}
 		cfg.Timeout = value
+	}
+	if cfg.Home == "" {
+		cfg.Home = strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	}
+	if cfg.Home == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolve Codex home: %w", err)
+		}
+		cfg.Home = filepath.Join(home, ".codex")
 	}
 	return nil
 }
@@ -326,6 +349,17 @@ func applyClassifierEnvironment(cfg *ClassifierConfig) error {
 	}
 	if raw, ok := os.LookupEnv("TAG__CLASSIFIER__REACTION_EMOJIS"); ok {
 		cfg.ReactionEmojis = splitNonEmpty(raw)
+	}
+	return nil
+}
+
+func applyJobsEnvironment(cfg *JobsConfig) error {
+	if raw, ok := os.LookupEnv("TAG__JOBS__WORKER_CONCURRENCY"); ok {
+		value, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return fmt.Errorf("TAG__JOBS__WORKER_CONCURRENCY must be an integer: %w", err)
+		}
+		cfg.WorkerConcurrency = value
 	}
 	return nil
 }
@@ -429,8 +463,8 @@ func Validate(cfg *Config) error {
 	if cfg.Classifier.AssistThreshold < 0 || cfg.Classifier.AssistThreshold > 1 || cfg.Classifier.ChannelReplyThreshold < cfg.Classifier.AssistThreshold || cfg.Classifier.ChannelReplyThreshold > 1 {
 		return fmt.Errorf("invalid classifier thresholds")
 	}
-	if cfg.Classifier.MaxResponsesPerHour <= 0 || cfg.Jobs.Lease <= 0 || cfg.Jobs.Poll <= 0 || cfg.Jobs.MaxAttempts <= 0 {
-		return fmt.Errorf("classifier and job bounds must be positive")
+	if cfg.Classifier.MaxResponsesPerHour <= 0 || cfg.Classifier.MaxConcurrentJobs <= 0 || cfg.Jobs.Lease <= 0 || cfg.Jobs.Poll <= 0 || cfg.Jobs.MaxAttempts <= 0 || cfg.Jobs.WorkerConcurrency <= 0 || cfg.Jobs.WorkerConcurrency > 64 {
+		return fmt.Errorf("classifier and job bounds must be positive and worker concurrency must not exceed 64")
 	}
 	if cfg.Classifier.Timeout <= 0 || cfg.Classifier.MaxOutputTokens <= 0 || len(cfg.Classifier.ReactionEmojis) == 0 {
 		return fmt.Errorf("classifier timeout, output bound, and reaction allowlist are required")
@@ -447,27 +481,12 @@ func Validate(cfg *Config) error {
 	if cfg.Models.DefaultProfile == "" || cfg.Models.DefaultProvider == "" || cfg.Models.DefaultModel == "" {
 		return fmt.Errorf("default model profile, provider, and model are required")
 	}
-	if cfg.OpenCode.Enabled {
-		if cfg.OpenCode.Timeout <= 0 {
-			return fmt.Errorf("enabled OpenCode requires a positive timeout")
+	if cfg.Codex.Enabled {
+		if cfg.Codex.Timeout <= 0 || strings.TrimSpace(cfg.Codex.Command) == "" || strings.TrimSpace(cfg.Codex.Home) == "" || strings.TrimSpace(cfg.Codex.WorkerRoot) == "" {
+			return fmt.Errorf("enabled Codex App Server requires command, home, worker root, and a positive timeout")
 		}
-		switch cfg.OpenCode.Mode {
-		case "local_worker":
-			if cfg.OpenCode.Command == "" || cfg.OpenCode.WorkerRoot == "" {
-				return fmt.Errorf("local-worker OpenCode requires command and worker root")
-			}
-			if cfg.Models.DefaultProvider != "opencode" && (cfg.Models.DefaultProvider != "openai" || cfg.Classifier.Provider != "openai" || cfg.Classifier.OpenAIAPIKey == "" || cfg.Classifier.BaseURL == "") {
-				return fmt.Errorf("credentialed local-worker OpenCode requires the control-plane OpenAI model gateway")
-			}
-		case "external":
-			if cfg.OpenCode.BaseURL == "" || cfg.OpenCode.Username == "" || cfg.OpenCode.Password == "" {
-				return fmt.Errorf("external OpenCode requires base URL, username, and password")
-			}
-		default:
-			return fmt.Errorf("unsupported OpenCode mode %q", cfg.OpenCode.Mode)
-		}
-		if cfg.Models.DefaultProvider == "fake" {
-			return fmt.Errorf("enabled OpenCode requires a non-fake default provider")
+		if cfg.Models.DefaultProvider != "openai" {
+			return fmt.Errorf("enabled Codex App Server requires the OpenAI model provider")
 		}
 	}
 	if (cfg.Marketplaces.SkillRoot == "") != (cfg.Marketplaces.CatalogPath == "") {
@@ -482,8 +501,14 @@ func Validate(cfg *Config) error {
 	if (cfg.Marketplaces.ToolRoot == "") != (cfg.Marketplaces.ToolCatalogPath == "") {
 		return fmt.Errorf("tool marketplace root and catalog path must be configured together")
 	}
-	if cfg.Marketplaces.ToolsEnabled && (!cfg.OpenCode.Enabled || cfg.OpenCode.Mode != "local_worker" || cfg.Marketplaces.ToolRoot == "" || !cfg.Keystore.Enabled || len(cfg.Marketplaces.InjectedTools) == 0) {
-		return fmt.Errorf("enabled marketplace tools require local-worker OpenCode, a tool marketplace, the keystore, and an injected-tool allowlist")
+	if cfg.Marketplaces.ToolsEnabled && (!cfg.Codex.Enabled || cfg.Marketplaces.ToolRoot == "" || !cfg.Keystore.Enabled || len(cfg.Marketplaces.InjectedTools) == 0) {
+		return fmt.Errorf("enabled marketplace tools require Codex App Server, a tool marketplace, the keystore, and an injected-tool allowlist")
+	}
+	if cfg.Marketplaces.ToolsEnabled && strings.TrimSpace(cfg.Marketplaces.ToolPath) == "" {
+		return fmt.Errorf("enabled marketplace tools require a deterministic executable PATH")
+	}
+	if cfg.Marketplaces.ToolsEnabled && strings.TrimSpace(cfg.Slack.OrganizationID) == "" {
+		return fmt.Errorf("enabled marketplace tools require a Slack organization ID for credential scoping")
 	}
 	if cfg.Keystore.Enabled {
 		key, err := base64.StdEncoding.DecodeString(cfg.Keystore.MasterKey)
@@ -542,11 +567,14 @@ func (c *Config) RedactedStatus() map[string]any {
 		"classifier_provider":             c.Classifier.Provider,
 		"classifier_model":                c.Classifier.Model,
 		"classifier_reasoning_effort":     c.Classifier.ReasoningEffort,
+		"classifier_max_responses_hour":   c.Classifier.MaxResponsesPerHour,
+		"classifier_max_concurrent_jobs":  c.Classifier.MaxConcurrentJobs,
+		"job_worker_concurrency":          c.Jobs.WorkerConcurrency,
 		"auth_enabled":                    c.Auth.Enabled,
 		"log_file_enabled":                c.Logging.FilePath != "",
 		"message_retention":               c.Retention.Messages.String(),
 		"context_max_tokens":              c.ContextPacks.MaxTokens,
-		"opencode_enabled":                c.OpenCode.Enabled,
+		"codex_app_server_enabled":        c.Codex.Enabled,
 		"default_model_profile":           c.Models.DefaultProfile,
 		"skill_marketplace_configured":    c.Marketplaces.SkillRoot != "" || c.Marketplaces.HeadlessRoot != "" || c.Marketplaces.BaseRoot != "",
 		"headless_plugin":                 c.Marketplaces.HeadlessPlugin,

@@ -1,5 +1,5 @@
-// Package harness defines the project-owned boundary around OpenCode or any
-// future agent runtime. MongoDB remains authoritative outside this boundary.
+// Package harness defines the project-owned boundary around Codex App Server.
+// MongoDB remains authoritative outside this boundary.
 package harness
 
 import (

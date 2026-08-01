@@ -2,13 +2,7 @@ package harness
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"testing"
-	"time"
 )
 
 func TestFakeHarnessLifecycle(t *testing.T) {
@@ -17,7 +11,7 @@ func TestFakeHarnessLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prompt := Prompt{Text: "hello", Model: "fake/model", RequestID: "request-1", SlackFormat: "slack-mrkdwn/v1"}
+	prompt := Prompt{Text: "hello", Model: "fake/model", RequestID: "request-1", SlackFormat: "slack-output/v2"}
 	if err := fake.Prompt(context.Background(), session.ID, prompt); err != nil {
 		t.Fatal(err)
 	}
@@ -35,148 +29,4 @@ func TestFakeHarnessLifecycle(t *testing.T) {
 	if err := fake.Abort(context.Background(), session.ID); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func TestOpenCodeAdapterContractAgainstFakeServer(t *testing.T) {
-	var authorization string
-	var promptBody map[string]any
-	var permissionBody map[string]any
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /global/health", func(w http.ResponseWriter, r *http.Request) {
-		authorization = r.Header.Get("Authorization")
-		_, _ = w.Write([]byte(`{"healthy":true}`))
-	})
-	mux.HandleFunc("POST /session", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"id":"session-1","title":"test"}`))
-	})
-	mux.HandleFunc("POST /session/session-1/prompt_async", func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&promptBody); err != nil {
-			t.Fatal(err)
-		}
-		w.WriteHeader(http.StatusNoContent)
-	})
-	mux.HandleFunc("POST /session/session-1/permissions/perm-1", func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&permissionBody); err != nil {
-			t.Fatal(err)
-		}
-		w.WriteHeader(http.StatusNoContent)
-	})
-	mux.HandleFunc("POST /session/session-1/abort", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	mux.HandleFunc("GET /event", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprintln(w, `data: {"id":"event-1","session_id":"session-1","type":"session.idle"}`)
-	})
-	adapter, err := NewOpenCode(OpenCodeOptions{Enabled: true, BaseURL: "http://opencode.test", Username: "opencode", Password: "secret-token", Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapter.client.Transport = handlerTransport{handler: mux}
-	ctx := context.Background()
-	if err := adapter.Health(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if authorization != "Basic b3BlbmNvZGU6c2VjcmV0LXRva2Vu" {
-		t.Fatal("adapter did not authenticate the upstream request")
-	}
-	session, err := adapter.CreateSession(ctx, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := adapter.Prompt(ctx, session.ID, Prompt{Text: "hello", Model: "provider/model", RequestID: "request-1"}); err != nil {
-		t.Fatal(err)
-	}
-	if promptBody["messageID"] != openCodeMessageID("request-1") || promptBody["model"].(map[string]any)["providerID"] != "provider" {
-		t.Fatalf("unexpected prompt body: %#v", promptBody)
-	}
-	if err := adapter.Permission(ctx, session.ID, PermissionDecision{PermissionID: "perm-1", Approved: false}); err != nil {
-		t.Fatal(err)
-	}
-	if permissionBody["response"] != "reject" {
-		t.Fatalf("unexpected permission: %#v", permissionBody)
-	}
-	events, errs := adapter.Events(ctx, session.ID)
-	if event := <-events; event.Type != "session.idle" {
-		t.Fatalf("event = %#v", event)
-	}
-	if err := <-errs; err != nil {
-		t.Fatal(err)
-	}
-	if err := adapter.Abort(ctx, session.ID); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestOpenCodeRequiresOptInAndRejectsMalformedResponses(t *testing.T) {
-	if _, err := NewOpenCode(OpenCodeOptions{BaseURL: "http://127.0.0.1"}); err == nil {
-		t.Fatal("disabled OpenCode adapter was accepted")
-	}
-	adapter, err := NewOpenCode(OpenCodeOptions{Enabled: true, BaseURL: "http://opencode.test", Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapter.client.Transport = handlerTransport{handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`not-json`)) })}
-	if err := adapter.Health(context.Background()); err == nil {
-		t.Fatal("malformed response was accepted")
-	}
-}
-
-func TestOpenCodeSessionErrorIsReturnedOnErrorChannel(t *testing.T) {
-	adapter, err := NewOpenCode(OpenCodeOptions{Enabled: true, BaseURL: "http://opencode.test", Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapter.client.Transport = handlerTransport{handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprintln(w, `data: {"type":"session.error","properties":{"error":{"name":"ProviderError"}}}`)
-	})}
-	events, errs := adapter.Events(context.Background(), "session-error")
-	for range events {
-		t.Fatal("session.error was emitted as an ordinary event")
-	}
-	if err := <-errs; !errors.Is(err, ErrOpenCodeSession) {
-		t.Fatalf("session error = %v", err)
-	} else if coded, ok := err.(interface{ DiagnosticCode() string }); !ok || coded.DiagnosticCode() != "ProviderError" {
-		t.Fatalf("session diagnostic = %v", err)
-	}
-}
-
-func TestOpenCodeTreatsStopStepAsTerminal(t *testing.T) {
-	adapter, err := NewOpenCode(OpenCodeOptions{Enabled: true, BaseURL: "http://opencode.test", Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapter.client.Transport = handlerTransport{handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprintln(w, `data: {"type":"message.part.updated","properties":{"part":{"id":"part-text","type":"text"}}}`)
-		_, _ = fmt.Fprintln(w, `data: {"type":"message.part.delta","properties":{"partID":"part-text","delta":"done"}}`)
-		_, _ = fmt.Fprintln(w, `data: {"type":"message.part.updated","properties":{"part":{"id":"part-finish","type":"step-finish","reason":"stop"}}}`)
-		_, _ = fmt.Fprintln(w, `data: {"type":"message.part.delta","properties":{"partID":"part-text","delta":"duplicate"}}`)
-	})}
-	events, errs := adapter.Events(context.Background(), "session-stop")
-	var delta string
-	var idle bool
-	for event := range events {
-		if event.Type == "message.delta" {
-			delta += event.Data["text"].(string)
-		}
-		if event.Type == "session.idle" {
-			idle = true
-		}
-	}
-	if err := <-errs; err != nil {
-		t.Fatal(err)
-	}
-	if delta != "done" || !idle {
-		t.Fatalf("delta=%q idle=%v", delta, idle)
-	}
-}
-
-type handlerTransport struct{ handler http.Handler }
-
-func (t handlerTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	recorder := httptest.NewRecorder()
-	t.handler.ServeHTTP(recorder, request)
-	response := recorder.Result()
-	response.Request = request
-	return response, nil
 }

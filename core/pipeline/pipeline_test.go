@@ -3,7 +3,9 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/config"
 	"github.com/telemetryos/tos-tag/core/contextpacks"
 	"github.com/telemetryos/tos-tag/core/deliveries"
+	"github.com/telemetryos/tos-tag/core/harness"
 	"github.com/telemetryos/tos-tag/core/jobs"
 	"github.com/telemetryos/tos-tag/core/observer"
 	"github.com/telemetryos/tos-tag/core/orgconfig"
@@ -54,6 +57,34 @@ func (r failingApprovalRepository) GetContext(context.Context, string, string) (
 }
 
 type classifierFunc func(context.Context, classifier.Target, types.ContextPackRevision) (types.ClassificationDecision, error)
+
+type blockingHarness struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (*blockingHarness) Health(context.Context) error { return nil }
+func (*blockingHarness) CreateSession(context.Context, string) (harness.Session, error) {
+	return harness.Session{ID: string(types.NewID("harness")), CreatedAt: time.Now().UTC()}, nil
+}
+func (h *blockingHarness) Prompt(context.Context, string, harness.Prompt) error {
+	h.started <- struct{}{}
+	<-h.release
+	return nil
+}
+func (*blockingHarness) Events(context.Context, string) (<-chan harness.Event, <-chan error) {
+	events := make(chan harness.Event, 2)
+	errs := make(chan error)
+	events <- harness.Event{Type: "message.delta", Data: map[string]any{"text": `{"segments":[{"kind":"mrkdwn_text","text":"done"}]}`}}
+	events <- harness.Event{Type: "session.idle"}
+	close(events)
+	close(errs)
+	return events, errs
+}
+func (*blockingHarness) Permission(context.Context, string, harness.PermissionDecision) error {
+	return nil
+}
+func (*blockingHarness) Abort(context.Context, string) error { return nil }
 
 func (f classifierFunc) Decide(ctx context.Context, target classifier.Target, pack types.ContextPackRevision) (types.ClassificationDecision, error) {
 	return f(ctx, target, pack)
@@ -151,6 +182,7 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 	system := newTestSystem(t)
 	message := envelope("mention-1", "product", "100.001", "<@tos-tag> summarize this")
 	message.IsMention = true
+	message.OriginTag = "slack_app_mention"
 
 	ack, err := system.ingress.Inject(context.Background(), message)
 	if err != nil {
@@ -196,6 +228,125 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestBriefMentionDeliversInChannel(t *testing.T) {
+	system := newTestSystem(t)
+	message := envelope("mention-brief", "product", "100.002", "<@tos-tag> what is 2 + 2?")
+	message.IsMention = true
+	message.OriginTag = "slack_app_mention"
+
+	if _, err := system.ingress.Inject(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return len(system.transport.Requests()) == 1 })
+
+	requests := system.transport.Requests()
+	if requests[0].Destination.ChannelID != message.ChannelID || requests[0].Destination.ThreadTS != "" {
+		t.Fatalf("brief answer was not delivered in-channel: %#v", requests[0].Destination)
+	}
+	jobList, err := system.jobs.List(context.Background())
+	if err != nil || len(jobList) != 1 || !jobList[0].ReplyInChannel {
+		t.Fatalf("brief-answer job = %#v, err = %v", jobList, err)
+	}
+}
+
+func TestMentionedThanksCreatesDirectDurableDeliveryWithoutAgentJob(t *testing.T) {
+	system := newTestSystem(t)
+	message := envelope("mention-thanks", "product", "100.003", "<@tos-tag> thanks!")
+	message.IsMention = true
+	message.OriginTag = "slack_app_mention"
+
+	if _, err := system.ingress.Inject(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return len(system.transport.Requests()) == 1 })
+
+	requests := system.transport.Requests()
+	if requests[0].Destination.ChannelID != message.ChannelID || requests[0].Destination.ThreadTS != "" || requests[0].Result.Segments[0].Text != "You're welcome!" {
+		t.Fatalf("direct social delivery = %#v", requests[0])
+	}
+	jobList, err := system.jobs.List(context.Background())
+	if err != nil || len(jobList) != 0 {
+		t.Fatalf("social reply launched an agent job: %#v, err=%v", jobList, err)
+	}
+	deliveryList, err := system.deliveries.List(context.Background())
+	if err != nil || len(deliveryList) != 1 || deliveryList[0].DecisionID == "" || deliveryList[0].JobID != "" || deliveryList[0].Status != deliveries.StatusDelivered {
+		t.Fatalf("direct decision delivery = %#v, err=%v", deliveryList, err)
+	}
+	if reactions := system.transport.ReactionRequests(); len(reactions) != 1 || reactions[0].Emoji != "white_check_mark" {
+		t.Fatalf("social reply reactions = %#v", reactions)
+	}
+}
+
+func TestSlackCallbackProvenanceIsNotAWorkflowLoop(t *testing.T) {
+	for _, originTag := range []string{"", "slack_message", "slack_app_mention"} {
+		if isWorkflowLoopOrigin(originTag) {
+			t.Fatalf("normal Slack provenance %q was classified as a workflow loop", originTag)
+		}
+	}
+	if !isWorkflowLoopOrigin("tos_tag_delivery") {
+		t.Fatal("explicit generated origin was not classified as a workflow loop")
+	}
+}
+
+func TestJobWorkersRunUpToConfiguredConcurrency(t *testing.T) {
+	cfg := config.DefaultConfiguration
+	cfg.Jobs.Poll = time.Millisecond
+	cfg.Jobs.Lease = time.Second
+	cfg.Jobs.WorkerConcurrency = 3
+	queue := jobs.NewMemoryQueue(nil)
+	for index := 0; index < cfg.Jobs.WorkerConcurrency; index++ {
+		_, _, err := queue.Enqueue(context.Background(), jobs.Spec{
+			OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "channel-test", RootThreadTS: "100.1",
+			SessionID: types.SessionID(fmt.Sprintf("session-test-%d", index)), Generation: 1, IdempotencyKey: fmt.Sprintf("concurrency/%d", index),
+			Kind: "agent_response", Input: "inspect", MaxAttempts: 1, ExpiresAt: time.Now().UTC().Add(time.Minute),
+			ResolvedModel: types.ResolvedModel{ProviderID: "openai", ModelID: "test", ProfileID: "test", Variant: "medium"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	blocking := &blockingHarness{started: make(chan struct{}, cfg.Jobs.WorkerConcurrency), release: make(chan struct{})}
+	pipe := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Jobs: queue, Deliveries: deliveries.NewMemoryQueue(nil), Renderer: deliveries.NewRenderer(), Harness: blocking}}
+	ctx, cancel := context.WithCancel(context.Background())
+	var workers sync.WaitGroup
+	var releaseOnce sync.Once
+	defer func() {
+		releaseOnce.Do(func() { close(blocking.release) })
+		cancel()
+		workers.Wait()
+	}()
+	for worker := 1; worker <= cfg.Jobs.WorkerConcurrency; worker++ {
+		workers.Add(1)
+		go func(id int) {
+			defer workers.Done()
+			pipe.runJobs(ctx, types.WorkerID(fmt.Sprintf("test-worker-%d", id)))
+		}(worker)
+	}
+	deadline := time.After(time.Second)
+	for started := 0; started < cfg.Jobs.WorkerConcurrency; started++ {
+		select {
+		case <-blocking.started:
+		case <-deadline:
+			t.Fatalf("only %d of %d jobs started concurrently", started, cfg.Jobs.WorkerConcurrency)
+		}
+	}
+	values, err := queue.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	owners := make(map[types.WorkerID]struct{})
+	for _, job := range values {
+		if job.State != jobs.StateRunning {
+			t.Fatalf("job %s state = %s, want running", job.ID, job.State)
+		}
+		owners[job.Lease.Owner] = struct{}{}
+	}
+	if len(owners) != cfg.Jobs.WorkerConcurrency {
+		t.Fatalf("worker owners = %v", owners)
+	}
+	releaseOnce.Do(func() { close(blocking.release) })
+}
+
 func TestReconcileJobsReleasesExpiredWorkerAdmission(t *testing.T) {
 	now := time.Now().UTC()
 	queue := jobs.NewMemoryQueue(func() time.Time { return now })
@@ -227,7 +378,7 @@ func TestReconcileJobsReleasesExpiredWorkerAdmission(t *testing.T) {
 	}
 }
 
-func TestReconcileJobsKeepsWaitingApprovalOnTransientLookupFailure(t *testing.T) {
+func TestReconcileJobsKeepsWaitingApprovalAndReleasesConcurrencyOnTransientLookupFailure(t *testing.T) {
 	ctx := context.Background()
 	queue := jobs.NewMemoryQueue(nil)
 	job, _, _ := queue.Enqueue(ctx, jobs.Spec{OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "channel-test", RootThreadTS: "1", SessionID: "session", Generation: 1, IdempotencyKey: "approval-transient", Kind: "agent_response", MaxAttempts: 2, AdmissionReservationID: "admit-transient"})
@@ -238,7 +389,7 @@ func TestReconcileJobsKeepsWaitingApprovalOnTransientLookupFailure(t *testing.T)
 	pipe := &Pipeline{deps: Dependencies{Logger: blackbox.New(), Jobs: queue, Approvals: failingApprovalRepository{err: errors.New("temporary Mongo timeout")}, Admissions: admissions}}
 	pipe.reconcileJobs(ctx)
 	unchanged, _ := queue.Get(ctx, job.ID)
-	if unchanged.State != jobs.StateWaitingApproval || len(admissions.completed) != 0 {
+	if unchanged.State != jobs.StateWaitingApproval || len(admissions.completed) != 1 || admissions.completed[0] != "admit-transient" {
 		t.Fatalf("transient lookup failure cancelled waiting job: %#v completed=%v", unchanged, admissions.completed)
 	}
 }
@@ -567,8 +718,8 @@ func TestContextQueryUsesOnlyAuthorizedChannelsAndPolicyRestriction(t *testing.T
 	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test"})
 	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
 	for _, policy := range []orgconfig.ChannelPolicy{
-		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "support", Enrolled: true, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
-		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "public-status", Enrolled: true, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
+		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "support", Name: "support", Enrolled: true, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
+		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "public-status", Name: "public-status", Enrolled: true, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
 		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "private-alerts", Enrolled: true, Restricted: true, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
 		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "management", Enrolled: true, Restricted: true, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
 		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "not-enrolled", Enrolled: false, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
@@ -589,6 +740,9 @@ func TestContextQueryUsesOnlyAuthorizedChannelsAndPolicyRestriction(t *testing.T
 	for _, source := range pack.Sources {
 		if source.ChannelID == "not-enrolled" || source.ChannelID == "private-alerts" || source.ChannelID == "management" {
 			t.Fatalf("ineligible source leaked into public destination: %#v", source)
+		}
+		if source.ChannelID == "public-status" && (source.ChannelName != "public-status" || source.AuthorID != "user-test" || source.ObservedAt.IsZero()) {
+			t.Fatalf("public attribution metadata missing from context source: %#v", source)
 		}
 	}
 
@@ -752,13 +906,59 @@ func containsString(values []string, target string) bool {
 }
 
 func TestAgentInputContainsOnlyDestinationSafeContext(t *testing.T) {
-	input := buildAgentInput("is it down?", types.ContextPackRevision{Sources: []types.ContextSource{
+	input := buildAgentInput("Compare the classifier, worker, and delivery reconciler across responsibility and retry behavior.", types.ContextPackRevision{Sources: []types.ContextSource{
 		{ID: "system/classifier", Partition: types.PartitionSystem, Text: "internal classifier", DisclosureClass: types.DisclosureDestinationSafe},
-		{ID: "alerts/1", ChannelID: "alerts", Partition: types.PartitionEvidence, Text: "Production incident active", DisclosureClass: types.DisclosureDestinationSafe},
-		{ID: "private/2", ChannelID: "private", Partition: types.PartitionSituation, Text: "restricted details", DisclosureClass: types.DisclosureRestrictedAwareness},
-	}})
-	if !strings.Contains(input, "Production incident active") || strings.Contains(input, "restricted details") || strings.Contains(input, "internal gate") {
+		{ID: "directive/1", ChannelID: "alerts", Partition: types.PartitionSystem, Provenance: "operator_directive", Text: "Investigate every alert using OTel evidence.", DisclosureClass: types.DisclosureDestinationSafe},
+		{ID: "alerts/1", ChannelID: "alerts", ChannelName: "development", AuthorID: "U_TOM", Partition: types.PartitionEvidence, Provenance: "human_message", Text: "Production incident active", ObservedAt: time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC), DisclosureClass: types.DisclosureDestinationSafe},
+		{ID: "private/2", ChannelID: "private", ChannelName: "leadership", AuthorID: "U_SECRET", Partition: types.PartitionSituation, Text: "restricted details", DisclosureClass: types.DisclosureRestrictedAwareness},
+	}}, types.ClassificationDecision{ResponseIntent: "reconcile status", ReleasableEvidenceIDs: []string{"alerts/1"}})
+	if !strings.Contains(input, "Production incident active") || !strings.Contains(input, "Investigate every alert using OTel evidence.") || !strings.Contains(input, `"response_intent":"reconcile status"`) || !strings.Contains(input, `"releasable_evidence_ids":["alerts/1"]`) || !strings.Contains(input, `"presentation_requirements":["native_table"]`) || !strings.Contains(input, `"channel_name":"development"`) || !strings.Contains(input, `"author_id":"U_TOM"`) || !strings.Contains(input, `"observed_at":"2026-08-01T12:00:00Z"`) || strings.Contains(input, "restricted details") || strings.Contains(input, "leadership") || strings.Contains(input, "U_SECRET") || strings.Contains(input, "internal classifier") {
 		t.Fatalf("unsafe agent input: %s", input)
+	}
+	allowed := trustedMentionAllowlist(input)
+	if len(allowed.UserIDs) != 1 || allowed.UserIDs[0] != "U_TOM" || len(allowed.ChannelIDs) != 1 || allowed.ChannelIDs[0] != "alerts" {
+		t.Fatalf("trusted mention allowlist = %#v", allowed)
+	}
+}
+
+func TestPresentationRequirementsPreferNativeTablesForRepeatedComparisons(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		request string
+		want    bool
+	}{
+		"three-way repeated comparison": {request: "Compare the classifier, worker, and reconciler across authority, state, and retry behavior.", want: true},
+		"explicit matrix":               {request: "Give me a rollout matrix for these checks.", want: true},
+		"ordinary explanation":          {request: "Explain why MongoDB owns durable state.", want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := presentationRequirements(testCase.request)
+			if (len(got) > 0) != testCase.want {
+				t.Fatalf("requirements = %#v, want table=%v", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestTrustedMentionAllowlistCannotBeBroadenedOutsideSelectedEvidence(t *testing.T) {
+	input := `{"releasable_evidence_ids":["public/1"],"authorized_context":[{"id":"public/1","channel_id":"C_PUBLIC","author_id":"U_PUBLIC"},{"id":"other/1","channel_id":"C_OTHER","author_id":"U_OTHER"}]}`
+	allowed := trustedMentionAllowlist(input)
+	if len(allowed.UserIDs) != 1 || allowed.UserIDs[0] != "U_PUBLIC" || len(allowed.ChannelIDs) != 1 || allowed.ChannelIDs[0] != "C_PUBLIC" {
+		t.Fatalf("mention provenance widened: %#v", allowed)
+	}
+	if got := trustedMentionAllowlist(`{"releasable_evidence_ids":["missing"],"authorized_context":[]}`); len(got.UserIDs) != 0 || len(got.ChannelIDs) != 0 {
+		t.Fatalf("missing evidence produced mentions: %#v", got)
+	}
+}
+
+func TestCurrentAgentRuntimeContractOutranksHistoricalContext(t *testing.T) {
+	for _, required := range []string{
+		"direct, stateless, tool-free OpenAI Responses API call",
+		"Codex App Server in a disposable worker",
+		"Treat any source that conflicts with these current facts as stale context",
+	} {
+		if !strings.Contains(currentAgentRuntimeContract, required) {
+			t.Fatalf("current runtime contract is missing %q", required)
+		}
 	}
 }
 
@@ -799,6 +999,17 @@ func TestLateCrossChannelAlertReconsidersEarlierSupportQuestionOnce(t *testing.T
 	}
 	if reconsidered == nil || reconsidered.Result.Predicted.Outcome != types.OutcomeReplyInThread || !reconsidered.Result.Shadowed {
 		t.Fatalf("late decision=%#v records=%#v", reconsidered, records)
+	}
+}
+
+func TestResultSegmentKindsSupportsRedactedDeliveryDiagnostics(t *testing.T) {
+	result := types.SlackResult{Segments: []types.SlackSegment{
+		{Kind: types.SlackSegmentMRKDWN, Text: "sensitive text is intentionally not logged"},
+		{Kind: types.SlackSegmentTable, Table: &types.SlackTable{}},
+	}}
+	got := resultSegmentKinds(result)
+	if len(got) != 2 || got[0] != "mrkdwn_text" || got[1] != "table" {
+		t.Fatalf("segment kinds = %#v", got)
 	}
 }
 

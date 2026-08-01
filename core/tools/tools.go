@@ -36,6 +36,27 @@ type Operation struct {
 	TimeoutSeconds int      `json:"timeout_seconds"`
 	MaxOutputBytes int      `json:"max_output_bytes"`
 	Risk           string   `json:"risk"`
+	Approval       string   `json:"approval,omitempty"`
+}
+
+const (
+	ApprovalRiskBased = ""
+	ApprovalAlways    = "always"
+	ApprovalNever     = "never"
+)
+
+// RequiresApproval keeps the legacy fail-closed behavior unless a reviewed
+// operation manifest explicitly opts into a different policy. The model
+// cannot select or override this value at execution time.
+func (o Operation) RequiresApproval() bool {
+	switch o.Approval {
+	case ApprovalAlways:
+		return true
+	case ApprovalNever:
+		return false
+	default:
+		return o.Risk != "read"
+	}
 }
 
 type Bundle struct {
@@ -72,6 +93,7 @@ type Result struct {
 type Executor struct {
 	Enabled bool
 	Usage   usage.Recorder
+	Path    string
 }
 
 func LoadBundle(root, manifestPath string) (Bundle, error) {
@@ -105,12 +127,12 @@ func LoadBundle(root, manifestPath string) (Bundle, error) {
 	}
 	seen := make(map[string]bool)
 	for _, operation := range manifest.Operations {
-		if operation.ID == "" || seen[operation.ID] || !validRisk(operation.Risk) || operation.TimeoutSeconds <= 0 || operation.TimeoutSeconds > 300 || operation.MaxOutputBytes <= 0 || operation.MaxOutputBytes > 8<<20 {
+		if operation.ID == "" || seen[operation.ID] || !validRisk(operation.Risk) || !validApprovalPolicy(operation.Approval) || operation.TimeoutSeconds <= 0 || operation.TimeoutSeconds > 300 || operation.MaxOutputBytes <= 0 || operation.MaxOutputBytes > 8<<20 {
 			return Bundle{}, errors.New("invalid tool operation")
 		}
 		seen[operation.ID] = true
 		for _, name := range operation.Env {
-			if !envName.MatchString(name) {
+			if !envName.MatchString(name) || strings.HasPrefix(name, "TOS_TAG_") {
 				return Bundle{}, fmt.Errorf("invalid environment name %q", name)
 			}
 		}
@@ -122,6 +144,10 @@ func LoadBundle(root, manifestPath string) (Bundle, error) {
 	return Bundle{Root: absolute, Manifest: manifest, ContentHash: contentHash(data, scriptBytes), ScriptHash: digest(scriptBytes)}, nil
 }
 
+func validApprovalPolicy(value string) bool {
+	return value == ApprovalRiskBased || value == ApprovalAlways || value == ApprovalNever
+}
+
 func (e Executor) Execute(parent context.Context, bundle Bundle, request Request) (Result, error) {
 	if !e.Enabled {
 		return Result{}, errors.New("real tool execution is disabled")
@@ -129,6 +155,9 @@ func (e Executor) Execute(parent context.Context, bundle Bundle, request Request
 	operation, ok := findOperation(bundle.Manifest, request.OperationID)
 	if !ok {
 		return Result{}, errors.New("operation is not declared")
+	}
+	if operation.Risk == "admin" {
+		return Result{}, errors.New("admin tool operations are disabled")
 	}
 	capability := request.Capability
 	if capability.ToolID != bundle.Manifest.ID || capability.ToolVersion != bundle.Manifest.Version || capability.OperationID != operation.ID || capability.AttemptToken == "" || capability.SteeringEpoch <= 0 || !capability.ExpiresAt.After(time.Now().UTC()) {
@@ -145,7 +174,16 @@ func (e Executor) Execute(parent context.Context, bundle Bundle, request Request
 		return Result{}, errors.New("reviewed tool script hash changed")
 	}
 	allowed := make(map[string]bool, len(operation.Env))
-	environment := []string{"PATH=/usr/bin:/bin", "LANG=C.UTF-8"}
+	toolPath := strings.TrimSpace(e.Path)
+	if toolPath == "" {
+		toolPath = "/usr/bin:/bin"
+	}
+	privateHome, err := os.MkdirTemp("", "tos-tag-tool-")
+	if err != nil {
+		return Result{}, fmt.Errorf("create private tool home: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(privateHome) }()
+	environment := []string{"PATH=" + toolPath, "LANG=C.UTF-8", "HOME=" + privateHome, "TMPDIR=" + privateHome, "TOS_TAG_OPERATION_ID=" + operation.ID}
 	for _, name := range operation.Env {
 		allowed[name] = true
 		value, exists := request.SecretValues[name]
@@ -168,7 +206,10 @@ func (e Executor) Execute(parent context.Context, bundle Bundle, request Request
 	}
 	ctx, cancel := context.WithTimeout(parent, time.Duration(operation.TimeoutSeconds)*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, "/bin/sh", "-s", "--")
+	// Reviewed helpers may use Bash deliberately (the Agent Wiki and Linear
+	// clients do). The script still arrives on stdin and typed arguments are
+	// appended separately, so no model-provided command string is evaluated.
+	command := exec.CommandContext(ctx, "/bin/bash", "-s", "--")
 	// Append already-typed arguments to Cmd.Args; they are never parsed as a
 	// command string and remain positional parameters to the reviewed script.
 	command.Args = append(command.Args, request.Args...)
@@ -200,7 +241,7 @@ func (e Executor) Execute(parent context.Context, bundle Bundle, request Request
 
 func validRisk(value string) bool {
 	switch value {
-	case "read", "write", "destructive", "admin":
+	case "read", "write", "destructive":
 		return true
 	default:
 		return false

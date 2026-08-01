@@ -86,3 +86,27 @@ func TestBuilderExcludesExpiredAndOtherTenantSources(t *testing.T) {
 		t.Fatalf("unauthorized/expired sources leaked: %#v", pack.Sources)
 	}
 }
+
+func TestBuilderPreservesTrustedAttributionMetadata(t *testing.T) {
+	builder, _ := New(tinyBudget(), WordTokenizer{})
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	item := candidate("development/1", "C_DEV", types.PartitionRecentOrg, "server down", now)
+	item.ChannelName = "development"
+	item.AuthorID = "U_TOM"
+	pack, err := builder.Build(Request{OrganizationID: "org-1", TargetObservationID: "obs-1", CreatedAt: now, Candidates: []types.ContextCandidate{item}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pack.Sources) != 1 || pack.Sources[0].ChannelName != "development" || pack.Sources[0].AuthorID != "U_TOM" || !pack.Sources[0].ObservedAt.Equal(now) {
+		t.Fatalf("attribution metadata was not preserved: %#v", pack.Sources)
+	}
+	changed := item
+	changed.AuthorID = "U_OTHER"
+	other, err := builder.Build(Request{OrganizationID: "org-1", TargetObservationID: "obs-1", CreatedAt: now, Candidates: []types.ContextCandidate{changed}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pack.ContentHash == other.ContentHash {
+		t.Fatal("attribution change did not alter immutable context hash")
+	}
+}

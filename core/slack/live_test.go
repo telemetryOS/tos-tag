@@ -49,6 +49,24 @@ func TestNormalizeSlackMessageEditDeleteAndMention(t *testing.T) {
 	}
 }
 
+func TestApprovalInteractionDiagnosticCodeIsSafeAndActionable(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{nil, "none"},
+		{errors.New("independent approver required"), "independent_approver_required"},
+		{errors.New("Slack approver is not authorized: denied"), "approver_not_authorized"},
+		{errors.New("resume approved job: lease conflict"), "job_resume_failed"},
+		{errors.New("database unavailable at secret host"), "persistence_failed"},
+	}
+	for _, test := range tests {
+		if got := approvalInteractionDiagnosticCode(test.err); got != test.want {
+			t.Fatalf("approvalInteractionDiagnosticCode(%v) = %q, want %q", test.err, got, test.want)
+		}
+	}
+}
+
 func TestNormalizeSlackParserCallbackPointer(t *testing.T) {
 	raw := json.RawMessage(`{"team_id":"team","api_app_id":"app","type":"event_callback","event_id":"event-real","event_time":100,"event":{"type":"message","channel":"channel","user":"user","text":"from Slack","ts":"100.1","event_ts":"100.1"}}`)
 	event, err := slackevents.ParseEvent(raw, slackevents.OptionNoVerifyToken())
@@ -397,5 +415,31 @@ func TestNormalizeApprovalInteractionBindsAppWorkspaceChannelAndAction(t *testin
 	callback.Team.ID = "T999"
 	if _, _, err := NormalizeApprovalInteraction(LiveOptions{OrganizationID: "org", AppID: "A123", TeamID: "T123"}, callback); err == nil {
 		t.Fatal("mismatched workspace was accepted")
+	}
+}
+
+func TestDirectiveCommandAndModalSubmissionRemainChannelBound(t *testing.T) {
+	options := LiveOptions{OrganizationID: "org", AppID: "A123", TeamID: "T123"}
+	command, eligible, err := NormalizeDirectiveCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: directiveSlashCommand, TriggerID: "trigger-1"})
+	if err != nil || !eligible || command.Request.ChannelID != "C_ALERTS" || command.Request.UserID != "U_ADMIN" {
+		t.Fatalf("command=%#v eligible=%v err=%v", command, eligible, err)
+	}
+	modal := directiveModal(command.Request, DirectiveConfiguration{Prompt: "Investigate each alert.", Revision: 2})
+	if modal.CallbackID != directiveCallbackID || modal.PrivateMetadata == "" || len(modal.Blocks.BlockSet) != 2 {
+		t.Fatalf("modal=%#v", modal)
+	}
+	callback := slackapi.InteractionCallback{
+		Type: slackapi.InteractionTypeViewSubmission, APIAppID: "A123", Team: slackapi.Team{ID: "T123"}, User: slackapi.User{ID: "U_ADMIN"},
+		View: slackapi.View{ID: "V123", CallbackID: directiveCallbackID, PrivateMetadata: modal.PrivateMetadata, State: &slackapi.ViewState{Values: map[string]map[string]slackapi.BlockAction{
+			directivePromptBlockID: {directivePromptActionID: {Value: "Investigate each alert and determine root cause from OTel."}},
+		}}},
+	}
+	request, eligible, err := NormalizeDirectiveSubmission(options, callback)
+	if err != nil || !eligible || request.ChannelID != "C_ALERTS" || request.InteractionID != "V123" || !strings.Contains(request.Prompt, "OTel") {
+		t.Fatalf("request=%#v eligible=%v err=%v", request, eligible, err)
+	}
+	callback.Team.ID = "T999"
+	if _, _, err := NormalizeDirectiveSubmission(options, callback); err == nil {
+		t.Fatal("cross-workspace directive submission was accepted")
 	}
 }

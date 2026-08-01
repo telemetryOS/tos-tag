@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/RobertWHurst/blackbox"
@@ -53,6 +54,7 @@ type Core struct {
 	retention   *retention.Janitor
 	router      *modelrouter.Registry
 	toolBridge  *tools.Bridge
+	toolIDs     []string
 	routines    *routines.Service
 	triggers    *triggers.Service
 	contextSync *slack.ContextSyncer
@@ -119,6 +121,10 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	if err != nil {
 		return nil, fmt.Errorf("construct audit chain: %w", err)
 	}
+	directiveEditor, err := channelconfig.NewEditor(channelConfiguration, organizationStore, auditChain)
+	if err != nil {
+		return nil, fmt.Errorf("construct channel directive editor: %w", err)
+	}
 	var secretStore keystore.Repository
 	if cfg.Keystore.Enabled {
 		masterKey, keyErr := cfg.KeystoreKey()
@@ -171,35 +177,23 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	if err != nil {
 		return nil, fmt.Errorf("construct approval coordinator: %w", err)
 	}
-	toolBridge, err := tools.NewBridge(tools.Gateway{Registry: toolMarketplaceRegistry, Secrets: secretStore, Executor: tools.Executor{Enabled: cfg.Marketplaces.ToolsEnabled, Usage: usageRecorder}}, jobQueue, approvalStore, auditChain, approvalCoordinator)
+	toolBridge, err := tools.NewBridge(tools.Gateway{Registry: toolMarketplaceRegistry, Secrets: secretStore, Executor: tools.Executor{Enabled: cfg.Marketplaces.ToolsEnabled, Usage: usageRecorder, Path: cfg.Marketplaces.ToolPath}}, jobQueue, approvalStore, auditChain, approvalCoordinator)
 	if err != nil {
 		return nil, fmt.Errorf("construct tool bridge: %w", err)
 	}
 	toolBridge.SetTriggerRepository(triggerStore)
 	var responseHarness harness.Harness = harness.NewFake()
-	if cfg.OpenCode.Enabled {
-		switch cfg.OpenCode.Mode {
-		case "local_worker":
-			workerManager, workerErr := workers.NewLocalWithDependencies(cfg.OpenCode.WorkerRoot, "", toolBridge, usageRecorder)
-			if workerErr != nil {
-				return nil, fmt.Errorf("construct OpenCode worker manager: %w", workerErr)
-			}
-			var providerGateway *harness.ProviderGateway
-			if cfg.Models.DefaultProvider != "opencode" {
-				providerGateway, err = harness.NewProviderGateway(harness.ProviderGatewayOptions{ProviderID: cfg.Models.DefaultProvider, BaseURL: cfg.Classifier.BaseURL, APIKey: cfg.Classifier.OpenAIAPIKey, Timeout: cfg.OpenCode.Timeout, Jobs: jobQueue})
-				if err != nil {
-					return nil, fmt.Errorf("construct local model gateway: %w", err)
-				}
-			}
-			responseHarness, err = harness.NewWorkerOpenCode(harness.WorkerOpenCodeOptions{Manager: workerManager, Command: cfg.OpenCode.Command, Skills: injectedSkillSnapshots, Timeout: cfg.OpenCode.Timeout, ToolBridge: toolBridge, ToolIDs: allowedToolIDs, Provider: providerGateway})
-		case "external":
-			responseHarness, err = harness.NewOpenCode(harness.OpenCodeOptions{Enabled: true, BaseURL: cfg.OpenCode.BaseURL, Username: cfg.OpenCode.Username, Password: cfg.OpenCode.Password, Timeout: cfg.OpenCode.Timeout})
+	if cfg.Codex.Enabled {
+		workerManager, workerErr := workers.NewLocalWithDependencies(cfg.Codex.WorkerRoot, "", toolBridge, usageRecorder)
+		if workerErr != nil {
+			return nil, fmt.Errorf("construct Codex worker manager: %w", workerErr)
 		}
+		responseHarness, err = harness.NewWorkerCodex(harness.WorkerCodexOptions{Manager: workerManager, Command: cfg.Codex.Command, CodexHome: cfg.Codex.Home, Skills: injectedSkillSnapshots, Timeout: cfg.Codex.Timeout, ToolBridge: toolBridge, ToolIDs: allowedToolIDs})
 		if err != nil {
 			return nil, err
 		}
 	}
-	responseRouter, err := modelrouter.NewRegistry([]types.ModelProfile{{ID: cfg.Models.DefaultProfile, ProviderID: cfg.Models.DefaultProvider, ModelID: cfg.Models.DefaultModel, Variant: cfg.Models.DefaultVariant, ProviderOptions: map[string]any{"strength": "strong"}, RequiredCapabilities: []string{"structured"}, AllowedDataClasses: []string{"internal"}, MaxInputTokens: 200000, MaxOutputTokens: 16000, Enabled: true}}, nil, nil, cfg.Models.DefaultProfile, "routing/v1")
+	responseRouter, err := modelrouter.NewRegistry(defaultResponseProfiles(cfg.Models), nil, nil, cfg.Models.DefaultProfile, "routing/v1")
 	if err != nil {
 		return nil, err
 	}
@@ -267,6 +261,16 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 		liveIngress.SetApprovalInteractionHandler(func(ctx context.Context, interaction slack.ApprovalInteraction) error {
 			return approvalCoordinator.HandleSlackDecision(ctx, approvals.SlackDecision{OrganizationID: interaction.OrganizationID, WorkspaceID: interaction.WorkspaceID, ChannelID: interaction.ChannelID, UserID: interaction.UserID, ApprovalID: interaction.ApprovalID, MessageTS: interaction.MessageTS, Approve: interaction.Approve})
 		})
+		liveIngress.SetDirectiveConfigurationHandlers(
+			func(ctx context.Context, request slack.DirectiveConfigurationRequest) (slack.DirectiveConfiguration, error) {
+				result, loadErr := directiveEditor.Load(ctx, channelconfig.EditRequest{OrganizationID: request.OrganizationID, WorkspaceID: request.WorkspaceID, ChannelID: request.ChannelID, ActorID: request.UserID})
+				return slack.DirectiveConfiguration{Prompt: result.Prompt, Revision: result.Revision}, loadErr
+			},
+			func(ctx context.Context, request slack.DirectiveConfigurationRequest) (slack.DirectiveConfiguration, error) {
+				result, saveErr := directiveEditor.Save(ctx, channelconfig.EditRequest{OrganizationID: request.OrganizationID, WorkspaceID: request.WorkspaceID, ChannelID: request.ChannelID, ActorID: request.UserID, Prompt: request.Prompt, SourceID: request.InteractionID})
+				return slack.DirectiveConfiguration{Prompt: result.Prompt, Revision: result.Revision}, saveErr
+			},
+		)
 	}
 	pipe, err := pipeline.New(pipeline.Dependencies{
 		Config: cfg, Logger: logger, Ingress: ingress, Transport: transport,
@@ -304,7 +308,41 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Core{Config: cfg, Logger: logger, database: db, pipeline: pipe, server: srv, retention: retentionJanitor, router: responseRouter, toolBridge: toolBridge, routines: routineService, triggers: triggerService, contextSync: slackContextSync}, nil
+	return &Core{Config: cfg, Logger: logger, database: db, pipeline: pipe, server: srv, retention: retentionJanitor, router: responseRouter, toolBridge: toolBridge, toolIDs: allowedToolIDs, routines: routineService, triggers: triggerService, contextSync: slackContextSync}, nil
+}
+
+func defaultResponseProfiles(cfg config.ModelConfig) []types.ModelProfile {
+	baseID := strings.TrimSuffix(cfg.DefaultProfile, "-"+cfg.DefaultVariant)
+	if baseID == "" || baseID == cfg.DefaultProfile {
+		baseID = cfg.DefaultProfile
+	}
+	profiles := make([]types.ModelProfile, 0, 3)
+	for _, candidate := range []struct {
+		variant  string
+		strength string
+	}{
+		{variant: "low", strength: "light"},
+		{variant: "medium", strength: "standard"},
+		{variant: "max", strength: "strong"},
+	} {
+		id := baseID + "-" + candidate.variant
+		if candidate.variant == cfg.DefaultVariant {
+			id = cfg.DefaultProfile
+		}
+		profiles = append(profiles, types.ModelProfile{
+			ID:                   id,
+			ProviderID:           cfg.DefaultProvider,
+			ModelID:              cfg.DefaultModel,
+			Variant:              candidate.variant,
+			ProviderOptions:      map[string]any{"strength": candidate.strength},
+			RequiredCapabilities: []string{"structured"},
+			AllowedDataClasses:   []string{"internal"},
+			MaxInputTokens:       200000,
+			MaxOutputTokens:      16000,
+			Enabled:              true,
+		})
+	}
+	return profiles
 }
 
 func slackOutputChannelAllowedConfig(cfg *config.Config, channelID string) bool {
@@ -458,6 +496,12 @@ func selectSkillSnapshots(available []marketplace.SkillSnapshot, allowlist []str
 func (c *Core) Start(ctx context.Context) error {
 	if err := c.database.Connect(ctx); err != nil {
 		return fmt.Errorf("connect MongoDB: %w", err)
+	}
+	if c.Config.Marketplaces.ToolsEnabled {
+		if err := c.toolBridge.ImportEnvironmentBindings(ctx, c.Config.Slack.OrganizationID, c.toolIDs); err != nil {
+			_ = c.database.Disconnect(context.Background())
+			return fmt.Errorf("import reviewed tool environment: %w", err)
+		}
 	}
 	if err := c.router.Load(ctx); err != nil {
 		_ = c.database.Disconnect(context.Background())

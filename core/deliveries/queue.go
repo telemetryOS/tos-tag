@@ -36,6 +36,7 @@ type Record struct {
 	ID             types.DeliveryID       `json:"id"`
 	OrganizationID string                 `json:"organization_id"`
 	JobID          types.JobID            `json:"job_id"`
+	DecisionID     string                 `json:"decision_id,omitempty"`
 	IdempotencyKey string                 `json:"idempotency_key"`
 	Destination    types.SlackDestination `json:"destination"`
 	Result         types.SlackResult      `json:"result"`
@@ -55,6 +56,7 @@ type Record struct {
 type Spec struct {
 	OrganizationID string
 	JobID          types.JobID
+	DecisionID     string
 	IdempotencyKey string
 	Destination    types.SlackDestination
 	Result         types.SlackResult
@@ -88,7 +90,7 @@ func NewMemoryQueue(now func() time.Time) *MemoryQueue {
 }
 
 func (q *MemoryQueue) Enqueue(_ context.Context, spec Spec) (Record, bool, error) {
-	if spec.OrganizationID == "" || spec.JobID == "" || spec.IdempotencyKey == "" || spec.Destination.TeamID == "" || spec.Destination.ChannelID == "" || spec.MaxAttempts <= 0 {
+	if spec.OrganizationID == "" || (spec.JobID == "") == (spec.DecisionID == "") || spec.IdempotencyKey == "" || spec.Destination.TeamID == "" || spec.Destination.ChannelID == "" || spec.MaxAttempts <= 0 {
 		return Record{}, false, errors.New("invalid delivery specification")
 	}
 	q.mu.Lock()
@@ -102,7 +104,7 @@ func (q *MemoryQueue) Enqueue(_ context.Context, spec Spec) (Record, bool, error
 	if expiresAt.IsZero() {
 		expiresAt = now.Add(24 * time.Hour)
 	}
-	record := Record{ID: types.DeliveryID(types.NewID("dlv")), OrganizationID: spec.OrganizationID, JobID: spec.JobID, IdempotencyKey: spec.IdempotencyKey, Destination: spec.Destination, Result: spec.Result, Status: StatusPending, MaxAttempts: spec.MaxAttempts, RetryAt: now, CreatedAt: now, UpdatedAt: now, ExpiresAt: expiresAt, Version: 1}
+	record := Record{ID: types.DeliveryID(types.NewID("dlv")), OrganizationID: spec.OrganizationID, JobID: spec.JobID, DecisionID: spec.DecisionID, IdempotencyKey: spec.IdempotencyKey, Destination: spec.Destination, Result: spec.Result, Status: StatusPending, MaxAttempts: spec.MaxAttempts, RetryAt: now, CreatedAt: now, UpdatedAt: now, ExpiresAt: expiresAt, Version: 1}
 	q.records[record.ID], q.byKey[key] = record, record.ID
 	return record, true, nil
 }

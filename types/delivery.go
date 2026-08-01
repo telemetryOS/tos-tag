@@ -5,24 +5,43 @@ import "time"
 type SlackSegmentKind string
 
 const (
+	SlackSegmentHeader   SlackSegmentKind = "header"
 	SlackSegmentMRKDWN   SlackSegmentKind = "mrkdwn_text"
+	SlackSegmentContext  SlackSegmentKind = "context"
+	SlackSegmentDivider  SlackSegmentKind = "divider"
 	SlackSegmentTable    SlackSegmentKind = "table"
+	SlackSegmentImage    SlackSegmentKind = "image"
 	SlackSegmentArtifact SlackSegmentKind = "artifact"
 	SlackSegmentApproval SlackSegmentKind = "approval"
 	SlackSegmentNotice   SlackSegmentKind = "notice"
 )
 
 type SlackResult struct {
-	Segments []SlackSegment `json:"segments"`
+	Segments        []SlackSegment        `json:"segments" bson:"segments"`
+	AllowedMentions SlackMentionAllowlist `json:"-" bson:"allowed_mentions,omitempty"`
+}
+
+// SlackMentionAllowlist is control-plane-owned provenance attached after model
+// output parsing. JSON model output cannot set or broaden it.
+type SlackMentionAllowlist struct {
+	UserIDs    []string `json:"-" bson:"user_ids,omitempty"`
+	ChannelIDs []string `json:"-" bson:"channel_ids,omitempty"`
 }
 
 type SlackSegment struct {
 	Kind     SlackSegmentKind `json:"kind"`
 	Text     string           `json:"text,omitempty"`
 	Table    *SlackTable      `json:"table,omitempty"`
+	Image    *SlackImage      `json:"image,omitempty"`
 	Artifact *SlackArtifact   `json:"artifact,omitempty"`
 	Approval *SlackApproval   `json:"approval,omitempty"`
 	Notice   *SlackNotice     `json:"notice,omitempty"`
+}
+
+type SlackImage struct {
+	URL     string `json:"url"`
+	AltText string `json:"alt_text"`
+	Title   string `json:"title,omitempty"`
 }
 
 type SlackApproval struct {

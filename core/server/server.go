@@ -239,7 +239,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"service": "tos-tag", "version": s.deps.Version, "configuration": s.deps.Config.RedactedStatus(),
 		"counts":             map[string]int{"jobs": len(jobList), "deliveries": len(deliveryList), "decisions": len(decisionList), "acks": acks, "stub_sends": sends},
-		"live_slack_enabled": s.deps.Config.Slack.LiveEnabled, "model_provider_enabled": s.deps.Config.OpenCode.Enabled,
+		"live_slack_enabled": s.deps.Config.Slack.LiveEnabled, "model_provider_enabled": s.deps.Config.Codex.Enabled,
 	})
 }
 
