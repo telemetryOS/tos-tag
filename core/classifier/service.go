@@ -81,6 +81,9 @@ func (s *Service) Decide(ctx context.Context, target Target, pack types.ContextP
 }
 
 func (s *Service) predict(ctx context.Context, target Target, pack types.ContextPackRevision) types.ClassificationDecision {
+	if target.ActiveThread && !target.Envelope.IsMention && isSocialAcknowledgement(target.Envelope.Text) {
+		return silent("thread.social_acknowledgement")
+	}
 	if target.Envelope.IsMention || target.ActiveThread {
 		reason := "hard.direct_mention"
 		if target.ActiveThread && !target.Envelope.IsMention {
@@ -119,6 +122,19 @@ func (s *Service) predict(ctx context.Context, target Target, pack types.Context
 		predicted = silent("admission.destination_disclosure_denied")
 	}
 	return predicted
+}
+
+func isSocialAcknowledgement(text string) bool {
+	normalized := strings.Trim(strings.ToLower(text), " \t\r\n.!?,;:")
+	switch normalized {
+	case "thanks", "thanks again", "thank you", "thank you!", "thx", "ty",
+		"perfect", "great", "awesome", "cool", "nice", "cheers",
+		"appreciate it", "much appreciated", "sounds good", "makes sense",
+		"got it", "all good", ":thumbsup:", ":+1:", "👍", "🙏":
+		return true
+	default:
+		return false
+	}
 }
 
 func hardSuppression(target Target) string {

@@ -27,6 +27,11 @@ segment with columns and typed rows. Do not hide the table in prose. The Slack
 renderer will create a native Block Kit table. Use a fenced aligned table only
 when terminal-style literal formatting is itself meaningful.
 
+Use this exact structure for a table segment:
+{"kind":"table","table":{"columns":[{"header":"Check"},{"header":"Result"}],"rows":[[{"type":"raw_text","text":"Build"},{"type":"raw_text","text":"Passed"}]]}}
+Valid cell types are raw_text, raw_number, and rich_text. A table segment must
+not include a text or artifact field.
+
 Do not choose or alter the Slack channel, thread, recipients, or mentions.`
 
 func WithSlackOutputContract(systemInstructions string) string {

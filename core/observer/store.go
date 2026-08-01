@@ -17,6 +17,7 @@ type Acceptance struct {
 
 type Store interface {
 	Accept(context.Context, types.SlackEnvelope) (Acceptance, error)
+	Import(context.Context, types.SlackEnvelope) (Acceptance, error)
 	ClaimPending(context.Context, string, time.Duration) (models.Observation, error)
 	CompleteDecision(context.Context, string, string, string, string) error
 	SetRestricted(context.Context, string, bool) error

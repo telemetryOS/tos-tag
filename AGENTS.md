@@ -45,7 +45,8 @@ behavioral plugins into every response worker:
 
 1. `telemetryos-automation` from `../telemetryos-agent-skills` (the headless
    TelemetryOS workflow plugin); and
-2. `base` from `../tag-agent-skills` (tos-tag-owned skills, initially empty).
+2. `base` from `../tag-agent-skills` (tos-tag-owned skills, currently including
+   the job-scoped `tag-triggers` heartbeat-subscription workflow).
 
 Configure each source with its root, `.claude-plugin/marketplace.json`, and
 exact plugin name. Missing roots, manifests, or selected plugins fail startup.

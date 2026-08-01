@@ -155,7 +155,7 @@ Illustrative configuration:
 | Context | Profile | Intended behavior |
 | --- | --- | --- |
 | Deployment default | `chatgpt-luna-max` | OpenAI `gpt-5.6-luna` with `max` reasoning effort |
-| Ambient classifier | direct OpenAI | Configurable `gpt-5.6-luna` with `max` effort; no OpenCode session or tools |
+| Ambient classifier | direct OpenAI | Configurable `gpt-5.6-luna` with `none` effort for bounded latency; no OpenCode session or tools |
 | `#alerts` | `alerts-fast` | Low-latency incident triage with moderate compute |
 | `#product` | `product-deep` | Higher-cost, deep product reasoning |
 | Security review skill | `security-deep` | Bounded high-reasoning override for one step |
@@ -206,7 +206,7 @@ The Go service owns:
 - model catalog, routing, fallbacks, and budgets;
 - behavioral-skill and executable-tool marketplaces with immutable snapshots;
 - authorized conversational search, channel notes, channel directives, memory,
-  routines, and approvals;
+  routines, classifier-gated trigger subscriptions, and approvals;
 - worker provisioning and teardown;
 - the tool credential gateway and the configured OpenCode provider boundary;
 - receipts, audit, usage, and retention; and
@@ -245,6 +245,12 @@ The worker cannot assert its own principal, requester, policy, destination,
 credential, or tool version. Gateways derive those from a short-lived capability
 and verify the live lease and steering epoch on every call. Tool processes have
 no direct internet route and must use a manifest-enforcing egress proxy.
+
+The automatically injected `tag-triggers` skill uses the separate
+`tos_tag_trigger` job-scoped capability to list and inspect current-channel
+subscriptions. Create, update, pause, and resume calls suspend the worker and
+render Slack-native Approve/Deny controls. Approval releases the old lease and
+queues a fresh worker with only the exact, single-use approved action.
 
 Ambient observation never implicitly authorizes an external write.
 
@@ -368,6 +374,9 @@ The implemented package layout and intended hardened deployment shape are define
 
 - Expand selected read-only connectors, source-linked memory and notes, and
   durable schedules/watches.
+- Add durable heartbeat subscriptions whose due runs reauthorize scope, rebuild
+  the full destination-filtered context pack, and pass a tool-free classifier
+  gate before an idempotent OpenCode job can be created.
 
 ### Phase 3: access bundles and write approvals (implemented)
 
@@ -406,6 +415,11 @@ The development image pins the toolchain used to reproduce this environment:
 | Node.js | `24.7.0` | OpenCode and Node-based repository tooling |
 | pnpm | `11.18.0` | Aion-managed frontend dependency installation |
 | Git, Bash, Make, `rg`, `jq` | image package versions | Repository and agent support tooling |
+
+The optional host-side Slack lifecycle uses Slack CLI `4.6.0`. Its checked-in
+manifest hook uses Ruby's standard `json` and `yaml` libraries; this is present
+on the tested macOS host and is not required by the running Go service or
+container stack.
 
 Dependency sources of truth are intentionally checked in: application modules
 in `go.mod`/`go.sum`, container tools and base-image digests in
@@ -553,8 +567,8 @@ and explicitly enrolled test channels. Create the app from
 
 - Slack's *App-Level Token* (`xapp-...`) with `connections:write`;
 - Slack's *Bot User OAuth Token* (`xoxb-...`);
-- optionally, Slack's *User OAuth Token* (`xoxp-...`) for future explicitly
-  enabled user-authorized features (the current runtime does not use it);
+- Slack's *User OAuth Token* (`xoxp-...`) when explicitly enabling
+  user-authorized cross-channel context sync;
 - the Slack App ID, plus the `team_id` and bot `user_id` returned by
   `auth.test`; and
 - a stable internal tos-tag organization ID such as `org-tos-tag-dev`.
@@ -577,17 +591,45 @@ destination scope, explicit tool policy, approvals, and kill switches remain
 authoritative. Production installations should narrow scopes to measured use.
 
 Slack app lifecycle can be driven from the terminal with the official Slack
-CLI after the one-time `slack login` authorization. The CLI is optional; the
-checked-in manifest remains the source of truth.
+CLI after the one-time `slack login` authorization. The checked-in
+`.slack/hooks.json` emits `slack-app-manifest.yaml` through
+`scripts/slack-manifest-json.sh`, so `slack manifest validate`, `slack manifest
+diff`, and `slack app install` all use the checked-in manifest as their source
+of truth.
 
 Copy `runtime.env.example` to the gitignored `runtime.env`, set
 `TAG__SLACK__MODE=socket_mode`, set `TAG__SLACK__LIVE_ENABLED=true`, and fill
 the Slack identity fields plus `TAG__SLACK__APP_LEVEL_TOKEN` and
-`TAG__SLACK__BOT_USER_OAUTH_TOKEN`. `TAG__SLACK__USER_OAUTH_TOKEN` is optional
-and currently unused. Set `TAG__CLASSIFIER__OPENAI_API_KEY`, keep
+`TAG__SLACK__BOT_USER_OAUTH_TOKEN`. Set `TAG__SLACK__USER_OAUTH_TOKEN` and
+`TAG__SLACK__CONTEXT_SYNC_ENABLED=true` only for the reviewed cross-channel
+context path. Set `TAG__CLASSIFIER__OPENAI_API_KEY`, keep
 `TAG__CLASSIFIER__MODE=shadow`, and keep `TAG__OPENCODE__ENABLED=false` for the
 first classifier/transport test. Never commit,
 print, or paste the tokens into an issue, prompt, log, or artifact.
+
+Context sync uses the User OAuth Token only in the Go Slack adapter. It
+enumerates up to `TAG__SLACK__CONTEXT_SYNC_MAX_CHANNELS` visible conversations,
+refreshes policy membership before live ingress, then fairly backfills recent
+roots and thread replies in the background within the configured lookback,
+global message cap, per-channel cap, and overall sync timeout. Slack
+`Retry-After` responses are honored without delaying Socket Mode event capture.
+Imported history is idempotent, marked resolved, and cannot trigger output.
+Conversations that become stale or inaccessible between discovery and history
+fetch are logged by channel ID and skipped only for Slack's explicit
+`channel_not_found`, `not_in_channel`, or `is_archived` responses; auth and scope
+errors still stop the backfill. Existing channel enrollment and participation
+modes are preserved. New conversations
+are enrolled as `observe` only when the organization enrollment mode is
+`all_observable_channels`; `allowlist` continues to discard unknown-channel
+events before content persistence. Public sources may contribute cross-channel
+context. Private channels, DMs, and MPIMs remain destination-local and are
+excluded before every other destination's database query.
+
+`TAG__SLACK__OUTPUT_CHANNEL_IDS` is an optional comma-separated, exact Slack
+channel-ID allowlist for reactions and deliveries. It is enforced both before
+job admission and again by the delivery worker. Empty means that live channel
+policy is authoritative; set it to the dedicated test channel during broad
+observation trials.
 
 For live debugging, set `TAG__LOGGING__LEVEL=debug` and
 `TAG__LOGGING__USE_JSON=true`. Slack transport, normalization,
@@ -606,21 +648,35 @@ make run-live
 In `http://127.0.0.1:8090/admin/`, create the organization with enrollment mode
 `allowlist`, enable the workspace by its Slack `team_id`, and enroll one channel
 with fresh `membership_refreshed_at`, positive `max_responses_per_hour`, and
-positive `max_concurrent_jobs`. Begin in `observe`; after confirming message,
-edit, and delete ingestion, change only the test channel to `mention` and send a
-direct mention. Do not enable ambient speech until the shadow evaluation and
-operator approval gates pass.
+positive `max_concurrent_jobs`. Set `approver_user_ids` to the explicit Slack
+user IDs allowed to approve actions in that channel. An empty list fails closed,
+and the requester can never approve their own request. Begin in `observe`; after
+confirming message, edit, and delete ingestion, change only the test channel to
+`mention` and send a direct mention. Do not enable ambient speech until the
+shadow evaluation and operator approval gates pass.
+
+After reviewing the privacy boundary and Slack grant, change the organization
+to `all_observable_channels` to admit every user-authorized conversation as
+context. This does not enable speech: discovered channels remain `observe`, and
+an explicit channel exclusion remains authoritative.
 
 Optional features are explicit:
 
 - `TAG__CLASSIFIER__PROVIDER=openai` sends the immutable 100k-bounded context
   directly to the configurable Responses API endpoint using
   `TAG__CLASSIFIER__MODEL=gpt-5.6-luna` and
-  `TAG__CLASSIFIER__REASONING_EFFORT=max`; the response is strict structured
+  `TAG__CLASSIFIER__REASONING_EFFORT=none`; the response is strict structured
   output and cannot call tools;
 - set `TAG__OPENCODE__ENABLED=true` and keep
   `TAG__OPENCODE__MODE=local_worker` to provision one clean, disposable
-  `opencode serve` process per harness session;
+  `opencode serve` process per harness session; the live template sets
+  `TAG__OPENCODE__TIMEOUT=5m` because admitted full-agent work may legitimately
+  exceed the ambient classifier's latency budget. For the OpenAI-backed Luna
+  profile, tos-tag keeps the upstream key in its control-plane model gateway and
+  gives each worker only a random, attempt-scoped loopback capability that is
+  revoked at teardown. The anonymous `opencode` provider needs no gateway;
+  other credentialed providers require `external` mode and an independently
+  secured OpenCode gateway;
 - the local live template automatically selects all behavioral skills from
   `telemetryos-automation` in sibling `telemetryos-agent-skills` and `base` in
   sibling `tag-agent-skills`; each source is configured by root, Claude
@@ -635,7 +691,7 @@ Optional features are explicit:
 - set `TAG__MARKETPLACES__INJECTED_TOOLS` and
   `TAG__MARKETPLACES__TOOLS_ENABLED=true` to inject only that reviewed tool
   subset; write/admin/destructive operations create independent single-use
-  approvals in the management UI;
+  approvals with Slack-native Approve/Deny messages and a management fallback;
 - enable the write-only keystore only with a base64-encoded 32-byte master key
   supplied through `TAG__KEYSTORE__MASTER_KEY`; and
 - keep `TAG__SLACK__MODE=stub` for normal local tests and any run that does not

@@ -168,6 +168,8 @@ func RequiredIndexes() []IndexSpec {
 		{models.CollectionApprovals, mongo.IndexModel{Keys: bson.D{{Key: "cleanup_at", Value: 1}}, Options: ttl("approval_cleanup")}},
 		{models.CollectionRoutines, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "public_id", Value: 1}}, Options: unique("routine_public_unique")}},
 		{models.CollectionRoutines, mongo.IndexModel{Keys: bson.D{{Key: "enabled", Value: 1}, {Key: "next_run", Value: 1}}, Options: named("routine_due")}},
+		{models.CollectionEventSubscriptions, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "public_id", Value: 1}}, Options: unique("event_subscription_public_unique")}},
+		{models.CollectionEventSubscriptions, mongo.IndexModel{Keys: bson.D{{Key: "enabled", Value: 1}, {Key: "next_run", Value: 1}}, Options: named("event_subscription_due")}},
 	}
 }
 

@@ -43,6 +43,7 @@ func (q *MongoQueue) Enqueue(ctx context.Context, spec Spec) (Job, bool, error) 
 		SessionID:              string(spec.SessionID),
 		Generation:             spec.Generation,
 		ObservationID:          string(spec.ObservationID),
+		RequesterID:            spec.RequesterID,
 		IdempotencyKey:         spec.IdempotencyKey,
 		Kind:                   spec.Kind,
 		Input:                  spec.Input,
@@ -141,15 +142,17 @@ func (q *MongoQueue) Transition(ctx context.Context, id types.JobID, leaseToken 
 	}
 	now := q.now().UTC()
 	set := bson.M{
-		"state":          string(to),
-		"result":         current.Result,
-		"failure_reason": current.FailureReason,
-		"available_at":   current.AvailableAt,
-		"updated_at":     now,
+		"state":                string(to),
+		"result":               current.Result,
+		"failure_reason":       current.FailureReason,
+		"available_at":         current.AvailableAt,
+		"approval_id":          current.ApprovalID,
+		"approved_action_hash": current.ApprovedActionHash,
+		"updated_at":           now,
 	}
-	if to == StateSucceeded || to == StateFailed || to == StateCancelled || to == StateRetryWait || to == StateNeedsReconciliation {
+	if to == StateSucceeded || to == StateFailed || to == StateCancelled || to == StateRetryWait || to == StateNeedsReconciliation || to == StateWaitingApproval {
 		set["lease"] = models.Lease{}
-		set["writer_active"] = false
+		set["writer_active"] = to == StateWaitingApproval
 	}
 	filter := bson.M{
 		"public_id":        string(id),
@@ -169,11 +172,46 @@ func (q *MongoQueue) Transition(ctx context.Context, id types.JobID, leaseToken 
 	return fromModel(updated), nil
 }
 
+func (q *MongoQueue) SuspendForApproval(ctx context.Context, id types.JobID, leaseToken, approvalID string) (Job, error) {
+	if approvalID == "" {
+		return Job{}, ErrInvalidState
+	}
+	return q.Transition(ctx, id, leaseToken, StateWaitingApproval, func(job *Job) {
+		job.ApprovalID = approvalID
+		job.ApprovedActionHash = ""
+	})
+}
+
+func (q *MongoQueue) ResumeFromApproval(ctx context.Context, id types.JobID, approvalID, actionHash string) (Job, error) {
+	if approvalID == "" || actionHash == "" {
+		return Job{}, ErrInvalidState
+	}
+	now := q.now().UTC()
+	var updated models.Job
+	err := q.db.Collection(models.CollectionJobs).FindOneAndUpdate(ctx,
+		bson.M{"public_id": string(id), "state": string(StateWaitingApproval), "approval_id": approvalID},
+		bson.M{"$set": bson.M{"state": string(StateQueued), "approved_action_hash": actionHash, "available_at": now, "lease": models.Lease{}, "writer_active": false, "updated_at": now}, "$inc": bson.M{"attempt": -1, "steering_epoch": 1, "version": 1}},
+		options.FindOneAndUpdate().SetReturnDocument(options.After)).Decode(&updated)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return Job{}, ErrInvalidState
+	}
+	if err != nil {
+		return Job{}, err
+	}
+	return fromModel(updated), nil
+}
+
 func (q *MongoQueue) Cancel(ctx context.Context, id types.JobID, reason string) (Job, error) {
 	now := q.now().UTC()
 	after := options.After
 	var updated models.Job
-	pipeline := mongo.Pipeline{{{Key: "$set", Value: bson.M{"state": bson.M{"$switch": bson.M{"branches": bson.A{bson.M{"case": bson.M{"$in": bson.A{"$state", bson.A{string(StateQueued), string(StateRetryWait), string(StateWaitingApproval)}}}, "then": string(StateCancelled)}, bson.M{"case": bson.M{"$in": bson.A{"$state", bson.A{string(StateLeased), string(StatePreparing), string(StateRunning)}}}, "then": string(StateCancelling)}}, "default": "$state"}}, "failure_reason": reason, "steering_epoch": bson.M{"$add": bson.A{"$steering_epoch", 1}}, "updated_at": now, "version": bson.M{"$add": bson.A{"$version", 1}}}}}}
+	immediate := bson.M{"$in": bson.A{"$state", bson.A{string(StateQueued), string(StateRetryWait), string(StateWaitingApproval)}}}
+	pipeline := mongo.Pipeline{{{Key: "$set", Value: bson.M{
+		"state":          bson.M{"$switch": bson.M{"branches": bson.A{bson.M{"case": immediate, "then": string(StateCancelled)}, bson.M{"case": bson.M{"$in": bson.A{"$state", bson.A{string(StateLeased), string(StatePreparing), string(StateRunning)}}}, "then": string(StateCancelling)}}, "default": "$state"}},
+		"failure_reason": reason, "steering_epoch": bson.M{"$add": bson.A{"$steering_epoch", 1}},
+		"lease": bson.M{"$cond": bson.A{immediate, models.Lease{}, "$lease"}}, "writer_active": bson.M{"$cond": bson.A{immediate, false, "$writer_active"}},
+		"updated_at": now, "version": bson.M{"$add": bson.A{"$version", 1}},
+	}}}}
 	err := q.db.Collection(models.CollectionJobs).FindOneAndUpdate(ctx, bson.M{"public_id": string(id), "state": bson.M{"$in": []string{string(StateQueued), string(StateRetryWait), string(StateWaitingApproval), string(StateLeased), string(StatePreparing), string(StateRunning)}}}, pipeline, options.FindOneAndUpdate().SetReturnDocument(after)).Decode(&updated)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return Job{}, ErrInvalidState
@@ -305,11 +343,12 @@ func fromModel(doc models.Job) Job {
 	return Job{
 		ID: types.JobID(doc.PublicID), OrganizationID: doc.OrganizationID, WorkspaceID: doc.WorkspaceID,
 		ChannelID: doc.ChannelID, RootThreadTS: doc.RootThreadTS, ReplyInChannel: doc.ReplyInChannel, SessionID: types.SessionID(doc.SessionID),
-		Generation: doc.Generation, ObservationID: types.ObservationID(doc.ObservationID), IdempotencyKey: doc.IdempotencyKey,
+		Generation: doc.Generation, ObservationID: types.ObservationID(doc.ObservationID), RequesterID: doc.RequesterID, IdempotencyKey: doc.IdempotencyKey,
 		Kind: doc.Kind, Input: doc.Input, State: State(doc.State), Attempt: doc.Attempt, MaxAttempts: doc.MaxAttempts,
 		AdmissionReservationID: doc.AdmissionReservationID,
 		ResolvedModel:          resolved, RouteTrace: trace,
 		SteeringEpoch: doc.SteeringEpoch, Lease: Lease{Owner: types.WorkerID(doc.Lease.Owner), Token: doc.Lease.Token, ExpiresAt: doc.Lease.ExpiresAt, Heartbeat: doc.Lease.Heartbeat},
-		Result: result, FailureReason: doc.FailureReason, AvailableAt: doc.AvailableAt, CreatedAt: doc.CreatedAt, UpdatedAt: doc.UpdatedAt, ExpiresAt: doc.ExpiresAt, Version: doc.Version,
+		Result: result, FailureReason: doc.FailureReason, ApprovalID: doc.ApprovalID, ApprovedActionHash: doc.ApprovedActionHash,
+		AvailableAt: doc.AvailableAt, CreatedAt: doc.CreatedAt, UpdatedAt: doc.UpdatedAt, ExpiresAt: doc.ExpiresAt, Version: doc.Version,
 	}
 }

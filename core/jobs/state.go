@@ -50,6 +50,7 @@ type Spec struct {
 	SessionID              types.SessionID
 	Generation             int64
 	ObservationID          types.ObservationID
+	RequesterID            string
 	IdempotencyKey         string
 	Kind                   string
 	Input                  string
@@ -70,6 +71,7 @@ type Job struct {
 	SessionID              types.SessionID     `json:"session_id"`
 	Generation             int64               `json:"generation"`
 	ObservationID          types.ObservationID `json:"observation_id,omitempty"`
+	RequesterID            string              `json:"requester_id,omitempty"`
 	IdempotencyKey         string              `json:"idempotency_key"`
 	Kind                   string              `json:"kind"`
 	Input                  string              `json:"input"`
@@ -83,6 +85,8 @@ type Job struct {
 	Lease                  Lease               `json:"lease"`
 	Result                 types.SlackResult   `json:"result,omitempty"`
 	FailureReason          string              `json:"failure_reason,omitempty"`
+	ApprovalID             string              `json:"approval_id,omitempty"`
+	ApprovedActionHash     string              `json:"approved_action_hash,omitempty"`
 	AvailableAt            time.Time           `json:"available_at"`
 	CreatedAt              time.Time           `json:"created_at"`
 	UpdatedAt              time.Time           `json:"updated_at"`
@@ -103,6 +107,8 @@ type Queue interface {
 	Cancel(context.Context, types.JobID, string) (Job, error)
 	Interrupt(context.Context, types.JobID, string) (Job, error)
 	MarkCompletedUndelivered(context.Context, types.JobID, string) (Job, error)
+	SuspendForApproval(context.Context, types.JobID, string, string) (Job, error)
+	ResumeFromApproval(context.Context, types.JobID, string, string) (Job, error)
 }
 
 func CanTransition(from, to State) bool {
@@ -111,7 +117,7 @@ func CanTransition(from, to State) bool {
 		StateLeased:              {StatePreparing: true, StateRunning: true, StateQueued: true, StateNeedsReconciliation: true, StateCancelled: true},
 		StatePreparing:           {StateRunning: true, StateRetryWait: true, StateFailed: true, StateCancelled: true},
 		StateRunning:             {StateRunning: true, StateWaitingApproval: true, StateRetryWait: true, StateSucceeded: true, StateFailed: true, StateCancelling: true, StateNeedsReconciliation: true},
-		StateWaitingApproval:     {StateRunning: true, StateFailed: true, StateCancelled: true},
+		StateWaitingApproval:     {StateQueued: true, StateFailed: true, StateCancelled: true},
 		StateRetryWait:           {StateQueued: true, StateFailed: true, StateCancelled: true},
 		StateCancelling:          {StateCancelled: true, StateFailed: true},
 		StateNeedsReconciliation: {StateRetryWait: true, StateSucceeded: true, StateFailed: true},
@@ -121,7 +127,7 @@ func CanTransition(from, to State) bool {
 }
 
 func ValidateSpec(spec Spec) error {
-	if spec.OrganizationID == "" || spec.WorkspaceID == "" || spec.ChannelID == "" || (spec.RootThreadTS == "" && spec.Kind != "routine") || spec.SessionID == "" || spec.Generation <= 0 || spec.IdempotencyKey == "" || spec.Kind == "" || spec.MaxAttempts <= 0 {
+	if spec.OrganizationID == "" || spec.WorkspaceID == "" || spec.ChannelID == "" || (spec.RootThreadTS == "" && spec.Kind != "routine" && spec.Kind != "heartbeat") || spec.SessionID == "" || spec.Generation <= 0 || spec.IdempotencyKey == "" || spec.Kind == "" || spec.MaxAttempts <= 0 {
 		return fmt.Errorf("invalid job specification")
 	}
 	return nil

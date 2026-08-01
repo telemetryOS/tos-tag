@@ -31,7 +31,7 @@ func (q *MongoQueue) Enqueue(ctx context.Context, spec Spec) (Record, bool, erro
 	if expiresAt.IsZero() {
 		expiresAt = now.Add(24 * time.Hour)
 	}
-	doc := models.Delivery{PublicID: types.NewID("dlv"), OrganizationID: spec.OrganizationID, JobID: string(spec.JobID), IdempotencyKey: spec.IdempotencyKey, TeamID: spec.Destination.TeamID, ChannelID: spec.Destination.ChannelID, ThreadTS: spec.Destination.ThreadTS, Result: spec.Result, Status: string(StatusPending), MaxAttempts: spec.MaxAttempts, RetryAt: now, CreatedAt: now, UpdatedAt: now, ExpiresAt: expiresAt, Version: 1}
+	doc := models.Delivery{PublicID: types.NewID("dlv"), OrganizationID: spec.OrganizationID, JobID: string(spec.JobID), IdempotencyKey: spec.IdempotencyKey, TeamID: spec.Destination.TeamID, ChannelID: spec.Destination.ChannelID, ThreadTS: spec.Destination.ThreadTS, UpdateTS: spec.Destination.UpdateTS, Result: spec.Result, Status: string(StatusPending), MaxAttempts: spec.MaxAttempts, RetryAt: now, CreatedAt: now, UpdatedAt: now, ExpiresAt: expiresAt, Version: 1}
 	_, err := q.db.Collection(models.CollectionDeliveries).InsertOne(ctx, doc)
 	if err == nil {
 		return deliveryFromModel(doc), true, nil
@@ -142,5 +142,5 @@ func deliveryFromModel(doc models.Delivery) Record {
 			_ = bson.Unmarshal(encoded, &result)
 		}
 	}
-	return Record{ID: types.DeliveryID(doc.PublicID), OrganizationID: doc.OrganizationID, JobID: types.JobID(doc.JobID), IdempotencyKey: doc.IdempotencyKey, Destination: types.SlackDestination{TeamID: doc.TeamID, ChannelID: doc.ChannelID, ThreadTS: doc.ThreadTS}, Result: result, Status: Status(doc.Status), Attempt: doc.Attempt, MaxAttempts: doc.MaxAttempts, RetryAt: doc.RetryAt, Lease: Lease{Owner: types.WorkerID(doc.Lease.Owner), Token: doc.Lease.Token, ExpiresAt: doc.Lease.ExpiresAt}, SlackMessageTS: doc.SlackMessageTS, FailureReason: doc.FailureReason, CreatedAt: doc.CreatedAt, UpdatedAt: doc.UpdatedAt, ExpiresAt: doc.ExpiresAt, Version: doc.Version}
+	return Record{ID: types.DeliveryID(doc.PublicID), OrganizationID: doc.OrganizationID, JobID: types.JobID(doc.JobID), IdempotencyKey: doc.IdempotencyKey, Destination: types.SlackDestination{TeamID: doc.TeamID, ChannelID: doc.ChannelID, ThreadTS: doc.ThreadTS, UpdateTS: doc.UpdateTS}, Result: result, Status: Status(doc.Status), Attempt: doc.Attempt, MaxAttempts: doc.MaxAttempts, RetryAt: doc.RetryAt, Lease: Lease{Owner: types.WorkerID(doc.Lease.Owner), Token: doc.Lease.Token, ExpiresAt: doc.Lease.ExpiresAt}, SlackMessageTS: doc.SlackMessageTS, FailureReason: doc.FailureReason, CreatedAt: doc.CreatedAt, UpdatedAt: doc.UpdatedAt, ExpiresAt: doc.ExpiresAt, Version: doc.Version}
 }

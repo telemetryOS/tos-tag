@@ -345,6 +345,23 @@ automatically enrolled unless an explicit audited exclusion applies. New
 channels inherit `observe` until their speech mode/directive is configured, but
 their eligible messages still contribute to organization intelligence.
 
+The deployment capability for user-authorized context synchronization is
+separate from organization enrollment. When both are enabled, the control plane
+uses the consented Slack User OAuth identity to enumerate that user's public,
+private, DM, and MPIM conversations, refresh membership metadata, and import a
+bounded recent-history snapshot. Complete bounded discovery and policy
+registration happen before live ingress. History backfill then runs
+concurrently with Socket Mode so Slack API rate limits cannot create a gap in
+event capture; it honors `Retry-After`, has an overall deadline, and shares
+canonical event IDs with live ingestion. A conversation that becomes stale or
+inaccessible after discovery is safely skipped only for Slack's explicit
+channel/thread disappearance responses; authorization and scope failures remain
+terminal. Existing channel policy is never replaced. An explicit exclusion
+remains excluded; a newly
+discovered conversation is created only under `all_observable_channels` and is
+always `observe`. Under `allowlist`, user-subscribed events for unknown channels
+are acknowledged without retaining message content.
+
 Global shadow mode does not expand channel authority. For an `observe` channel,
 the classifier may run the same classifier path used by `assist` and retain that
 prediction for precision review, but it persists `admission.channel_mode` as the
@@ -356,6 +373,12 @@ only an already-authorized `assist` or `proactive` channel apply its ambient
 decision. It does not alter enrollment, membership, disclosure, kill-switch,
 cooldown, response-budget, or concurrency checks, and `observe` remains an
 absolute no-output mode.
+
+A deployment may additionally configure a hard Slack output-channel allowlist.
+Channels outside it are forced to effective `observe` behavior before job
+admission, and the delivery worker independently rejects any queued destination
+outside the same allowlist. This is a deployment safety boundary layered below
+organization and channel participation policy.
 
 Removing the bot from a channel stops future ingestion and marks the channel
 `ingestion_revoked_at`. Historical local data then follows retention and
@@ -618,11 +641,11 @@ sequenceDiagram
         T-->>OC: denied
     else approval required
         P->>A: durable single-use approval request
-        A-->>U: Slack/admin approval delivery
+        A-->>U: control-plane-owned Slack buttons/admin delivery
         U->>A: approve or deny
         A->>P: decision with expiry and actor
         P-->>T: allow once or deny
-        T-->>OC: redacted result or denial
+        T-->>OC: fresh worker resumes exact action or denial
     end
 ```
 
@@ -635,8 +658,11 @@ operation, typed arguments, destination, requester, job/step, expiry, and risk.
 The UI/Slack rendering is generated from those same bytes; the gateway
 recomputes and requires an exact match before one-time use. Policy supplies the
 authorized approver set. For `write` risk and above, the requester cannot approve
-their own request unless a separately audited break-glass policy explicitly
-allows it.
+their own request. The current channel policy expresses that set as explicit
+Slack user IDs in `approver_user_ids`; an empty or stale set fails closed. The
+control plane verifies organization/workspace/channel scope, current membership,
+and requester independence before recording an authorization audit receipt and
+mutating the approval. It never treats channel visibility as approval authority.
 
 If an approval wait outlives the worker-retention threshold, tos-tag releases
 the worker and stores a durable suspended action. Approval either executes that
@@ -651,6 +677,15 @@ normalized into the same job admission path as Slack observations. A routine
 stores owner, scope, trigger, instruction, model policy, skill snapshot rule,
 output channel, budget, and enabled revision. It is reauthorized at execution
 time. Trigger and emitted events carry loop-prevention metadata.
+
+The first durable event-subscription implementation is a classifier-gated
+heartbeat. Each due window reauthorizes the destination and configured output
+allowlist, rebuilds the same 100k-bounded context pack used for Slack decisions,
+and records a tool-free classification. Other restricted destinations are
+excluded before the observation query. Only an effective job-producing outcome
+at or above the subscription confidence threshold enqueues an idempotent
+`heartbeat` job; shadow mode, observe mode, policy denial, classifier failure,
+or silence advances the schedule without output.
 
 ### 7.7 Outbound Slack delivery
 
@@ -753,6 +788,9 @@ Shutdown reverses ingress first:
 Responsibilities:
 
 - manage the app-level Socket Mode token and bot Web API token;
+- confine the separately consented User OAuth token to read-only conversation
+  discovery and bounded history/reply backfill when context sync is explicitly
+  enabled;
 - open, refresh, and reconnect WebSocket connections using `slack-go/slack`;
 - acknowledge envelopes after durable acceptance;
 - normalize Slack events into project-owned boundary types;
@@ -766,6 +804,12 @@ Initial subscriptions:
 - `message.groups` with `groups:history`;
 - `app_mention` with `app_mentions:read`; and
 - membership and channel lifecycle events needed to keep scope state current.
+
+The all-observable development path adds matching user-event subscriptions for
+`message.channels`, `message.groups`, `message.im`, and `message.mpim`. Duplicate
+bot/user callbacks converge on the canonical message event key. Startup history
+imports are persisted as resolved context rather than pending observations, so
+they cannot cause a reaction, classifier decision, job, or Slack delivery.
 
 Phase 1 cross-channel search additionally requires the reviewed Slack scopes
 needed to enumerate users and conversation membership, initially `users:read`,
@@ -1109,7 +1153,13 @@ The worker receives a short-lived gateway credential restricted to:
 - expiry; and
 - allowed data classification.
 
-It never receives the upstream provider credential.
+It never receives the upstream provider credential. For a local OpenAI worker,
+the control plane materializes only a random attempt-scoped capability and a
+loopback gateway URL in the disposable OpenCode configuration. The gateway
+exchanges that capability for the upstream credential, fixes the upstream host,
+bounds methods and request size, and revokes the capability at worker teardown.
+Other credentialed providers use an external OpenCode/model gateway; anonymous
+providers need no secret route.
 
 Every gateway call verifies that the claimed attempt still owns the live Mongo
 lease/fencing token, that the steering epoch is current, and that the job is not
@@ -1745,7 +1795,7 @@ stateDiagram-v2
     leased --> preparing
     preparing --> running
     running --> waiting_approval
-    waiting_approval --> running
+    waiting_approval --> queued: exact approval queues fresh worker
     running --> checkpointing
     checkpointing --> running
     running --> succeeded

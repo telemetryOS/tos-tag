@@ -218,10 +218,18 @@ below depends on a real Slack installation and is deferred to that initiative.
 - [x] Define immutable approval bytes and canonical argument hashing.
 - [x] Replace the in-memory-only approval contract with durable Mongo state and
   wire independent, expiring, single-use approval into the action gateway.
+- [x] Suspend the active worker on approval, deliver control-plane-owned Slack
+  Approve/Deny blocks, and resume a fresh worker from the immutable approved
+  action.
+- [x] Enforce an explicit per-channel Slack approver allowlist, independent
+  requester approval, pre-mutation audit availability, admission release on
+  denial, and final-attempt claimability after resume.
 - [x] Validate tool ID, version, operation, destination, and risk.
 - [x] Execute exact argv rather than model-supplied shell strings.
 - [x] Inject only declared ENV into the exact tool subprocess.
 - [x] Prevent the worker from receiving provider, Slack, Mongo, or tool secrets.
+- [x] Route local OpenAI workers through a fixed-upstream loopback model gateway
+  using revocable attempt capabilities and live lease/steering checks.
 - [x] Bound subprocess time, output, files, and environment.
 - [x] Keep all real external tool execution disabled by default.
 
@@ -246,6 +254,9 @@ below depends on a real Slack installation and is deferred to that initiative.
 - [x] Replace the in-memory-only routine scheduler with Mongo state and wire its
   restart-safe idempotent loop and management surface into `core.Core`.
 - [x] Prevent routine and authored-message loops.
+- [x] Add durable classifier-gated heartbeat subscriptions, tenant-scoped
+  management and worker APIs, current-channel enforcement, and the
+  auto-injected `tag-triggers` behavioral skill.
 
 ## 15. Audit, usage, and management surfaces
 
@@ -314,6 +325,11 @@ These remain opt-in live gates and must be checked only after direct evidence:
 - [x] Configure Slack App-Level and Bot User OAuth tokens in the gitignored,
   owner-readable local `runtime.env` fallback and validate the bot credential
   with `auth.test` without logging secret values.
+- [x] Configure the separately consented User OAuth Token behind explicit
+  context-sync enablement; validate bounded conversation discovery and history
+  import without exposing it to workers, prompts, logs, or artifacts.
+- [x] Add and deploy matching public/private/DM/MPIM user-event subscriptions;
+  validate the checked-in manifest and confirm an empty post-deploy diff.
 - [x] Install into the dedicated development workspace and start the local
   control plane in Socket Mode with shadow classification.
 - [x] Verify Socket Mode connect and reconnect hello events against the expected
@@ -330,7 +346,28 @@ These remain opt-in live gates and must be checked only after direct evidence:
 - [ ] Observe a natural Slack-requested Socket Mode refresh in the long-running
   development connection; Slack normally rotates it only every few hours.
 - [x] Validate public-channel bot membership and allowlisted audience policy.
-- [ ] Validate private-channel and Slack Connect membership/audience semantics.
+- [x] Run an allowlist-safe live context-sync smoke: discover 377 conversations,
+  authorize/read only enrolled `#tos-tag`, import 49 callbacks as 31 duplicates
+  plus 18 resolved observations, and create zero pending decisions.
+- [x] Observe a real non-enrolled user event, exclude it before content
+  persistence, acknowledge it in 4 ms, and distinguish the ignored path from
+  durable acceptance in structured transport logs.
+- [x] Enable `all_observable_channels` with explicit privacy approval and verify
+  all 377 discovered conversations auto-enroll as observe-only while keeping
+  Slack output constrained to `#tos-tag`.
+- [x] Complete the bounded, Slack-rate-limited broad history pass: 377
+  registered conversations, 568 messages processed in 285.6 seconds, and one
+  stale `channel_not_found` conversation safely skipped without stopping live
+  ingress.
+- [x] Measure a real public-target shadow context pack: 237 sources across 21
+  public channels, 20 cross-channel sources, zero restricted-channel sources,
+  7,615 packed tokens, a 2.67-second Luna decision, and no Slack output.
+- [x] Add a hard deployment output-channel allowlist and pin the live test
+  configuration to the exact `#tos-tag` channel ID at admission and delivery.
+- [x] Verify live public-destination isolation after restricted history import:
+  the real `#tos-tag` context pack contained zero restricted sources. Keep a
+  private-destination and Slack Connect end-to-end probe as a later test because
+  the current deployment may output only to `#tos-tag`.
 - [x] Validate live message, edit, delete, mention, thread, job, and threaded
   delivery behavior in the enrolled public development channel.
 - [x] Validate native Block Kit table API acceptance, accessible fallback text,

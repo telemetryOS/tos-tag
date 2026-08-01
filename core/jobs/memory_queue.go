@@ -43,7 +43,7 @@ func (q *MemoryQueue) Enqueue(_ context.Context, spec Spec) (Job, bool, error) {
 	job := Job{
 		ID: types.JobID(types.NewID("job")), OrganizationID: spec.OrganizationID, WorkspaceID: spec.WorkspaceID,
 		ChannelID: spec.ChannelID, RootThreadTS: spec.RootThreadTS, ReplyInChannel: spec.ReplyInChannel, SessionID: spec.SessionID, Generation: spec.Generation,
-		ObservationID: spec.ObservationID, IdempotencyKey: spec.IdempotencyKey, Kind: spec.Kind, Input: spec.Input,
+		ObservationID: spec.ObservationID, RequesterID: spec.RequesterID, IdempotencyKey: spec.IdempotencyKey, Kind: spec.Kind, Input: spec.Input,
 		State: StateQueued, MaxAttempts: spec.MaxAttempts, SteeringEpoch: 1, AvailableAt: now, CreatedAt: now, UpdatedAt: now, ExpiresAt: expiresAt, Version: 1,
 		AdmissionReservationID: spec.AdmissionReservationID,
 		ResolvedModel:          spec.ResolvedModel, RouteTrace: spec.RouteTrace,
@@ -169,9 +169,42 @@ func (q *MemoryQueue) Transition(_ context.Context, id types.JobID, leaseToken s
 	if mutate != nil {
 		mutate(&job)
 	}
-	if to == StateSucceeded || to == StateFailed || to == StateCancelled || to == StateRetryWait || to == StateNeedsReconciliation {
+	if to == StateSucceeded || to == StateFailed || to == StateCancelled || to == StateRetryWait || to == StateNeedsReconciliation || to == StateWaitingApproval {
 		job.Lease = Lease{}
 	}
+	job.UpdatedAt = q.now().UTC()
+	job.Version++
+	q.jobs[id] = job
+	return job, nil
+}
+
+func (q *MemoryQueue) SuspendForApproval(ctx context.Context, id types.JobID, leaseToken, approvalID string) (Job, error) {
+	if approvalID == "" {
+		return Job{}, ErrInvalidState
+	}
+	return q.Transition(ctx, id, leaseToken, StateWaitingApproval, func(job *Job) {
+		job.ApprovalID = approvalID
+		job.ApprovedActionHash = ""
+	})
+}
+
+func (q *MemoryQueue) ResumeFromApproval(_ context.Context, id types.JobID, approvalID, actionHash string) (Job, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	job, ok := q.jobs[id]
+	if !ok {
+		return Job{}, ErrJobNotFound
+	}
+	if job.State != StateWaitingApproval || job.ApprovalID != approvalID || actionHash == "" {
+		return Job{}, ErrInvalidState
+	}
+	job.State = StateQueued
+	job.ApprovedActionHash = actionHash
+	if job.Attempt > 0 {
+		job.Attempt--
+	}
+	job.AvailableAt = q.now().UTC()
+	job.SteeringEpoch++
 	job.UpdatedAt = q.now().UTC()
 	job.Version++
 	q.jobs[id] = job

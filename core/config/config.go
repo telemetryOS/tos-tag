@@ -44,16 +44,23 @@ type AuthConfig struct {
 }
 
 type SlackConfig struct {
-	Mode              string `config:"mode"`
-	LiveEnabled       bool   `config:"liveEnabled"`
-	OrganizationID    string `config:"organizationId"`
-	AppID             string `config:"appId"`
-	TeamID            string `config:"teamId"`
-	AppLevelToken     string `config:"appLevelToken"`
-	UserOAuthToken    string `config:"userOauthToken"`
-	BotUserOAuthToken string `config:"botUserOauthToken"`
-	BotUserID         string `config:"botUserId"`
-	StubQueueSize     int    `config:"stubQueueSize"`
+	Mode                          string        `config:"mode"`
+	LiveEnabled                   bool          `config:"liveEnabled"`
+	OrganizationID                string        `config:"organizationId"`
+	AppID                         string        `config:"appId"`
+	TeamID                        string        `config:"teamId"`
+	AppLevelToken                 string        `config:"appLevelToken"`
+	UserOAuthToken                string        `config:"userOauthToken"`
+	BotUserOAuthToken             string        `config:"botUserOauthToken"`
+	BotUserID                     string        `config:"botUserId"`
+	ContextSyncEnabled            bool          `config:"contextSyncEnabled"`
+	ContextSyncLookback           time.Duration `config:"contextSyncLookback"`
+	ContextSyncTimeout            time.Duration `config:"contextSyncTimeout"`
+	ContextSyncMaxChannels        int           `config:"contextSyncMaxChannels"`
+	ContextSyncMaxMessages        int           `config:"contextSyncMaxMessages"`
+	ContextSyncMessagesPerChannel int           `config:"contextSyncMessagesPerChannel"`
+	OutputChannelIDs              []string      `config:"outputChannelIds"`
+	StubQueueSize                 int           `config:"stubQueueSize"`
 }
 
 type RetentionConfig struct {
@@ -169,7 +176,15 @@ var DefaultConfiguration = Config{
 	Logging:   LoggingConfig{Level: "info"},
 	Telemetry: TelemetryConfig{ServiceName: "tos-tag"},
 	Auth:      AuthConfig{Enabled: false},
-	Slack:     SlackConfig{Mode: "stub", StubQueueSize: 256},
+	Slack: SlackConfig{
+		Mode:                          "stub",
+		ContextSyncLookback:           7 * 24 * time.Hour,
+		ContextSyncTimeout:            2 * time.Hour,
+		ContextSyncMaxChannels:        500,
+		ContextSyncMaxMessages:        5_000,
+		ContextSyncMessagesPerChannel: 100,
+		StubQueueSize:                 256,
+	},
 	Retention: RetentionConfig{
 		RawEnvelope: 24 * time.Hour,
 		Messages:    30 * 24 * time.Hour,
@@ -191,7 +206,7 @@ var DefaultConfiguration = Config{
 		Provider:              "deterministic",
 		BaseURL:               "https://api.openai.com/v1",
 		Model:                 "gpt-5.6-luna",
-		ReasoningEffort:       "max",
+		ReasoningEffort:       "none",
 		Timeout:               60 * time.Second,
 		MaxOutputTokens:       2048,
 		ReactionEmojis:        []string{"eyes", "thinking_face", "white_check_mark", "warning", "rotating_light", "hammer_and_wrench", "speech_balloon"},
@@ -204,7 +219,7 @@ var DefaultConfiguration = Config{
 		Poll:        250 * time.Millisecond,
 		MaxAttempts: 3,
 	},
-	OpenCode: OpenCodeConfig{Mode: "local_worker", BaseURL: "http://127.0.0.1:4096", Username: "opencode", Command: "opencode", WorkerRoot: "/tmp/tos-tag-workers", Timeout: 30 * time.Second},
+	OpenCode: OpenCodeConfig{Mode: "local_worker", BaseURL: "http://127.0.0.1:4096", Username: "opencode", Command: "opencode", WorkerRoot: "/tmp/tos-tag-workers", Timeout: 5 * time.Minute},
 	Models: ModelConfig{
 		DefaultProfile:  "chatgpt-luna-max",
 		DefaultProvider: "openai",
@@ -225,6 +240,7 @@ func Load() (*Config, error) {
 	if err := applyOpenCodeEnvironment(&cfg.OpenCode); err != nil {
 		return nil, err
 	}
+	applySlackEnvironment(&cfg.Slack)
 	if err := applyClassifierEnvironment(&cfg.Classifier); err != nil {
 		return nil, err
 	}
@@ -235,6 +251,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+func applySlackEnvironment(cfg *SlackConfig) {
+	if raw, ok := os.LookupEnv("TAG__SLACK__OUTPUT_CHANNEL_IDS"); ok {
+		cfg.OutputChannelIDs = splitNonEmpty(raw)
+	}
 }
 
 // Orale tokenizes the Go field name OpenCode as OPEN_CODE. The public runtime
@@ -368,6 +390,30 @@ func Validate(cfg *Config) error {
 	if cfg.Slack.StubQueueSize <= 0 {
 		return fmt.Errorf("slack.stubQueueSize must be positive")
 	}
+	if cfg.Slack.ContextSyncLookback <= 0 || cfg.Slack.ContextSyncTimeout <= 0 || cfg.Slack.ContextSyncMaxChannels <= 0 || cfg.Slack.ContextSyncMaxMessages <= 0 || cfg.Slack.ContextSyncMessagesPerChannel <= 0 {
+		return fmt.Errorf("Slack context-sync bounds must be positive")
+	}
+	if cfg.Slack.ContextSyncLookback > cfg.Retention.Messages {
+		return fmt.Errorf("Slack context-sync lookback cannot exceed message retention")
+	}
+	if cfg.Slack.ContextSyncEnabled {
+		if cfg.Slack.Mode != "socket_mode" || !cfg.Slack.LiveEnabled {
+			return fmt.Errorf("Slack context sync requires explicitly enabled socket_mode")
+		}
+		if !strings.HasPrefix(cfg.Slack.UserOAuthToken, "xoxp-") {
+			return fmt.Errorf("Slack context sync requires a User OAuth xoxp token")
+		}
+	}
+	seenOutputChannels := make(map[string]struct{}, len(cfg.Slack.OutputChannelIDs))
+	for _, channelID := range cfg.Slack.OutputChannelIDs {
+		if strings.TrimSpace(channelID) == "" {
+			return fmt.Errorf("Slack output channel IDs must not be empty")
+		}
+		if _, duplicate := seenOutputChannels[channelID]; duplicate {
+			return fmt.Errorf("Slack output channel IDs must be unique")
+		}
+		seenOutputChannels[channelID] = struct{}{}
+	}
 	if cfg.Retention.RawEnvelope <= 0 || cfg.Retention.Messages <= 0 || cfg.Retention.Prompt <= 0 || cfg.Retention.Sweep <= 0 {
 		return fmt.Errorf("retention durations must be positive")
 	}
@@ -409,6 +455,9 @@ func Validate(cfg *Config) error {
 		case "local_worker":
 			if cfg.OpenCode.Command == "" || cfg.OpenCode.WorkerRoot == "" {
 				return fmt.Errorf("local-worker OpenCode requires command and worker root")
+			}
+			if cfg.Models.DefaultProvider != "opencode" && (cfg.Models.DefaultProvider != "openai" || cfg.Classifier.Provider != "openai" || cfg.Classifier.OpenAIAPIKey == "" || cfg.Classifier.BaseURL == "") {
+				return fmt.Errorf("credentialed local-worker OpenCode requires the control-plane OpenAI model gateway")
 			}
 		case "external":
 			if cfg.OpenCode.BaseURL == "" || cfg.OpenCode.Username == "" || cfg.OpenCode.Password == "" {
@@ -479,26 +528,31 @@ func isLoopbackHost(host string) bool {
 
 func (c *Config) RedactedStatus() map[string]any {
 	return map[string]any{
-		"environment":                  c.Environment,
-		"http_addr":                    c.HTTP.Addr,
-		"mongo_database":               c.Mongo.Database,
-		"slack_mode":                   c.Slack.Mode,
-		"slack_live_enabled":           c.Slack.LiveEnabled,
-		"classifier_mode":              c.Classifier.Mode,
-		"classifier_provider":          c.Classifier.Provider,
-		"classifier_model":             c.Classifier.Model,
-		"classifier_reasoning_effort":  c.Classifier.ReasoningEffort,
-		"auth_enabled":                 c.Auth.Enabled,
-		"log_file_enabled":             c.Logging.FilePath != "",
-		"message_retention":            c.Retention.Messages.String(),
-		"context_max_tokens":           c.ContextPacks.MaxTokens,
-		"opencode_enabled":             c.OpenCode.Enabled,
-		"default_model_profile":        c.Models.DefaultProfile,
-		"skill_marketplace_configured": c.Marketplaces.SkillRoot != "" || c.Marketplaces.HeadlessRoot != "" || c.Marketplaces.BaseRoot != "",
-		"headless_plugin":              c.Marketplaces.HeadlessPlugin,
-		"base_plugin":                  c.Marketplaces.BasePlugin,
-		"tool_marketplace_configured":  c.Marketplaces.ToolRoot != "",
-		"marketplace_tools_enabled":    c.Marketplaces.ToolsEnabled,
-		"keystore_enabled":             c.Keystore.Enabled,
+		"environment":                     c.Environment,
+		"http_addr":                       c.HTTP.Addr,
+		"mongo_database":                  c.Mongo.Database,
+		"slack_mode":                      c.Slack.Mode,
+		"slack_live_enabled":              c.Slack.LiveEnabled,
+		"slack_context_sync_enabled":      c.Slack.ContextSyncEnabled,
+		"slack_context_sync_lookback":     c.Slack.ContextSyncLookback.String(),
+		"slack_context_sync_max_channels": c.Slack.ContextSyncMaxChannels,
+		"slack_context_sync_max_messages": c.Slack.ContextSyncMaxMessages,
+		"slack_output_channel_count":      len(c.Slack.OutputChannelIDs),
+		"classifier_mode":                 c.Classifier.Mode,
+		"classifier_provider":             c.Classifier.Provider,
+		"classifier_model":                c.Classifier.Model,
+		"classifier_reasoning_effort":     c.Classifier.ReasoningEffort,
+		"auth_enabled":                    c.Auth.Enabled,
+		"log_file_enabled":                c.Logging.FilePath != "",
+		"message_retention":               c.Retention.Messages.String(),
+		"context_max_tokens":              c.ContextPacks.MaxTokens,
+		"opencode_enabled":                c.OpenCode.Enabled,
+		"default_model_profile":           c.Models.DefaultProfile,
+		"skill_marketplace_configured":    c.Marketplaces.SkillRoot != "" || c.Marketplaces.HeadlessRoot != "" || c.Marketplaces.BaseRoot != "",
+		"headless_plugin":                 c.Marketplaces.HeadlessPlugin,
+		"base_plugin":                     c.Marketplaces.BasePlugin,
+		"tool_marketplace_configured":     c.Marketplaces.ToolRoot != "",
+		"marketplace_tools_enabled":       c.Marketplaces.ToolsEnabled,
+		"keystore_enabled":                c.Keystore.Enabled,
 	}
 }

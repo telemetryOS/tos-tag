@@ -181,7 +181,11 @@ func (c *OpenAIClassifier) Decide(ctx context.Context, target Target, pack types
 		return types.ClassificationDecision{}, classifierError("response", "response_decode", err)
 	}
 	if providerResponse.Status != "completed" {
-		return types.ClassificationDecision{}, classifierError("response", "response_incomplete", errors.New("OpenAI response did not complete"))
+		code := "response_incomplete"
+		if providerResponse.IncompleteDetails != nil && providerResponse.IncompleteDetails.Reason != "" {
+			code += "_" + providerResponse.IncompleteDetails.Reason
+		}
+		return types.ClassificationDecision{}, classifierError("response", code, errors.New("OpenAI response did not complete"))
 	}
 	raw := providerResponse.outputText()
 	if raw == "" {
@@ -201,7 +205,7 @@ func (c *OpenAIClassifier) Decide(ctx context.Context, target Target, pack types
 		return types.ClassificationDecision{}, classifierError("decode_trailing", "invalid_structured_output", err)
 	}
 	if err := validateRecommendation(decision, profiles, c.reactionEmojis); err != nil {
-		return types.ClassificationDecision{}, classifierError("recommendation", "invalid_recommendation", err)
+		return types.ClassificationDecision{}, classifierError("recommendation", recommendationErrorCode(err), err)
 	}
 	decision.ClassifierModel = c.model
 	decision.ClassifierReasoningEffort = c.reasoningEffort
@@ -257,7 +261,7 @@ type classifierInput struct {
 	ReactionEmojis []string                 `json:"allowed_reaction_emojis"`
 }
 
-const classifierInstructions = `You are tos-tag's stateless, tool-free Slack classifier. Using only the immutable input, decide whether to remain silent, react only, answer in the current thread, answer in the channel, start background agent work, or request approval. Choose the least disruptive placement. Default to silent on ambiguity, social chatter, repetition, or an already-answered question. For every non-silent action select exactly one allowed Slack reaction; use eyes when acknowledging work, thinking_face when considering a question, warning or rotating_light for risk/incident signals, white_check_mark for a completed acknowledgement, and another allowed emoji only when it clearly fits. A reply or background action requiring research, tools, or substantial reasoning must set requires_full_agent true and select exactly one available agent profile plus its advertised strength and reasoning effort. Never invent profile IDs, evidence IDs, emoji names, or channel facts. Restricted-awareness sources may appear only in restricted_signal_ids and may never ground final prose. Do not use tools and do not reveal chain-of-thought.`
+const classifierInstructions = `You are tos-tag's stateless, tool-free Slack classifier. Using only the immutable input, decide whether to remain silent, react only, answer in the current thread, answer in the channel, start background agent work, or request approval. Choose the least disruptive placement. Default to silent on ambiguity, social chatter, repetition, or an already-answered question. For every non-silent action select exactly one allowed Slack reaction; use eyes when acknowledging work, thinking_face when considering a question, warning or rotating_light for risk/incident signals, white_check_mark for a completed acknowledgement, and another allowed emoji only when it clearly fits. A reply or background action requiring research, tools, or substantial reasoning must set requires_full_agent true and select exactly one available agent profile plus its advertised strength and reasoning effort. Never invent profile IDs, evidence IDs, emoji names, or channel facts. Restricted-awareness sources may appear only in restricted_signal_ids and may never ground final prose. Sources with provenance agent_output_unverified are prior generated prose for continuity, not factual evidence, and must not justify confidence or releasable evidence. Do not use tools and do not reveal chain-of-thought.`
 
 type responsesRequest struct {
 	Model           string             `json:"model"`
@@ -288,9 +292,12 @@ type responsesText struct {
 }
 
 type responsesResponse struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
-	Usage  struct {
+	ID                string `json:"id"`
+	Status            string `json:"status"`
+	IncompleteDetails *struct {
+		Reason string `json:"reason"`
+	} `json:"incomplete_details"`
+	Usage struct {
 		InputTokens  int64 `json:"input_tokens"`
 		OutputTokens int64 `json:"output_tokens"`
 	} `json:"usage"`
@@ -389,6 +396,23 @@ func validateRecommendation(decision types.ClassificationDecision, profiles []ad
 		}
 	}
 	return errors.New("classification selected an unavailable agent profile")
+}
+
+func recommendationErrorCode(err error) string {
+	switch err.Error() {
+	case "silent classification included an action recommendation":
+		return "silent_with_action"
+	case "classification reaction is not allowlisted":
+		return "reaction_not_allowlisted"
+	case "classification outcome requires full agent work":
+		return "agent_required"
+	case "non-agent classification included an agent model recommendation":
+		return "non_agent_with_model"
+	case "classification selected an unavailable agent profile":
+		return "agent_profile_unavailable"
+	default:
+		return "invalid_recommendation"
+	}
 }
 
 func decodeErrorStage(raw string, err error) string {

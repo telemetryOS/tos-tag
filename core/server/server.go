@@ -35,6 +35,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/retention"
 	"github.com/telemetryos/tos-tag/core/routines"
 	"github.com/telemetryos/tos-tag/core/tools"
+	"github.com/telemetryos/tos-tag/core/triggers"
 	"github.com/telemetryos/tos-tag/models"
 	"github.com/telemetryos/tos-tag/types"
 )
@@ -54,27 +55,31 @@ type StubDelivery interface {
 }
 
 type Dependencies struct {
-	Config           *config.Config
-	Logger           *blackbox.Logger
-	Health           Pinger
-	Ingress          StubIngress
-	Transport        StubDelivery
-	Jobs             jobs.Queue
-	Deliveries       deliveries.Queue
-	Decisions        classifier.DecisionStore
-	Version          string
-	Routes           *modelrouter.Registry
-	Organizations    orgconfig.Store
-	Retention        *retention.Janitor
-	Records          management.Reader
-	ChannelConfig    channelconfig.Repository
-	Marketplaces     *marketplace.Registry
-	ToolMarketplaces *tools.Registry
-	Intelligence     *intelligence.Mongo
-	Secrets          keystore.Repository
-	Audit            audit.Appender
-	Approvals        approvals.Repository
-	Routines         routines.Repository
+	Config              *config.Config
+	Logger              *blackbox.Logger
+	Health              Pinger
+	Ingress             StubIngress
+	Transport           StubDelivery
+	Jobs                jobs.Queue
+	Deliveries          deliveries.Queue
+	Decisions           classifier.DecisionStore
+	Version             string
+	Routes              *modelrouter.Registry
+	Organizations       orgconfig.Store
+	Retention           *retention.Janitor
+	Records             management.Reader
+	ChannelConfig       channelconfig.Repository
+	Marketplaces        *marketplace.Registry
+	ToolMarketplaces    *tools.Registry
+	Intelligence        *intelligence.Mongo
+	Secrets             keystore.Repository
+	Audit               audit.Appender
+	Approvals           approvals.Repository
+	ApprovalCoordinator interface {
+		HandleSlackDecision(context.Context, approvals.SlackDecision) error
+	}
+	Routines routines.Repository
+	Triggers triggers.Repository
 }
 
 type Server struct {
@@ -140,6 +145,8 @@ func New(deps Dependencies) (*Server, error) {
 	mux.HandleFunc("POST /admin/api/approvals/approve", s.approveToolAction)
 	mux.HandleFunc("GET /admin/api/routines", s.listRoutines)
 	mux.HandleFunc("PUT /admin/api/routines", s.putRoutine)
+	mux.HandleFunc("GET /admin/api/trigger-subscriptions", s.listTriggerSubscriptions)
+	mux.HandleFunc("PUT /admin/api/trigger-subscriptions", s.putTriggerSubscription)
 	mux.HandleFunc("GET /admin/events", s.eventStream)
 	mux.HandleFunc("POST /admin/api/stub/envelopes", s.injectEnvelope)
 	s.handler = s.securityHeaders(s.authenticate(mux))
@@ -263,6 +270,7 @@ func (s *Server) renderIndex(w http.ResponseWriter, r *http.Request) {
 		"keystore":     "/admin/api/keystore",
 		"approvals":    "/admin/api/approvals",
 		"routines":     "/admin/api/routines",
+		"triggers":     "/admin/api/trigger-subscriptions",
 	}
 	endpoint := endpoints[page]
 	if page != "overview" && endpoint == "" {
@@ -771,7 +779,15 @@ func (s *Server) approveToolAction(w http.ResponseWriter, r *http.Request) {
 	if !s.auditMutation(w, r, input.OrganizationID, input.ApprovalID, "tool_approval.approve", input.ApproverID, nil) {
 		return
 	}
-	value, err := s.deps.Approvals.ApproveContext(r.Context(), input.OrganizationID, input.ApprovalID, input.ApproverID)
+	value, err := s.deps.Approvals.GetContext(r.Context(), input.OrganizationID, input.ApprovalID)
+	if err == nil && s.deps.ApprovalCoordinator != nil && value.Action.WorkspaceID != "" && value.Action.ChannelID != "" && value.Action.JobID != "" {
+		err = s.deps.ApprovalCoordinator.HandleSlackDecision(r.Context(), approvals.SlackDecision{OrganizationID: input.OrganizationID, WorkspaceID: value.Action.WorkspaceID, ChannelID: value.Action.ChannelID, UserID: input.ApproverID, ApprovalID: input.ApprovalID, Approve: true})
+		if err == nil {
+			value, err = s.deps.Approvals.GetContext(r.Context(), input.OrganizationID, input.ApprovalID)
+		}
+	} else if err == nil {
+		value, err = s.deps.Approvals.ApproveContext(r.Context(), input.OrganizationID, input.ApprovalID, input.ApproverID)
+	}
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "approval_not_approvable")
 		return
@@ -825,6 +841,64 @@ func (s *Server) putRoutine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.events.Publish("routines")
+	writeJSON(w, http.StatusOK, saved)
+}
+
+func (s *Server) listTriggerSubscriptions(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Triggers == nil {
+		writeError(w, http.StatusNotFound, "trigger_subscriptions_disabled")
+		return
+	}
+	organizationID, ok := requiredOrganization(w, r)
+	if !ok {
+		return
+	}
+	values, err := s.deps.Triggers.List(r.Context(), organizationID)
+	writeList(w, values, err)
+}
+
+func (s *Server) putTriggerSubscription(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Triggers == nil {
+		writeError(w, http.StatusNotFound, "trigger_subscriptions_disabled")
+		return
+	}
+	var input struct {
+		ID              string          `json:"id"`
+		OrganizationID  string          `json:"organization_id"`
+		WorkspaceID     string          `json:"workspace_id"`
+		ChannelID       string          `json:"channel_id"`
+		RootThreadTS    string          `json:"root_thread_ts"`
+		SessionID       types.SessionID `json:"session_id"`
+		Generation      int64           `json:"generation"`
+		OwnerID         string          `json:"owner_id"`
+		Kind            triggers.Kind   `json:"kind"`
+		Instruction     string          `json:"instruction"`
+		IntervalSeconds int64           `json:"interval_seconds"`
+		NextRun         time.Time       `json:"next_run"`
+		ClassifierGate  bool            `json:"classifier_gate"`
+		MinConfidence   float64         `json:"min_confidence"`
+		Enabled         bool            `json:"enabled"`
+	}
+	if !decodeMutation(w, r, s.csrf, &input) {
+		return
+	}
+	if !s.auditMutation(w, r, input.OrganizationID, input.ID, "trigger_subscription.put", input.OwnerID, map[string]any{"channel_id": input.ChannelID, "kind": string(input.Kind), "enabled": input.Enabled, "classifier_gate": input.ClassifierGate}) {
+		return
+	}
+	value := triggers.Subscription{
+		ID: input.ID, OrganizationID: input.OrganizationID, WorkspaceID: input.WorkspaceID,
+		ChannelID: input.ChannelID, RootThreadTS: input.RootThreadTS, SessionID: input.SessionID,
+		Generation: input.Generation, OwnerID: input.OwnerID, Kind: input.Kind,
+		Instruction: input.Instruction, Interval: time.Duration(input.IntervalSeconds) * time.Second,
+		NextRun: input.NextRun, ClassifierGate: input.ClassifierGate,
+		MinConfidence: input.MinConfidence, Enabled: input.Enabled,
+	}
+	saved, err := s.deps.Triggers.PutContext(r.Context(), value)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_trigger_subscription")
+		return
+	}
+	s.events.Publish("trigger_subscriptions")
 	writeJSON(w, http.StatusOK, saved)
 }
 

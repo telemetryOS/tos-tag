@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "get-manifest": "./scripts/slack-manifest-json.sh"
+  },
+  "config": {
+    "watch": {
+      "manifest": {
+        "paths": [
+          "slack-app-manifest.yaml"
+        ]
+      }
+    },
+    "sdk-managed-connection-enabled": true
+  }
+}

@@ -17,9 +17,22 @@ var (
 
 type AcceptResult struct {
 	Duplicate bool
+	Ignored   bool
 }
 
 type Handler func(context.Context, types.SlackEnvelope) (AcceptResult, error)
+
+type ApprovalInteraction struct {
+	OrganizationID string
+	WorkspaceID    string
+	ChannelID      string
+	UserID         string
+	ApprovalID     string
+	MessageTS      string
+	Approve        bool
+}
+
+type ApprovalInteractionHandler func(context.Context, ApprovalInteraction) error
 
 type Ingress interface {
 	Start(context.Context, Handler) error

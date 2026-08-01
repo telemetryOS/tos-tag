@@ -27,6 +27,17 @@ func NewMongoStore(db *database.Database, messageRetention time.Duration) *Mongo
 }
 
 func (s *MongoStore) Accept(ctx context.Context, envelope types.SlackEnvelope) (Acceptance, error) {
+	return s.accept(ctx, envelope, "pending", "pending")
+}
+
+// Import persists user-authorized Slack history as resolved context. It shares
+// the live event idempotency key so a startup history row and a later Slack
+// retry converge on one observation and one current-message projection.
+func (s *MongoStore) Import(ctx context.Context, envelope types.SlackEnvelope) (Acceptance, error) {
+	return s.accept(ctx, envelope, "authorized", "resolved")
+}
+
+func (s *MongoStore) accept(ctx context.Context, envelope types.SlackEnvelope, scopeState, decisionState string) (Acceptance, error) {
 	if err := ValidateEnvelope(envelope); err != nil {
 		return Acceptance{}, err
 	}
@@ -72,8 +83,8 @@ func (s *MongoStore) Accept(ctx context.Context, envelope types.SlackEnvelope) (
 		Subtype:                 envelope.Subtype,
 		Text:                    envelope.Text,
 		MutationTargetTS:        envelope.TargetTS,
-		ScopeState:              "pending",
-		DecisionState:           "pending",
+		ScopeState:              scopeState,
+		DecisionState:           decisionState,
 		Restricted:              envelope.Restricted,
 		IsMention:               envelope.IsMention,
 		OriginTag:               envelope.OriginTag,
@@ -183,6 +194,7 @@ func (s *MongoStore) applyProjection(ctx context.Context, envelope types.SlackEn
 		"message_ts":         bson.M{"$ifNull": bson.A{"$message_ts", messageTS}},
 		"root_thread_ts":     bson.M{"$ifNull": bson.A{"$root_thread_ts", envelope.RootThreadTS()}},
 		"author_id":          bson.M{"$ifNull": bson.A{"$author_id", envelope.UserID}},
+		"bot_id":             bson.M{"$ifNull": bson.A{"$bot_id", envelope.BotID}},
 		"original_at":        bson.M{"$ifNull": bson.A{"$original_at", observation.SlackEventTime}},
 		"expires_at":         bson.M{"$ifNull": bson.A{"$expires_at", observation.SlackEventTime.Add(s.messageRetention)}},
 		"source_event_id":    choose(envelope.EventID, "$source_event_id"),

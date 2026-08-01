@@ -140,6 +140,37 @@ func TestOpenCodeSessionErrorIsReturnedOnErrorChannel(t *testing.T) {
 	}
 }
 
+func TestOpenCodeTreatsStopStepAsTerminal(t *testing.T) {
+	adapter, err := NewOpenCode(OpenCodeOptions{Enabled: true, BaseURL: "http://opencode.test", Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.client.Transport = handlerTransport{handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintln(w, `data: {"type":"message.part.updated","properties":{"part":{"id":"part-text","type":"text"}}}`)
+		_, _ = fmt.Fprintln(w, `data: {"type":"message.part.delta","properties":{"partID":"part-text","delta":"done"}}`)
+		_, _ = fmt.Fprintln(w, `data: {"type":"message.part.updated","properties":{"part":{"id":"part-finish","type":"step-finish","reason":"stop"}}}`)
+		_, _ = fmt.Fprintln(w, `data: {"type":"message.part.delta","properties":{"partID":"part-text","delta":"duplicate"}}`)
+	})}
+	events, errs := adapter.Events(context.Background(), "session-stop")
+	var delta string
+	var idle bool
+	for event := range events {
+		if event.Type == "message.delta" {
+			delta += event.Data["text"].(string)
+		}
+		if event.Type == "session.idle" {
+			idle = true
+		}
+	}
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+	if delta != "done" || !idle {
+		t.Fatalf("delta=%q idle=%v", delta, idle)
+	}
+}
+
 type handlerTransport struct{ handler http.Handler }
 
 func (t handlerTransport) RoundTrip(request *http.Request) (*http.Response, error) {

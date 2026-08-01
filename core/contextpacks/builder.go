@@ -143,6 +143,7 @@ func (b *Builder) Build(request Request) (types.ContextPackRevision, error) {
 				Version:         candidate.Version,
 				ChannelID:       candidate.ChannelID,
 				Partition:       partition,
+				Provenance:      candidate.Provenance,
 				TokenCount:      tokens,
 				DisclosureClass: candidate.DisclosureClass,
 				Text:            candidate.Text,

@@ -145,6 +145,35 @@ func TestLiveIngressAcknowledgesDurableRetryDuplicateAfterReconnect(t *testing.T
 	}
 }
 
+func TestLiveIngressAcknowledgesPolicyExcludedEnvelope(t *testing.T) {
+	transport := newFakeSocketModeTransport()
+	ingress := &LiveIngress{
+		options: LiveOptions{OrganizationID: "org", AppID: "app", TeamID: "team", BotUserID: "bot", Logger: blackbox.New()},
+		client:  transport,
+	}
+	handler := func(_ context.Context, _ types.SlackEnvelope) (AcceptResult, error) {
+		transport.handled <- struct{}{}
+		return AcceptResult{Ignored: true}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := ingress.Start(ctx, handler); err != nil {
+		t.Fatal(err)
+	}
+	transport.events <- retryEventsAPIEvent("envelope-ignored", 0, "")
+	select {
+	case envelopeID := <-transport.acked:
+		if envelopeID != "envelope-ignored" {
+			t.Fatalf("acked envelope %q", envelopeID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("policy-excluded envelope was not acknowledged")
+	}
+	if err := ingress.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func retryEventsAPIEvent(envelopeID string, retryAttempt int, retryReason string) socketmode.Event {
 	callback := &slackevents.EventsAPICallbackEvent{TeamID: "team", EventID: "event-retry", EventTime: 100}
 	return socketmode.Event{
@@ -228,6 +257,16 @@ func TestLiveDeliveryAppliesClassifierReactionToSourceMessage(t *testing.T) {
 	}
 }
 
+func TestSlackAPIErrorCodeIsSafeAndSpecific(t *testing.T) {
+	err := fmt.Errorf("post Slack message: %w", slackapi.SlackErrorResponse{Err: "invalid_blocks"})
+	if got := slackAPIErrorCode(err); got != "invalid_blocks" {
+		t.Fatalf("error code = %q, want invalid_blocks", got)
+	}
+	if got := slackAPIErrorCode(errors.New("network unavailable")); got != "" {
+		t.Fatalf("non-Slack error code = %q, want empty", got)
+	}
+}
+
 func TestSlackBlocksFromRenderedPreservesOptionalTableFields(t *testing.T) {
 	payloads, err := deliveries.NewRenderer().Render(types.SlackResult{Segments: []types.SlackSegment{{
 		Kind: types.SlackSegmentTable,
@@ -255,9 +294,43 @@ func TestSlackBlocksFromRenderedPreservesOptionalTableFields(t *testing.T) {
 	}
 }
 
+func TestSlackBlocksFromRenderedPreservesApprovalBlocks(t *testing.T) {
+	payloads, err := deliveries.NewRenderer().Render(types.SlackResult{Segments: []types.SlackSegment{{
+		Kind: types.SlackSegmentApproval,
+		Approval: &types.SlackApproval{
+			ID:          "approval-1",
+			ActionHash:  "sha256:abcdefghijklmnopqrstuvwxyz",
+			ToolID:      "tos_tag_trigger",
+			OperationID: "put",
+			Risk:        "write",
+			Destination: "team/channel",
+			Arguments:   map[string]any{"enabled": true, "id": "incident-watch"},
+			ExpiresAt:   time.Now().Add(time.Hour),
+		},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := slackBlocksFromRendered(payloads[0].Blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"type":"header"`, `"type":"section"`, `"type":"plain_text"`, `"type":"context"`, `"type":"actions"`, `"action_id":"tos_tag_approval_approve"`} {
+		if !strings.Contains(string(encoded), expected) {
+			t.Fatalf("Slack block conversion dropped %q: %s", expected, encoded)
+		}
+	}
+}
+
 type fakePostMessage struct {
 	channel   string
 	calls     int
+	updates   int
+	updateTS  string
 	messages  []slackapi.Message
 	reactions []slackapi.ItemRef
 }
@@ -270,6 +343,11 @@ func (f *fakePostMessage) AddReactionContext(_ context.Context, _ string, item s
 func (f *fakePostMessage) PostMessageContext(_ context.Context, channel string, _ ...slackapi.MsgOption) (string, string, error) {
 	f.channel, f.calls = channel, f.calls+1
 	return channel, "200.1", nil
+}
+
+func (f *fakePostMessage) UpdateMessageContext(_ context.Context, channel, timestamp string, _ ...slackapi.MsgOption) (string, string, string, error) {
+	f.channel, f.updateTS, f.updates = channel, timestamp, f.updates+1
+	return channel, timestamp, "", nil
 }
 
 func (f *fakePostMessage) GetConversationHistoryContext(_ context.Context, _ *slackapi.GetConversationHistoryParameters) (*slackapi.GetConversationHistoryResponse, error) {
@@ -290,5 +368,34 @@ func TestLiveDeliveryReconcilesAcceptedPartBeforeRetry(t *testing.T) {
 	}
 	if fake.calls != 0 || !result.Duplicate || result.MessageTS != "199.9" {
 		t.Fatalf("calls=%d result=%#v", fake.calls, result)
+	}
+}
+
+func TestLiveDeliveryUpdatesExistingMessageInsteadOfPosting(t *testing.T) {
+	fake := &fakePostMessage{}
+	delivery := &LiveDelivery{teamID: "team", api: fake, renderer: deliveries.NewRenderer()}
+	request := types.SlackDeliveryRequest{ID: "delivery-update", Destination: types.SlackDestination{TeamID: "team", ChannelID: "channel", ThreadTS: "100.1", UpdateTS: "200.2"}, Result: types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentNotice, Notice: &types.SlackNotice{Tone: "success", Title: "Updated", Message: "The original message was updated."}}}}}
+	result, err := delivery.Send(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fake.calls != 0 || fake.updates != 1 || fake.updateTS != "200.2" || result.MessageTS != "200.2" {
+		t.Fatalf("posts=%d updates=%d update_ts=%q result=%#v", fake.calls, fake.updates, fake.updateTS, result)
+	}
+}
+
+func TestNormalizeApprovalInteractionBindsAppWorkspaceChannelAndAction(t *testing.T) {
+	callback := slackapi.InteractionCallback{
+		Type: slackapi.InteractionTypeBlockActions, APIAppID: "A123", Team: slackapi.Team{ID: "T123"},
+		Container: slackapi.Container{ChannelID: "C123", MessageTs: "200.2"}, User: slackapi.User{ID: "U123"},
+		ActionCallback: slackapi.ActionCallbacks{BlockActions: []*slackapi.BlockAction{{ActionID: "tos_tag_approval_approve", Value: "approval-1"}}},
+	}
+	interaction, eligible, err := NormalizeApprovalInteraction(LiveOptions{OrganizationID: "org", AppID: "A123", TeamID: "T123"}, callback)
+	if err != nil || !eligible || !interaction.Approve || interaction.ApprovalID != "approval-1" || interaction.ChannelID != "C123" || interaction.UserID != "U123" || interaction.MessageTS != "200.2" {
+		t.Fatalf("unexpected interaction: %#v eligible=%v err=%v", interaction, eligible, err)
+	}
+	callback.Team.ID = "T999"
+	if _, _, err := NormalizeApprovalInteraction(LiveOptions{OrganizationID: "org", AppID: "A123", TeamID: "T123"}, callback); err == nil {
+		t.Fatal("mismatched workspace was accepted")
 	}
 }

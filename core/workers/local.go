@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -100,7 +101,7 @@ func (m *Local) Provision(parent context.Context, spec Spec) (Workspace, error) 
 			return Workspace{}, err
 		}
 	}
-	if err := writeWorkerPolicy(workDir, len(spec.CustomTools) > 0); err != nil {
+	if err := writeWorkerPolicy(workDir, len(spec.CustomTools) > 0, spec.Provider); err != nil {
 		return Workspace{}, err
 	}
 	if err := materializeSkills(spec.Skills, skillsDir); err != nil {
@@ -152,7 +153,7 @@ func (m *Local) Provision(parent context.Context, spec Spec) (Workspace, error) 
 	return workspace, nil
 }
 
-func writeWorkerPolicy(workDir string, toolEnabled bool) error {
+func writeWorkerPolicy(workDir string, toolEnabled bool, provider *ProviderRoute) error {
 	root, err := os.OpenRoot(workDir)
 	if err != nil {
 		return err
@@ -167,11 +168,25 @@ func writeWorkerPolicy(workDir string, toolEnabled bool) error {
 	// may be loaded, but built-in shell, file mutation, web, task, and external
 	// directory tools remain denied until a server-side capability gateway is
 	// explicitly wired for a job.
-	policy := `{"permission":{"*":"deny","skill":"allow"}}`
+	permissions := map[string]string{"*": "deny", "skill": "allow"}
 	if toolEnabled {
-		policy = `{"permission":{"*":"deny","skill":"allow","tos_tag_tool":"allow"}}`
+		permissions["tos_tag_tool"] = "allow"
+		permissions["tos_tag_trigger"] = "allow"
 	}
-	_, err = file.Write([]byte(policy))
+	policy := map[string]any{"permission": permissions}
+	if provider != nil {
+		if provider.ID == "" || provider.BaseURL == "" || provider.Token == "" {
+			return ErrUnsafeSpec
+		}
+		policy["provider"] = map[string]any{provider.ID: map[string]any{
+			"options": map[string]any{"baseURL": provider.BaseURL, "apiKey": provider.Token},
+		}}
+	}
+	encoded, err := json.Marshal(policy)
+	if err != nil {
+		return err
+	}
+	_, err = file.Write(encoded)
 	return err
 }
 
@@ -466,7 +481,7 @@ func makeTreeReadOnly(target string) error {
 }
 
 func isForbiddenEnvironment(name string) bool {
-	for _, fragment := range []string{"TOKEN", "SECRET", "PASSWORD", "KEY", "SLACK", "MONGO", "AWS", "GITHUB", "LINEAR"} {
+	for _, fragment := range []string{"TOKEN", "SECRET", "PASSWORD", "KEY", "CREDENTIAL", "SLACK", "MONGO", "AWS", "GITHUB", "LINEAR"} {
 		if strings.Contains(name, fragment) {
 			return true
 		}

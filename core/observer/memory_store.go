@@ -39,6 +39,16 @@ func NewMemoryStore(messageRetention time.Duration, now func() time.Time) *Memor
 }
 
 func (s *MemoryStore) Accept(_ context.Context, envelope types.SlackEnvelope) (Acceptance, error) {
+	return s.accept(envelope, "pending", "pending")
+}
+
+// Import persists user-authorized Slack history as resolved context. Imported
+// history is retrieval material, never a pending ambient trigger.
+func (s *MemoryStore) Import(_ context.Context, envelope types.SlackEnvelope) (Acceptance, error) {
+	return s.accept(envelope, "authorized", "resolved")
+}
+
+func (s *MemoryStore) accept(envelope types.SlackEnvelope, scopeState, decisionState string) (Acceptance, error) {
 	if err := ValidateEnvelope(envelope); err != nil {
 		return Acceptance{}, err
 	}
@@ -72,8 +82,8 @@ func (s *MemoryStore) Accept(_ context.Context, envelope types.SlackEnvelope) (A
 		Subtype:                 envelope.Subtype,
 		Text:                    envelope.Text,
 		MutationTargetTS:        envelope.TargetTS,
-		ScopeState:              "pending",
-		DecisionState:           "pending",
+		ScopeState:              scopeState,
+		DecisionState:           decisionState,
 		Restricted:              envelope.Restricted,
 		IsMention:               envelope.IsMention,
 		OriginTag:               envelope.OriginTag,
@@ -159,6 +169,12 @@ func (s *MemoryStore) applyProjection(envelope types.SlackEnvelope, observation 
 			current.Deleted = false
 			current.Text = envelope.Text
 		}
+		if envelope.UserID != "" {
+			current.AuthorID = envelope.UserID
+		}
+		if envelope.BotID != "" {
+			current.BotID = envelope.BotID
+		}
 		current.Restricted = envelope.Restricted
 		s.messages[key] = current
 		return
@@ -175,6 +191,7 @@ func (s *MemoryStore) applyProjection(envelope types.SlackEnvelope, observation 
 		MessageTS:         messageTS,
 		RootThreadTS:      envelope.RootThreadTS(),
 		AuthorID:          envelope.UserID,
+		BotID:             envelope.BotID,
 		Text:              text,
 		Deleted:           envelope.Kind == types.SlackEventDelete,
 		Restricted:        envelope.Restricted,

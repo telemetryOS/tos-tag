@@ -41,6 +41,7 @@ const (
 	CollectionAdmissionReservations = "admission_reservations"
 	CollectionApprovals             = "tool_approvals"
 	CollectionRoutines              = "routines"
+	CollectionEventSubscriptions    = "event_subscriptions"
 )
 
 type Observation struct {
@@ -87,6 +88,7 @@ type ChannelMessage struct {
 	MessageTS         string        `bson:"message_ts"`
 	RootThreadTS      string        `bson:"root_thread_ts"`
 	AuthorID          string        `bson:"author_id,omitempty"`
+	BotID             string        `bson:"bot_id,omitempty"`
 	Text              string        `bson:"text,omitempty"`
 	Deleted           bool          `bson:"deleted"`
 	Restricted        bool          `bson:"restricted"`
@@ -144,6 +146,7 @@ type Channel struct {
 	MaxResponsesPerHour   int           `bson:"max_responses_per_hour"`
 	MaxConcurrentJobs     int           `bson:"max_concurrent_jobs"`
 	DefaultModelProfile   string        `bson:"default_model_profile,omitempty"`
+	ApproverUserIDs       []string      `bson:"approver_user_ids,omitempty"`
 	MembershipRevision    string        `bson:"membership_revision"`
 	MembershipRefreshedAt time.Time     `bson:"membership_refreshed_at"`
 	CreatedAt             time.Time     `bson:"created_at"`
@@ -238,6 +241,7 @@ type Job struct {
 	SessionID              string        `bson:"session_id"`
 	Generation             int64         `bson:"generation"`
 	ObservationID          string        `bson:"observation_id,omitempty"`
+	RequesterID            string        `bson:"requester_id,omitempty"`
 	IdempotencyKey         string        `bson:"idempotency_key"`
 	Kind                   string        `bson:"kind"`
 	Input                  string        `bson:"input"`
@@ -251,6 +255,8 @@ type Job struct {
 	Lease                  Lease         `bson:"lease"`
 	Result                 any           `bson:"result,omitempty"`
 	FailureReason          string        `bson:"failure_reason,omitempty"`
+	ApprovalID             string        `bson:"approval_id,omitempty"`
+	ApprovedActionHash     string        `bson:"approved_action_hash,omitempty"`
 	AvailableAt            time.Time     `bson:"available_at"`
 	CreatedAt              time.Time     `bson:"created_at"`
 	UpdatedAt              time.Time     `bson:"updated_at"`
@@ -280,6 +286,7 @@ type Delivery struct {
 	TeamID         string        `bson:"team_id"`
 	ChannelID      string        `bson:"channel_id"`
 	ThreadTS       string        `bson:"thread_ts,omitempty"`
+	UpdateTS       string        `bson:"update_ts,omitempty"`
 	Result         any           `bson:"result"`
 	Status         string        `bson:"status"`
 	Attempt        int           `bson:"attempt"`

@@ -13,8 +13,14 @@ import (
 	"github.com/telemetryos/tos-tag/types"
 )
 
+var ErrNotFound = errors.New("approval not found")
+
 type Action struct {
 	OrganizationID string         `json:"organization_id"`
+	JobID          string         `json:"job_id,omitempty"`
+	WorkspaceID    string         `json:"workspace_id,omitempty"`
+	ChannelID      string         `json:"channel_id,omitempty"`
+	ThreadTS       string         `json:"thread_ts,omitempty"`
 	ToolID         string         `json:"tool_id"`
 	ToolVersion    string         `json:"tool_version"`
 	OperationID    string         `json:"operation_id"`
@@ -32,6 +38,8 @@ type Approval struct {
 	Action         Action    `json:"action"`
 	ExpiresAt      time.Time `json:"expires_at"`
 	ApprovedAt     time.Time `json:"approved_at,omitempty"`
+	DeniedBy       string    `json:"denied_by,omitempty"`
+	DeniedAt       time.Time `json:"denied_at,omitempty"`
 	ConsumedAt     time.Time `json:"consumed_at,omitempty"`
 	CleanupAt      time.Time `json:"-"`
 }
@@ -39,7 +47,9 @@ type Approval struct {
 type Repository interface {
 	RequestContext(context.Context, Action, string, time.Duration) (Approval, error)
 	ApproveContext(context.Context, string, string, string) (Approval, error)
+	DenyContext(context.Context, string, string, string) (Approval, error)
 	ConsumeContext(context.Context, string, string, Action) (Approval, error)
+	GetContext(context.Context, string, string) (Approval, error)
 	List(context.Context, string) ([]Approval, error)
 }
 
@@ -71,16 +81,20 @@ func (s *Store) RequestContext(_ context.Context, action Action, requesterID str
 }
 
 func (s *Store) Approve(id, approverID string) (Approval, error) {
+	return s.approve("", id, approverID)
+}
+
+func (s *Store) approve(organizationID, id, approverID string) (Approval, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	approval, ok := s.approvals[id]
-	if !ok {
-		return Approval{}, errors.New("approval not found")
+	if !ok || (organizationID != "" && approval.OrganizationID != organizationID) {
+		return Approval{}, ErrNotFound
 	}
 	if approverID == "" || approverID == approval.RequesterID {
 		return Approval{}, errors.New("independent approver required")
 	}
-	if !approval.ExpiresAt.After(time.Now().UTC()) || !approval.ApprovedAt.IsZero() || !approval.ConsumedAt.IsZero() {
+	if !approval.ExpiresAt.After(time.Now().UTC()) || !approval.ApprovedAt.IsZero() || !approval.DeniedAt.IsZero() || !approval.ConsumedAt.IsZero() {
 		return Approval{}, errors.New("approval is no longer approvable")
 	}
 	approval.ApproverID, approval.ApprovedAt = approverID, time.Now().UTC()
@@ -88,12 +102,30 @@ func (s *Store) Approve(id, approverID string) (Approval, error) {
 	return approval, nil
 }
 
-func (s *Store) ApproveContext(_ context.Context, organizationID, id, approverID string) (Approval, error) {
-	approval, err := s.Approve(id, approverID)
-	if err != nil || approval.OrganizationID != organizationID {
-		return Approval{}, errors.New("approval not found")
+func (s *Store) DenyContext(_ context.Context, organizationID, id, denierID string) (Approval, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	approval, ok := s.approvals[id]
+	if !ok || approval.OrganizationID != organizationID || denierID == "" || denierID == approval.RequesterID || !approval.ExpiresAt.After(time.Now().UTC()) || !approval.ApprovedAt.IsZero() || !approval.DeniedAt.IsZero() || !approval.ConsumedAt.IsZero() {
+		return Approval{}, errors.New("approval is no longer deniable")
+	}
+	approval.DeniedBy, approval.DeniedAt = denierID, time.Now().UTC()
+	s.approvals[id] = approval
+	return approval, nil
+}
+
+func (s *Store) GetContext(_ context.Context, organizationID, id string) (Approval, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	approval, ok := s.approvals[id]
+	if !ok || approval.OrganizationID != organizationID {
+		return Approval{}, ErrNotFound
 	}
 	return approval, nil
+}
+
+func (s *Store) ApproveContext(_ context.Context, organizationID, id, approverID string) (Approval, error) {
+	return s.approve(organizationID, id, approverID)
 }
 
 func (s *Store) Consume(id string, action Action) (Approval, error) {
@@ -104,7 +136,7 @@ func (s *Store) Consume(id string, action Action) (Approval, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	approval, ok := s.approvals[id]
-	if !ok || approval.ApprovedAt.IsZero() || !approval.ConsumedAt.IsZero() || !approval.ExpiresAt.After(time.Now().UTC()) || approval.ActionHash != hash || approval.OrganizationID != action.OrganizationID {
+	if !ok || approval.ApprovedAt.IsZero() || !approval.DeniedAt.IsZero() || !approval.ConsumedAt.IsZero() || !approval.ExpiresAt.After(time.Now().UTC()) || approval.ActionHash != hash || approval.OrganizationID != action.OrganizationID {
 		return Approval{}, errors.New("approval does not authorize these action bytes")
 	}
 	approval.ConsumedAt = time.Now().UTC()

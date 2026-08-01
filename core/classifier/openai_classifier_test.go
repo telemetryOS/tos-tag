@@ -76,6 +76,24 @@ func TestOpenAIClassifierRejectsUnallowlistedRecommendationWithoutLeakingContent
 	}
 }
 
+func TestOpenAIClassifierReportsContentFreeIncompleteReason(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		body := `{"id":"resp_incomplete","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[]}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	client, err := NewOpenAIClassifier(OpenAIOptions{BaseURL: "http://127.0.0.1", APIKey: "secret-key", Model: "test", ReasoningEffort: "max", Timeout: time.Second, MaxOutputTokens: 8192, ReactionEmojis: []string{"eyes"}, AgentProfiles: testProfileRegistry(t), HTTPClient: httpClient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Decide(context.Background(), Target{ObservationID: "obs", Envelope: types.SlackEnvelope{Text: "private-content"}}, types.ContextPackRevision{})
+	if ErrorCode(err) != "response_incomplete_max_output_tokens" {
+		t.Fatalf("incomplete error code = %q", ErrorCode(err))
+	}
+	if strings.Contains(err.Error(), "private-content") || strings.Contains(err.Error(), "secret-key") {
+		t.Fatalf("incomplete error leaked sensitive data: %s", err)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

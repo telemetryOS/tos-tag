@@ -144,8 +144,43 @@ func TestCustomToolIsReadOnlyAndNarrowlyAllowed(t *testing.T) {
 		t.Fatalf("tool info=%v err=%v", info, err)
 	}
 	policy, err := os.ReadFile(filepath.Join(workspace.WorkDir, "opencode.json"))
-	if err != nil || !strings.Contains(string(policy), `"tos_tag_tool":"allow"`) || !strings.Contains(string(policy), `"*":"deny"`) {
+	if err != nil || !strings.Contains(string(policy), `"tos_tag_tool":"allow"`) || !strings.Contains(string(policy), `"tos_tag_trigger":"allow"`) || !strings.Contains(string(policy), `"*":"deny"`) {
 		t.Fatalf("policy=%s err=%v", policy, err)
+	}
+}
+
+func TestWorkerReceivesOnlyProviderGatewayCapability(t *testing.T) {
+	t.Setenv("TOS_TAG_PROVIDER_CREDENTIAL", "provider-secret")
+	manager, _ := NewLocal(t.TempDir(), "/usr/bin:/bin")
+	workspace, err := manager.Provision(context.Background(), Spec{
+		JobID: "j", AttemptID: "a",
+		Command:  []string{"/bin/sh", "-c", `env > "$TOS_TAG_ARTIFACTS/provider-env.txt"; sleep 30`},
+		Provider: &ProviderRoute{ID: "openai", BaseURL: "http://127.0.0.1:43123/v1", Token: "attempt-capability"}, WallTime: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Terminate(context.Background(), workspace)
+	policy, err := os.ReadFile(filepath.Join(workspace.WorkDir, "opencode.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(policy), "provider-secret") || !strings.Contains(string(policy), "attempt-capability") || !strings.Contains(string(policy), "http://127.0.0.1:43123/v1") {
+		t.Fatal("worker policy does not contain only the provider gateway capability")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		environment, readErr := os.ReadFile(filepath.Join(workspace.ArtifactsDir, "provider-env.txt"))
+		if readErr == nil {
+			if strings.Contains(string(environment), "TOS_TAG_PROVIDER_CREDENTIAL") || strings.Contains(string(environment), "provider-secret") {
+				t.Fatal("worker inherited the provider credential")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("worker environment artifact unavailable: %v", readErr)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -228,6 +263,9 @@ func TestLocalRejectsHostSecretEnvironmentAndArtifactTraversal(t *testing.T) {
 	}
 	if _, err := manager.Provision(context.Background(), Spec{JobID: "j", AttemptID: "a", Command: []string{"/bin/true"}, Environment: map[string]string{"SLACK_TOKEN": "secret"}, WallTime: time.Second}); !errors.Is(err, ErrUnsafeSpec) {
 		t.Fatalf("expected unsafe spec, got %v", err)
+	}
+	if _, err := manager.Provision(context.Background(), Spec{JobID: "j", AttemptID: "a", Command: []string{"/bin/true"}, Environment: map[string]string{"PROVIDER_CREDENTIAL": "secret"}, WallTime: time.Second}); !errors.Is(err, ErrUnsafeSpec) {
+		t.Fatalf("expected generic credential environment to be rejected, got %v", err)
 	}
 	workspace, err := manager.Provision(context.Background(), Spec{JobID: "j", AttemptID: "a", Command: []string{"/bin/sh", "-c", "sleep 30"}, WallTime: time.Minute})
 	if err != nil {

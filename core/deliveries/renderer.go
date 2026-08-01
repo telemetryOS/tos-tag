@@ -1,11 +1,14 @@
 package deliveries
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/telemetryos/tos-tag/types"
@@ -52,6 +55,19 @@ func (r *Renderer) Render(result types.SlackResult) ([]Payload, error) {
 				last.Text += "\n"
 			}
 			last.Text += fallback
+		}
+	}
+	appendBlockGroup := func(blocks []map[string]any, fallback string) {
+		last := &payloads[len(payloads)-1]
+		if len(last.Blocks) > 0 && len(last.Blocks)+len(blocks) > maxBlocksPerMessage {
+			payloads = append(payloads, Payload{})
+		}
+		for blockIndex, block := range blocks {
+			blockFallback := ""
+			if blockIndex == 0 {
+				blockFallback = fallback
+			}
+			appendBlock(block, blockFallback)
 		}
 	}
 
@@ -101,6 +117,39 @@ func (r *Renderer) Render(result types.SlackResult) ([]Payload, error) {
 				"type": "section",
 				"text": map[string]any{"type": "mrkdwn", "text": text},
 			}, segment.Artifact.Name+": "+segment.Artifact.URL)
+		case types.SlackSegmentApproval:
+			if segment.Approval == nil || segment.Text != "" || segment.Table != nil || segment.Artifact != nil || segment.Notice != nil {
+				return nil, fmt.Errorf("%w: segment %d has invalid approval payload", ErrInvalidResult, index)
+			}
+			approval := segment.Approval
+			status := approval.Status
+			if status == "" {
+				status = "pending"
+			}
+			if approval.ID == "" || approval.ActionHash == "" || approval.ToolID == "" || approval.OperationID == "" || approval.Risk == "" || approval.Destination == "" || (status == "pending" && !approval.ExpiresAt.After(time.Now().UTC())) || (status != "pending" && status != "approved" && status != "denied" && status != "expired") || (status != "pending" && approval.ResolvedAt.IsZero()) {
+				return nil, fmt.Errorf("%w: segment %d has incomplete approval payload", ErrInvalidResult, index)
+			}
+			actionJSON, err := json.Marshal(map[string]any{"tool_id": approval.ToolID, "operation_id": approval.OperationID, "arguments": approval.Arguments, "destination": approval.Destination, "risk": approval.Risk, "action_hash": approval.ActionHash})
+			if err != nil || len(actionJSON) > 1800 {
+				return nil, fmt.Errorf("%w: segment %d approval action is not renderable", ErrInvalidResult, index)
+			}
+			fallback := fmt.Sprintf("Approval required for %s.%s (%s).", approval.ToolID, approval.OperationID, approval.Risk)
+			if status == "approved" {
+				fallback = fmt.Sprintf("Action approved: %s.%s (%s).", approval.ToolID, approval.OperationID, approval.Risk)
+			} else if status == "denied" {
+				fallback = fmt.Sprintf("Action denied: %s.%s (%s).", approval.ToolID, approval.OperationID, approval.Risk)
+			} else if status == "expired" {
+				fallback = fmt.Sprintf("Approval expired: %s.%s (%s).", approval.ToolID, approval.OperationID, approval.Risk)
+			}
+			appendBlockGroup(renderApprovalBlocks(approval), fallback)
+		case types.SlackSegmentNotice:
+			if segment.Notice == nil || segment.Text != "" || segment.Table != nil || segment.Artifact != nil || segment.Approval != nil {
+				return nil, fmt.Errorf("%w: segment %d has invalid notice payload", ErrInvalidResult, index)
+			}
+			if err := validateNotice(*segment.Notice); err != nil {
+				return nil, fmt.Errorf("segment %d: %w", index, err)
+			}
+			appendBlockGroup(renderNoticeBlocks(segment.Notice, index), segment.Notice.Title+": "+stripFormatting(segment.Notice.Message))
 		default:
 			return nil, fmt.Errorf("%w: segment %d has unknown kind %q", ErrInvalidResult, index, segment.Kind)
 		}
@@ -111,6 +160,203 @@ func (r *Renderer) Render(result types.SlackResult) ([]Payload, error) {
 		}
 	}
 	return payloads, nil
+}
+
+func renderApprovalBlocks(approval *types.SlackApproval) []map[string]any {
+	action := approval.ToolID + "." + approval.OperationID
+	status := approval.Status
+	if status == "" {
+		status = "pending"
+	}
+	blocks := []map[string]any{
+		{
+			"type":     "header",
+			"block_id": "tos_tag_approval_header/" + approval.ID,
+			"text":     map[string]any{"type": "plain_text", "text": titleForApprovalStatus(status), "emoji": true},
+		},
+		map[string]any{
+			"type":     "section",
+			"block_id": "tos_tag_approval_summary/" + approval.ID,
+			"text":     map[string]any{"type": "mrkdwn", "text": approvalSubtitle(approval, status)},
+			"fields": []any{
+				map[string]any{"type": "mrkdwn", "text": "*Action*\n`" + approvalInlineCode(action) + "`"},
+				map[string]any{"type": "mrkdwn", "text": "*Risk*\n`" + approvalInlineCode(approval.Risk) + "`"},
+				map[string]any{"type": "mrkdwn", "text": "*Destination*\n`" + approvalInlineCode(approval.Destination) + "`"},
+			},
+		},
+	}
+	blocks = append(blocks, approvalArgumentBlocks(approval)...)
+	blocks = append(blocks, map[string]any{
+		"type":     "context",
+		"block_id": "tos_tag_approval_context/" + approval.ID,
+		"elements": []any{
+			map[string]any{"type": "plain_text", "text": approvalContext(approval, status)},
+		},
+	})
+	if status == "pending" {
+		blocks = append(blocks, map[string]any{
+			"type":     "actions",
+			"block_id": "tos_tag_approval_actions/" + approval.ID,
+			"elements": []any{
+				map[string]any{"type": "button", "action_id": "tos_tag_approval_approve", "text": map[string]any{"type": "plain_text", "text": "Approve"}, "style": "primary", "value": approval.ID, "confirm": map[string]any{"title": map[string]any{"type": "plain_text", "text": "Approve action?"}, "text": map[string]any{"type": "mrkdwn", "text": "This authorizes only the exact action summarized in the approval card."}, "confirm": map[string]any{"type": "plain_text", "text": "Approve"}, "deny": map[string]any{"type": "plain_text", "text": "Cancel"}}},
+				map[string]any{"type": "button", "action_id": "tos_tag_approval_deny", "text": map[string]any{"type": "plain_text", "text": "Deny"}, "style": "danger", "value": approval.ID},
+			},
+		})
+	}
+	return blocks
+}
+
+func titleForApprovalStatus(status string) string {
+	title := "Approval required"
+	if status == "approved" {
+		title = "Action approved"
+	} else if status == "denied" {
+		title = "Action denied"
+	} else if status == "expired" {
+		title = "Approval expired"
+	}
+	return title
+}
+
+func approvalSubtitle(approval *types.SlackApproval, status string) string {
+	if status == "approved" {
+		return "A fresh agent worker is resuming from this exact action."
+	}
+	if status == "denied" {
+		return "The suspended request was cancelled."
+	}
+	if status == "expired" {
+		return "The approval window closed and the suspended request was cancelled."
+	}
+	return "Review this " + strings.ToLower(humanizeApprovalName(approval.Risk)) + " action before it runs."
+}
+
+func approvalContext(approval *types.SlackApproval, status string) string {
+	label := "Expires " + approval.ExpiresAt.UTC().Format(time.RFC3339)
+	if status == "approved" {
+		label = "Approved " + approval.ResolvedAt.UTC().Format(time.RFC3339)
+	} else if status == "denied" {
+		label = "Denied " + approval.ResolvedAt.UTC().Format(time.RFC3339)
+	} else if status == "expired" {
+		label = "Expired " + approval.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	return label + "  •  Exact-action fingerprint " + approvalFingerprint(approval.ActionHash)
+}
+
+func validateNotice(notice types.SlackNotice) error {
+	switch notice.Tone {
+	case "info", "success", "warning", "error":
+	default:
+		return fmt.Errorf("%w: invalid notice tone", ErrInvalidResult)
+	}
+	icon := map[string]string{"info": "ℹ️", "success": "✅", "warning": "⚠️", "error": "⚠️"}[notice.Tone]
+	if strings.TrimSpace(notice.Title) == "" || utf8.RuneCountInString(icon+" "+notice.Title) > 150 || strings.TrimSpace(notice.Message) == "" || utf8.RuneCountInString(notice.Message) > 200 || utf8.RuneCountInString(notice.Context) > 200 {
+		return fmt.Errorf("%w: invalid notice content", ErrInvalidResult)
+	}
+	if err := validateMRKDWN(notice.Message); err != nil {
+		return err
+	}
+	return nil
+}
+
+func renderNoticeBlocks(notice *types.SlackNotice, index int) []map[string]any {
+	icon := map[string]string{"info": "ℹ️", "success": "✅", "warning": "⚠️", "error": "⚠️"}[notice.Tone]
+	blocks := []map[string]any{
+		{
+			"type":     "header",
+			"block_id": fmt.Sprintf("tos_tag_notice_header/%d", index),
+			"text":     map[string]any{"type": "plain_text", "text": icon + " " + notice.Title, "emoji": true},
+		},
+		{
+			"type":     "section",
+			"block_id": fmt.Sprintf("tos_tag_notice_message/%d", index),
+			"text":     map[string]any{"type": "mrkdwn", "text": notice.Message},
+		},
+	}
+	if notice.Context != "" {
+		blocks = append(blocks, map[string]any{
+			"type":     "context",
+			"block_id": fmt.Sprintf("tos_tag_notice_context/%d", index),
+			"elements": []any{map[string]any{"type": "plain_text", "text": notice.Context}},
+		})
+	}
+	return blocks
+}
+
+func approvalArgumentBlocks(approval *types.SlackApproval) []map[string]any {
+	keys := make([]string, 0, len(approval.Arguments))
+	for key := range approval.Arguments {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	fields := make([]any, 0, len(keys))
+	for _, key := range keys {
+		value, _ := approvalValue(approval.Arguments[key])
+		if value == "" {
+			value = "(empty)"
+		}
+		fields = append(fields, map[string]any{
+			"type":  "plain_text",
+			"text":  humanizeApprovalName(key) + "\n" + value,
+			"emoji": true,
+		})
+	}
+	if len(fields) == 0 {
+		return []map[string]any{{
+			"type":     "section",
+			"block_id": "tos_tag_approval_arguments/" + approval.ID + "/0",
+			"text":     map[string]any{"type": "mrkdwn", "text": "*Requested changes*\nNo arguments"},
+		}}
+	}
+	blocks := make([]map[string]any, 0, (len(fields)+9)/10)
+	for start := 0; start < len(fields); start += 10 {
+		end := min(start+10, len(fields))
+		blocks = append(blocks, map[string]any{
+			"type":     "section",
+			"block_id": fmt.Sprintf("tos_tag_approval_arguments/%s/%d", approval.ID, start/10),
+			"text":     map[string]any{"type": "mrkdwn", "text": "*Requested changes*"},
+			"fields":   fields[start:end],
+		})
+	}
+	return blocks
+}
+
+func approvalValue(value any) (string, bool) {
+	if text, ok := value.(string); ok {
+		text = strings.ToValidUTF8(text, "�")
+		return text, len(text) <= 80 && !strings.ContainsAny(text, " \t\r\n")
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "unrenderable value", false
+	}
+	return string(encoded), true
+}
+
+func approvalInlineCode(value string) string {
+	value = strings.ToValidUTF8(value, "�")
+	value = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "`", "'", "\r", " ", "\n", " ").Replace(value)
+	return strings.TrimSpace(value)
+}
+
+func approvalFingerprint(value string) string {
+	const visible = 19
+	if len(value) <= visible {
+		return value
+	}
+	return value[:visible] + "…"
+}
+
+func humanizeApprovalName(value string) string {
+	words := strings.FieldsFunc(strings.TrimSpace(value), func(character rune) bool {
+		return character == '_' || character == '-' || character == '.'
+	})
+	if len(words) == 0 {
+		return "Unknown"
+	}
+	runes := []rune(strings.ToLower(strings.Join(words, " ")))
+	runes[0] = []rune(strings.ToUpper(string(runes[0])))[0]
+	return string(runes)
 }
 
 func validateMRKDWN(text string) error {
@@ -157,7 +403,9 @@ func splitMRKDWN(text string, limit int) ([]string, error) {
 		if newline := strings.LastIndex(prefix, "\n"); newline > limit/2 {
 			cut = utf8.RuneCountInString(prefix[:newline])
 		}
-		chunks = append(chunks, strings.TrimSpace(string(runes[:cut])))
+		if chunk := strings.TrimSpace(string(runes[:cut])); chunk != "" {
+			chunks = append(chunks, chunk)
+		}
 		remaining = strings.TrimSpace(string(runes[cut:]))
 	}
 	if remaining != "" {

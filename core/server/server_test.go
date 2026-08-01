@@ -17,6 +17,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/jobs"
 	"github.com/telemetryos/tos-tag/core/keystore"
 	"github.com/telemetryos/tos-tag/core/slack"
+	"github.com/telemetryos/tos-tag/core/triggers"
 	"github.com/telemetryos/tos-tag/types"
 )
 
@@ -41,6 +42,7 @@ func newTestServer(t *testing.T, authenticated bool) (*Server, *slack.StubIngres
 	srv, err := New(Dependencies{
 		Config: &cfg, Ingress: ingress, Transport: slack.NewStubDelivery(), Jobs: jobs.NewMemoryQueue(nil),
 		Deliveries: deliveries.NewMemoryQueue(nil), Decisions: classifier.NewMemoryDecisionStore(), Version: "test", Audit: auditLog,
+		Triggers: triggers.NewStore(nil),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +183,7 @@ func TestDotRoutesAreRedactedAndManagementPageIsEmbedded(t *testing.T) {
 
 func TestDedicatedManagementPages(t *testing.T) {
 	srv, _ := newTestServer(t, false)
-	pages := []string{"channels", "observations", "decisions", "context", "jobs", "routes", "marketplaces", "tools", "notes", "directives", "keystore", "retention", "audit", "usage"}
+	pages := []string{"channels", "observations", "decisions", "context", "jobs", "routes", "marketplaces", "tools", "approvals", "routines", "triggers", "notes", "directives", "keystore", "retention", "audit", "usage"}
 	for _, page := range pages {
 		response := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/"+page, nil))
@@ -201,5 +203,39 @@ func TestDedicatedManagementPages(t *testing.T) {
 	srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/not-a-page", nil))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("unknown page status = %d", response.Code)
+	}
+}
+
+func TestTriggerSubscriptionAPIIsTenantScopedAndValidated(t *testing.T) {
+	srv, _ := newTestServer(t, false)
+	body := []byte(`{"id":"heartbeat","organization_id":"org-a","workspace_id":"team","channel_id":"channel","session_id":"session","generation":1,"owner_id":"human-admin","kind":"heartbeat","instruction":"Check for work that needs Tag.","interval_seconds":300,"next_run":"2030-01-01T00:00:00Z","classifier_gate":true,"min_confidence":0.8,"enabled":true}`)
+	req := httptest.NewRequest(http.MethodPut, "/admin/api/trigger-subscriptions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-TOS-TAG-CSRF", srv.csrf)
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, req)
+	if response.Code != http.StatusOK {
+		t.Fatalf("put status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/api/trigger-subscriptions", nil))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("missing organization status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/api/trigger-subscriptions?organization_id=org-a", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":"heartbeat"`) {
+		t.Fatalf("list status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	invalid := bytes.Replace(body, []byte(`"classifier_gate":true`), []byte(`"classifier_gate":false`), 1)
+	req = httptest.NewRequest(http.MethodPut, "/admin/api/trigger-subscriptions", bytes.NewReader(invalid))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-TOS-TAG-CSRF", srv.csrf)
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, req)
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("ungated heartbeat status=%d body=%s", response.Code, response.Body.String())
 	}
 }

@@ -61,19 +61,33 @@ integrity findings were corrected and regression-tested. See
   expiry, organization, and an explicit tool-ID allowlist. Tool `SKILL.md`
   instructions are hash-verified and mounted read-only; scripts remain server
   side.
+- A project-local `tos_tag_trigger` capability is injected with the
+  `tag-triggers` skill. Reads are restricted to the current workspace/channel;
+  mutations require the exact approval/resume flow.
 - Durable Mongo approvals show the exact canonical action, require an
-  independent approver for non-read risk, expire, and are consumed once.
+  explicitly allowlisted independent approver for non-read risk, expire, and
+  are consumed once. Authorization is auditable before mutation; denial releases
+  admission, and approval queues a freshly fenced worker with the immutable
+  action hash even when the original attempt was the configured maximum. Slack
+  owns the unforgeable Approve/Deny blocks.
 - Durable Mongo routines reauthorize channel scope at run time, enqueue
   idempotent ordinary jobs, survive restart, and are managed from the UI.
+- Durable Mongo trigger subscriptions expose management and job-scoped APIs.
+  Heartbeats always use the full destination-filtered context pack and direct
+  classifier before optionally enqueuing one idempotent full-agent job.
 - Behavioral-skill marketplace validation and immutable hashes. Executable tool
   bundles are separate, enforce reviewed script hashes and declared risk/ENV/
   argv/time/output contracts, and resolve secrets only inside the exact helper
   subprocess.
 - Response workers automatically combine every validated behavioral skill from
   `telemetryos-automation` in sibling `telemetryos-agent-skills` with every
-  skill from the initially empty `base` plugin in sibling
+  skill, including `tag-triggers`, from the `base` plugin in sibling
   `tag-agent-skills`. Exact plugin selection, flat-name collision checks,
   read-only materialization, and script exclusion fail closed.
+- Local OpenAI response workers receive only a random attempt-scoped capability
+  to a fixed-upstream loopback model gateway. The upstream key remains in the
+  control plane, every call rechecks the live job lease and steering epoch, and
+  teardown revokes the capability.
 - Revisioned channel directives and reviewed source-linked notes.
 - Jobs and deliveries expire no later than their context source boundary and
   are excluded from claims before TTL cleanup.
@@ -88,8 +102,8 @@ integrity findings were corrected and regression-tested. See
 - Multipart Slack delivery checks immutable `tos_tag_delivery` metadata before
   each post, skipping already-accepted parts after a worker crash.
 - The embedded UI supports organization/workspace/channel bootstrap, dynamic
-  model profiles and rules, directives, notes, keystore values, routines, and
-  tool approvals.
+  model profiles and rules, directives, notes, keystore values, routines,
+  trigger subscriptions, and tool approvals.
 
 ## Deliberate implementation boundaries
 
@@ -186,3 +200,72 @@ output, and left the retained job and delivery counts unchanged. A read-only
 Slack inventory found no private or Slack Connect channel in which the bot is a
 member, so those audience tests remain blocked on a dedicated test-channel
 invitation rather than broadening enrollment or access automatically.
+
+The user-authorized cross-channel context path is now implemented behind
+`TAG__SLACK__CONTEXT_SYNC_ENABLED`. The separately consented User OAuth Token
+enumerates public/private/DM/MPIM conversations and performs a bounded, fair
+recent root/thread history import. Imported rows are durable resolved context
+and cannot enter the decision queue. Existing policy survives every membership
+refresh, explicitly unenrolled channels remain excluded, new all-observable
+channels start in `observe`, and bot-authored history is labeled
+`agent_output_unverified`. Unknown user-event content is discarded before
+persistence while the organization remains in `allowlist`.
+
+The checked-in Slack CLI hook validates the YAML manifest, and the development
+app manifest was updated successfully with matching user-event subscriptions;
+the post-update manifest diff is empty. A live User OAuth smoke initially
+enumerated 377 visible conversations
+but authorized history reads for exactly one: the already-enrolled public
+`#tos-tag`. It imported 49 callbacks in 2.79 seconds (31 idempotent duplicates
+and 18 new resolved observations), produced no pending decision, and preserved
+the channel's `observe` mode plus `chatgpt-luna-max` route. One real user event
+from a non-enrolled channel was normalized, excluded before
+content persistence, and acknowledged in 4 ms; the transport now reports that
+path explicitly instead of mislabeling it as durable acceptance.
+
+The operator then explicitly approved changing local `org-tos-tag-dev` to
+`all_observable_channels`. The exact compare-and-set changed one organization
+row and preserved the disabled kill switch. Discovery registered all 377
+user-visible conversations as enrolled `observe` policies while preserving the
+existing `#tos-tag` policy. The first broad history pass exposed Slack's
+sustained `conversations.history` rate limit. The adapter now honors bounded
+`Retry-After` responses, completes authorization discovery before ingress, and
+runs idempotent history backfill concurrently with live Socket Mode so slow
+history cannot create an event-capture gap. Slack output remains limited to
+`#tos-tag`. The final live pass completed across all 377 registered
+conversations in 285.6 seconds, processing 568 messages and skipping exactly
+one stale conversation. The live pass found that stale DM conversation because
+Slack listed but returned `channel_not_found` when fetched. Backfill now logs
+and skips only explicit stale/inaccessible channel or thread errors, while
+authentication and scope failures remain terminal. A real shadow probe in
+public `#tos-tag` then produced a
+7,615-token context pack with 237 sources across 21 public channels, including
+20 cross-channel sources and zero sources from any restricted policy. The
+direct Luna classifier completed in 2.67 seconds, selected `silent` with 1.0
+confidence, and the observe-only policy produced no Slack reaction or reply.
+That public-target pack contained zero restricted sources after restricted
+private-channel, DM, and MPIM history had already been ingested, providing live
+evidence that private context does not cross into a public destination.
+The live deployment also pins a new hard output-channel allowlist to the exact
+`#tos-tag` channel ID; non-allowlisted channels are forced to observe before job
+admission and independently rejected again at delivery.
+
+A final end-to-end Slack pass exercised a direct mention, acknowledgement
+reaction, threaded agent response, native table and rich formatting, active
+thread context recall, ambient silence, duplicate callback suppression, and a
+real tool write that suspended for approval. It exposed two approval-card
+payloads that Slack rejected: the first used a non-Block-Kit `container`, and
+the second nested `rich_text` where the live API did not accept it. Approval
+and notice rendering now use only live-accepted standard Block Kit
+header/section/context/actions blocks; the exact five-block approval card was
+accepted both by an isolated Web API probe and by the real OpenCode/tool bridge
+path. The final agent-generated card arrived in its request thread with the
+exact action, destination, sorted requested changes, expiry, shortened action
+fingerprint, and Approve/Deny controls. Failed test approvals expired and
+released their admission slots before the successful retry. Expired cards now
+update in place to a non-actionable `Approval expired` state instead of leaving
+stale buttons behind. Slack API error codes and approval cancel/resume
+reconciliation are now logged explicitly.
+Post-fix `go test ./...`, `go test -race ./...`, `go vet ./...`, the 10/10
+behavioral eval, gosec, and govulncheck all pass; govulncheck reports no called
+vulnerabilities.

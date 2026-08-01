@@ -19,6 +19,7 @@ type ContextCandidate struct {
 	OrganizationID  string           `json:"organization_id"`
 	ChannelID       string           `json:"channel_id,omitempty"`
 	Partition       ContextPartition `json:"partition"`
+	Provenance      string           `json:"provenance"`
 	Text            string           `json:"text"`
 	Priority        int              `json:"priority"`
 	ObservedAt      time.Time        `json:"observed_at"`
@@ -32,6 +33,7 @@ type ContextSource struct {
 	Version         int64            `json:"version"`
 	ChannelID       string           `json:"channel_id,omitempty"`
 	Partition       ContextPartition `json:"partition"`
+	Provenance      string           `json:"provenance"`
 	TokenCount      int              `json:"token_count"`
 	DisclosureClass DisclosureClass  `json:"disclosure_class"`
 	Text            string           `json:"text"`

@@ -179,10 +179,23 @@ func (o *OpenCode) Events(ctx context.Context, sessionID string) (<-chan Event, 
 					event.Data = map[string]any{"text": delta, "part_id": partID, "upstream_type": "message.part.delta"}
 				}
 			}
+			terminalStep := isTerminalStep(event)
 			select {
 			case out <- event:
 			case <-ctx.Done():
 				errs <- ctx.Err()
+				return
+			}
+			// OpenCode 1.18 can continue its agent loop after emitting an
+			// authoritative step-finish reason of "stop" for Responses API
+			// models. Treat that protocol event as idle so a valid final answer
+			// cannot be duplicated or run until the worker timeout.
+			if terminalStep {
+				select {
+				case out <- Event{ID: types.NewID("event"), SessionID: sessionID, Type: "session.idle", CreatedAt: time.Now().UTC()}:
+				case <-ctx.Done():
+					errs <- ctx.Err()
+				}
 				return
 			}
 		}
@@ -191,6 +204,19 @@ func (o *OpenCode) Events(ctx context.Context, sessionID string) (<-chan Event, 
 		}
 	}()
 	return out, errs
+}
+
+func isTerminalStep(event Event) bool {
+	if event.Type != "message.part.updated" {
+		return false
+	}
+	part, ok := event.Data["part"].(map[string]any)
+	if !ok {
+		return false
+	}
+	kind, _ := part["type"].(string)
+	reason, _ := part["reason"].(string)
+	return kind == "step-finish" && reason == "stop"
 }
 
 func openCodeSessionError(data map[string]any) error {

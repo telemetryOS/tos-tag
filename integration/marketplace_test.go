@@ -44,10 +44,10 @@ func TestConfiguredPluginPairWhenAvailable(t *testing.T) {
 		t.Fatalf("headless skills=%d err=%v", len(headless), err)
 	}
 	base, err := marketplace.LoadPlugin(baseRoot, filepath.Join(".claude-plugin", "marketplace.json"), "base")
-	if err != nil || len(base) != 0 {
+	if err != nil || len(base) != 1 || base[0].Name != "tag-triggers" {
 		t.Fatalf("base skills=%d err=%v", len(base), err)
 	}
-	for _, snapshot := range headless {
+	for _, snapshot := range append(headless, base...) {
 		if strings.Contains(snapshot.Name, "/") {
 			t.Fatalf("OpenCode skill name is not flat: %s", snapshot.Name)
 		}

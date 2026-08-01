@@ -57,3 +57,39 @@ func TestChannelPolicyValidation(t *testing.T) {
 		t.Fatal("invalid mode accepted")
 	}
 }
+
+func TestUpsertContextChannelPreservesOperatorPolicyAndNeverUnrestricts(t *testing.T) {
+	store := NewMemory()
+	now := time.Now().UTC()
+	existing := ChannelPolicy{
+		OrganizationID: "org", TeamID: "team", ChannelID: "tos-tag", Name: "old",
+		Enrolled: false, Restricted: true, ParticipationMode: types.ModeProactive,
+		KillSwitch: true, Cooldown: time.Minute, MaxResponsesPerHour: 2, MaxConcurrentJobs: 3,
+		DefaultModelProfile: "custom", ApproverUserIDs: []string{"U_OPERATOR"}, MembershipRevision: "old", MembershipRefreshedAt: now.Add(-time.Hour),
+	}
+	if _, err := store.PutChannel(context.Background(), existing); err != nil {
+		t.Fatal(err)
+	}
+	refreshed, err := store.UpsertContextChannel(context.Background(), ChannelPolicy{
+		OrganizationID: "org", TeamID: "team", ChannelID: "tos-tag", Name: "renamed",
+		Enrolled: true, Restricted: false, ParticipationMode: types.ModeObserve,
+		Cooldown: 30 * time.Second, MaxResponsesPerHour: 6, MaxConcurrentJobs: 1,
+		DefaultModelProfile: "default", MembershipRevision: "slack-user-context/v1", MembershipRefreshedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.Enrolled || !refreshed.Restricted || refreshed.ParticipationMode != types.ModeProactive || !refreshed.KillSwitch || refreshed.Cooldown != time.Minute || refreshed.MaxResponsesPerHour != 2 || refreshed.MaxConcurrentJobs != 3 || refreshed.DefaultModelProfile != "custom" || len(refreshed.ApproverUserIDs) != 1 || refreshed.ApproverUserIDs[0] != "U_OPERATOR" {
+		t.Fatalf("context refresh widened operator policy: %#v", refreshed)
+	}
+	if refreshed.Name != "renamed" || refreshed.MembershipRevision != "slack-user-context/v1" || !refreshed.MembershipRefreshedAt.Equal(now) {
+		t.Fatalf("context metadata was not refreshed: %#v", refreshed)
+	}
+}
+
+func TestChannelPolicyRejectsDuplicateApprovers(t *testing.T) {
+	err := ValidateChannel(ChannelPolicy{OrganizationID: "o", TeamID: "t", ChannelID: "c", ParticipationMode: types.ModeObserve, ApproverUserIDs: []string{"U1", "U1"}, MembershipRevision: "m", MembershipRefreshedAt: time.Now(), MaxResponsesPerHour: 1, MaxConcurrentJobs: 1})
+	if err == nil {
+		t.Fatal("duplicate approvers accepted")
+	}
+}

@@ -24,6 +24,7 @@ type JobSessionSpec struct {
 	OrganizationID string
 	WorkspaceID    string
 	ChannelID      string
+	ThreadTS       string
 	JobID          string
 	LeaseToken     string
 	SteeringEpoch  int64

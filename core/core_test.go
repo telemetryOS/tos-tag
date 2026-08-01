@@ -59,10 +59,17 @@ func TestConfiguredBehavioralPluginsAreAutomaticallyInjected(t *testing.T) {
 	if len(available) < 10 || len(injected) != len(available) {
 		t.Fatalf("available=%d injected=%d", len(available), len(injected))
 	}
+	foundTagTriggers := false
 	for _, snapshot := range injected {
-		if snapshot.MarketplaceID != "telemetryos/telemetryos-automation" {
+		if snapshot.MarketplaceID != "telemetryos/telemetryos-automation" && snapshot.MarketplaceID != "tos-tag/base" {
 			t.Fatalf("unexpected automatically injected source: %#v", snapshot)
 		}
+		if snapshot.MarketplaceID == "tos-tag/base" && snapshot.Name == "tag-triggers" {
+			foundTagTriggers = true
+		}
+	}
+	if !foundTagTriggers {
+		t.Fatal("tag-triggers was not automatically injected from the base plugin")
 	}
 
 	cfg.BasePlugin = "missing"

@@ -29,6 +29,24 @@ func TestHardMentionSurvivesShadowMode(t *testing.T) {
 	}
 }
 
+func TestActiveThreadSocialAcknowledgementDoesNotStartAgent(t *testing.T) {
+	got := target("Thanks!")
+	got.ActiveThread = true
+	result := newService(t, true).Decide(context.Background(), got, types.ContextPackRevision{})
+	if result.Effective.Outcome != types.OutcomeSilent || result.Effective.ReasonCodes[0] != "thread.social_acknowledgement" || result.Shadowed {
+		t.Fatalf("social acknowledgement started work: %#v", result)
+	}
+}
+
+func TestActiveThreadActionStillStartsAgent(t *testing.T) {
+	got := target("Yes, please update the configuration now.")
+	got.ActiveThread = true
+	result := newService(t, true).Decide(context.Background(), got, types.ContextPackRevision{})
+	if result.Effective.Outcome != types.OutcomeReplyInThread || !result.Effective.RequiresFullAgent {
+		t.Fatalf("actionable thread reply was suppressed: %#v", result)
+	}
+}
+
 func TestSelfMessageAndKillSwitchSuppressBeforeClassifier(t *testing.T) {
 	for name, mutate := range map[string]func(*Target){
 		"self": func(target *Target) { target.SelfAuthored = true },

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/approvals"
 	"github.com/telemetryos/tos-tag/core/audit"
 	"github.com/telemetryos/tos-tag/core/jobs"
+	"github.com/telemetryos/tos-tag/core/triggers"
 	"github.com/telemetryos/tos-tag/types"
 )
 
@@ -22,6 +24,7 @@ type JobScope struct {
 	OrganizationID string
 	WorkspaceID    string
 	ChannelID      string
+	ThreadTS       string
 	JobID          string
 	AttemptID      string
 	LeaseToken     string
@@ -31,15 +34,20 @@ type JobScope struct {
 }
 
 type Access struct {
-	Endpoint   string
-	Capability string
+	Endpoint        string
+	TriggerEndpoint string
+	Capability      string
 }
 
 type Bridge struct {
-	gateway   Gateway
-	jobs      jobs.Queue
-	approvals approvals.Repository
-	audit     audit.Appender
+	gateway             Gateway
+	jobs                jobs.Queue
+	approvals           approvals.Repository
+	audit               audit.Appender
+	approvalCoordinator interface {
+		SuspendAndNotify(context.Context, approvals.RequestScope, approvals.Approval) error
+	}
+	triggers triggers.Repository
 
 	mu       sync.RWMutex
 	scopes   map[string]JobScope
@@ -47,11 +55,23 @@ type Bridge struct {
 	server   *http.Server
 }
 
-func NewBridge(gateway Gateway, queue jobs.Queue, approvalStore approvals.Repository, auditAppender audit.Appender) (*Bridge, error) {
-	if gateway.Registry == nil || gateway.Secrets == nil || !gateway.Executor.Enabled || queue == nil || approvalStore == nil || auditAppender == nil {
-		return nil, errors.New("tool bridge requires an enabled gateway, jobs, approvals, and audit")
+func (b *Bridge) SetTriggerRepository(repository triggers.Repository) { b.triggers = repository }
+
+func NewBridge(gateway Gateway, queue jobs.Queue, approvalStore approvals.Repository, auditAppender audit.Appender, coordinators ...interface {
+	SuspendAndNotify(context.Context, approvals.RequestScope, approvals.Approval) error
+}) (*Bridge, error) {
+	if queue == nil || approvalStore == nil || auditAppender == nil {
+		return nil, errors.New("tool bridge requires jobs, approvals, and audit")
 	}
-	return &Bridge{gateway: gateway, jobs: queue, approvals: approvalStore, audit: auditAppender, scopes: make(map[string]JobScope)}, nil
+	marketplaceConfigured := gateway.Registry != nil || gateway.Secrets != nil || gateway.Executor.Enabled
+	if marketplaceConfigured && (gateway.Registry == nil || gateway.Secrets == nil || !gateway.Executor.Enabled) {
+		return nil, errors.New("marketplace tool gateway configuration is incomplete")
+	}
+	bridge := &Bridge{gateway: gateway, jobs: queue, approvals: approvalStore, audit: auditAppender, scopes: make(map[string]JobScope)}
+	if len(coordinators) > 0 {
+		bridge.approvalCoordinator = coordinators[0]
+	}
+	return bridge, nil
 }
 
 func (b *Bridge) Start() error {
@@ -95,10 +115,10 @@ func (b *Bridge) Register(scope JobScope) (Access, error) {
 		b.mu.Unlock()
 		return Access{}, errors.New("tool bridge is not started")
 	}
-	endpoint := "http://" + b.listener.Addr().String() + "/execute"
+	baseURL := "http://" + b.listener.Addr().String()
 	b.scopes[capability] = scope
 	b.mu.Unlock()
-	return Access{Endpoint: endpoint, Capability: capability}, nil
+	return Access{Endpoint: baseURL + "/execute", TriggerEndpoint: baseURL + "/trigger-subscriptions", Capability: capability}, nil
 }
 
 func (b *Bridge) RevokeAttempt(_ context.Context, attemptID string) error {
@@ -121,10 +141,18 @@ type bridgeRequest struct {
 }
 
 func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/trigger-subscriptions" {
+		b.serveTriggerSubscriptions(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != http.MethodPost {
 		writeBridge(w, http.StatusMethodNotAllowed, map[string]any{"error": "method_not_allowed"})
+		return
+	}
+	if b.gateway.Registry == nil || b.gateway.Secrets == nil || !b.gateway.Executor.Enabled {
+		writeBridge(w, http.StatusNotFound, map[string]any{"error": "marketplace_tools_disabled"})
 		return
 	}
 	capability := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -158,18 +186,25 @@ func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
 		writeBridge(w, http.StatusForbidden, map[string]any{"error": "tool_not_admitted"})
 		return
 	}
-	action := approvals.Action{OrganizationID: scope.OrganizationID, ToolID: bundle.Manifest.ID, ToolVersion: bundle.Manifest.Version, OperationID: operation.ID, Arguments: map[string]any{"argv": input.Arguments, "secret_references": input.SecretReferences}, Destination: scope.WorkspaceID + "/" + scope.ChannelID, Risk: operation.Risk}
+	action := approvals.Action{OrganizationID: scope.OrganizationID, JobID: scope.JobID, WorkspaceID: scope.WorkspaceID, ChannelID: scope.ChannelID, ThreadTS: scope.ThreadTS, ToolID: bundle.Manifest.ID, ToolVersion: bundle.Manifest.Version, OperationID: operation.ID, Arguments: map[string]any{"argv": input.Arguments, "secret_references": input.SecretReferences}, Destination: scope.WorkspaceID + "/" + scope.ChannelID, Risk: operation.Risk}
 	if operation.Risk != "read" {
 		if input.ApprovalID == "" {
-			approval, err := b.approvals.RequestContext(r.Context(), action, "agent:"+scope.JobID, 30*time.Minute)
+			requesterID := b.approvalRequester(r.Context(), scope)
+			approval, err := b.approvals.RequestContext(r.Context(), action, requesterID, approvalTTL(scope))
 			if err != nil {
 				writeBridge(w, http.StatusInternalServerError, map[string]any{"error": "approval_unavailable"})
 				return
 			}
 			actionBytes, _ := json.Marshal(action)
-			if _, err := b.audit.Append(r.Context(), audit.AppendRequest{OrganizationID: scope.OrganizationID, Type: "tool.approval.requested", ActorID: "agent:" + scope.JobID, ResourceID: approval.ID, RetentionEpoch: time.Now().UTC().Format("2006-01"), IdempotencyKey: "tool-approval/" + approval.ID, Metadata: map[string]any{"tool_id": input.ToolID, "operation_id": input.OperationID, "risk": operation.Risk}, Content: actionBytes}); err != nil {
+			if _, err := b.audit.Append(r.Context(), audit.AppendRequest{OrganizationID: scope.OrganizationID, Type: "tool.approval.requested", ActorID: requesterID, ResourceID: approval.ID, RetentionEpoch: time.Now().UTC().Format("2006-01"), IdempotencyKey: "tool-approval/" + approval.ID, Metadata: map[string]any{"tool_id": input.ToolID, "operation_id": input.OperationID, "risk": operation.Risk}, Content: actionBytes}); err != nil {
 				writeBridge(w, http.StatusServiceUnavailable, map[string]any{"error": "audit_unavailable"})
 				return
+			}
+			if b.approvalCoordinator != nil {
+				if err := b.approvalCoordinator.SuspendAndNotify(r.Context(), approvals.RequestScope{JobID: jobsID(scope.JobID), LeaseToken: scope.LeaseToken, WorkspaceID: scope.WorkspaceID, ChannelID: scope.ChannelID, ThreadTS: scope.ThreadTS}, approval); err != nil {
+					writeBridge(w, http.StatusServiceUnavailable, map[string]any{"error": "approval_delivery_unavailable"})
+					return
+				}
 			}
 			writeBridge(w, http.StatusConflict, map[string]any{"error": "approval_required", "approval_id": approval.ID, "expires_at": approval.ExpiresAt})
 			return
@@ -197,6 +232,173 @@ func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
 	writeBridge(w, http.StatusOK, result)
 }
 
+type triggerSubscriptionRequest struct {
+	Operation       string  `json:"operation"`
+	ID              string  `json:"id,omitempty"`
+	Instruction     string  `json:"instruction,omitempty"`
+	IntervalSeconds int64   `json:"interval_seconds,omitempty"`
+	NextRun         string  `json:"next_run,omitempty"`
+	MinConfidence   float64 `json:"min_confidence,omitempty"`
+	Enabled         *bool   `json:"enabled,omitempty"`
+	RootThreadTS    string  `json:"root_thread_ts,omitempty"`
+	ApprovalID      string  `json:"approval_id,omitempty"`
+}
+
+func (b *Bridge) serveTriggerSubscriptions(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method != http.MethodPost {
+		writeBridge(w, http.StatusMethodNotAllowed, map[string]any{"error": "method_not_allowed"})
+		return
+	}
+	if b.triggers == nil {
+		writeBridge(w, http.StatusNotFound, map[string]any{"error": "trigger_subscriptions_disabled"})
+		return
+	}
+	capability := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	b.mu.RLock()
+	scope, ok := b.scopes[capability]
+	b.mu.RUnlock()
+	if !ok || capability == "" {
+		writeBridge(w, http.StatusUnauthorized, map[string]any{"error": "capability_invalid"})
+		return
+	}
+	if err := b.authorize(r.Context(), scope); err != nil {
+		_ = b.RevokeAttempt(r.Context(), scope.AttemptID)
+		writeBridge(w, http.StatusForbidden, map[string]any{"error": "execution_revoked"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var input triggerSubscriptionRequest
+	if err := decoder.Decode(&input); err != nil {
+		writeBridge(w, http.StatusBadRequest, map[string]any{"error": "invalid_request"})
+		return
+	}
+	switch input.Operation {
+	case "list":
+		values, err := b.triggers.List(r.Context(), scope.OrganizationID)
+		if err != nil {
+			writeBridge(w, http.StatusServiceUnavailable, map[string]any{"error": "query_failed"})
+			return
+		}
+		filtered := make([]triggers.Subscription, 0, len(values))
+		for _, value := range values {
+			if value.WorkspaceID == scope.WorkspaceID && value.ChannelID == scope.ChannelID {
+				filtered = append(filtered, value)
+			}
+		}
+		writeBridge(w, http.StatusOK, map[string]any{"subscriptions": filtered})
+		return
+	case "get":
+		value, err := b.triggers.GetContext(r.Context(), scope.OrganizationID, input.ID)
+		if err != nil || value.WorkspaceID != scope.WorkspaceID || value.ChannelID != scope.ChannelID {
+			writeBridge(w, http.StatusNotFound, map[string]any{"error": "trigger_subscription_not_found"})
+			return
+		}
+		writeBridge(w, http.StatusOK, value)
+		return
+	case "put", "disable":
+	default:
+		writeBridge(w, http.StatusBadRequest, map[string]any{"error": "unsupported_operation"})
+		return
+	}
+	if input.ID == "" {
+		writeBridge(w, http.StatusBadRequest, map[string]any{"error": "id_required"})
+		return
+	}
+	var pendingSubscription triggers.Subscription
+	if input.Operation == "put" {
+		if existing, getErr := b.triggers.GetContext(r.Context(), scope.OrganizationID, input.ID); getErr == nil && (existing.WorkspaceID != scope.WorkspaceID || existing.ChannelID != scope.ChannelID) {
+			writeBridge(w, http.StatusForbidden, map[string]any{"error": "trigger_subscription_scope_denied"})
+			return
+		}
+		job, err := b.jobs.Get(r.Context(), jobsID(scope.JobID))
+		if err != nil {
+			writeBridge(w, http.StatusForbidden, map[string]any{"error": "execution_revoked"})
+			return
+		}
+		interval := time.Duration(input.IntervalSeconds) * time.Second
+		nextRun := time.Now().UTC().Add(interval)
+		if input.NextRun != "" {
+			parsed, parseErr := time.Parse(time.RFC3339, input.NextRun)
+			if parseErr != nil {
+				writeBridge(w, http.StatusBadRequest, map[string]any{"error": "invalid_next_run"})
+				return
+			}
+			nextRun = parsed.UTC()
+		}
+		enabled := true
+		if input.Enabled != nil {
+			enabled = *input.Enabled
+		}
+		rootThreadTS := input.RootThreadTS
+		if rootThreadTS == "" {
+			rootThreadTS = scope.ThreadTS
+		}
+		pendingSubscription = triggers.Subscription{ID: input.ID, OrganizationID: scope.OrganizationID, WorkspaceID: scope.WorkspaceID, ChannelID: scope.ChannelID, RootThreadTS: rootThreadTS, SessionID: job.SessionID, Generation: job.Generation, OwnerID: b.approvalRequester(r.Context(), scope), Kind: triggers.KindHeartbeat, Instruction: input.Instruction, Interval: interval, NextRun: nextRun, ClassifierGate: true, MinConfidence: input.MinConfidence, Enabled: enabled}
+		if err := triggers.Validate(pendingSubscription); err != nil {
+			writeBridge(w, http.StatusUnprocessableEntity, map[string]any{"error": "invalid_trigger_subscription"})
+			return
+		}
+	}
+	actionArguments := map[string]any{"id": input.ID, "instruction": input.Instruction, "interval_seconds": input.IntervalSeconds, "next_run": input.NextRun, "min_confidence": input.MinConfidence, "root_thread_ts": input.RootThreadTS}
+	if input.Enabled != nil {
+		actionArguments["enabled"] = *input.Enabled
+	}
+	action := approvals.Action{OrganizationID: scope.OrganizationID, JobID: scope.JobID, WorkspaceID: scope.WorkspaceID, ChannelID: scope.ChannelID, ThreadTS: scope.ThreadTS, ToolID: "tos-tag-triggers", ToolVersion: "v1", OperationID: input.Operation, Arguments: actionArguments, Destination: scope.WorkspaceID + "/" + scope.ChannelID, Risk: "write"}
+	if input.ApprovalID == "" {
+		requesterID := b.approvalRequester(r.Context(), scope)
+		approval, err := b.approvals.RequestContext(r.Context(), action, requesterID, approvalTTL(scope))
+		if err != nil {
+			writeBridge(w, http.StatusInternalServerError, map[string]any{"error": "approval_unavailable"})
+			return
+		}
+		actionBytes, _ := json.Marshal(action)
+		if _, err := b.audit.Append(r.Context(), audit.AppendRequest{OrganizationID: scope.OrganizationID, Type: "trigger.approval.requested", ActorID: requesterID, ResourceID: approval.ID, RetentionEpoch: time.Now().UTC().Format("2006-01"), IdempotencyKey: "trigger-approval/" + approval.ID, Metadata: map[string]any{"operation_id": input.Operation, "trigger_id": input.ID, "channel_id": scope.ChannelID}, Content: actionBytes}); err != nil {
+			writeBridge(w, http.StatusServiceUnavailable, map[string]any{"error": "audit_unavailable"})
+			return
+		}
+		if b.approvalCoordinator == nil || b.approvalCoordinator.SuspendAndNotify(r.Context(), approvals.RequestScope{JobID: jobsID(scope.JobID), LeaseToken: scope.LeaseToken, WorkspaceID: scope.WorkspaceID, ChannelID: scope.ChannelID, ThreadTS: scope.ThreadTS}, approval) != nil {
+			writeBridge(w, http.StatusServiceUnavailable, map[string]any{"error": "approval_delivery_unavailable"})
+			return
+		}
+		writeBridge(w, http.StatusConflict, map[string]any{"error": "approval_required", "approval_id": approval.ID, "expires_at": approval.ExpiresAt})
+		return
+	}
+	if _, err := b.approvals.ConsumeContext(r.Context(), scope.OrganizationID, input.ApprovalID, action); err != nil {
+		writeBridge(w, http.StatusForbidden, map[string]any{"error": "approval_invalid"})
+		return
+	}
+	if input.Operation == "disable" {
+		value, err := b.triggers.GetContext(r.Context(), scope.OrganizationID, input.ID)
+		if err != nil || value.WorkspaceID != scope.WorkspaceID || value.ChannelID != scope.ChannelID {
+			writeBridge(w, http.StatusNotFound, map[string]any{"error": "trigger_subscription_not_found"})
+			return
+		}
+		value.Enabled = false
+		saved, err := b.triggers.PutContext(r.Context(), value)
+		if err != nil {
+			writeBridge(w, http.StatusUnprocessableEntity, map[string]any{"error": "invalid_trigger_subscription"})
+			return
+		}
+		writeBridge(w, http.StatusOK, saved)
+		return
+	}
+	saved, err := b.triggers.PutContext(r.Context(), pendingSubscription)
+	if err != nil {
+		if errors.Is(err, triggers.ErrScopeConflict) {
+			writeBridge(w, http.StatusForbidden, map[string]any{"error": "trigger_subscription_scope_denied"})
+			return
+		}
+		writeBridge(w, http.StatusUnprocessableEntity, map[string]any{"error": "invalid_trigger_subscription"})
+		return
+	}
+	_, _ = b.audit.Append(r.Context(), audit.AppendRequest{OrganizationID: scope.OrganizationID, Type: "trigger.subscription.put", ActorID: "agent:" + scope.JobID, ResourceID: saved.ID, RetentionEpoch: time.Now().UTC().Format("2006-01"), IdempotencyKey: "trigger-subscription/" + saved.ID + "/" + fmt.Sprint(saved.Version), Metadata: map[string]any{"channel_id": saved.ChannelID, "enabled": saved.Enabled, "version": saved.Version}})
+	writeBridge(w, http.StatusOK, saved)
+}
+
 func containsTool(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {
@@ -204,6 +406,14 @@ func containsTool(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func (b *Bridge) approvalRequester(ctx context.Context, scope JobScope) string {
+	job, err := b.jobs.Get(ctx, jobsID(scope.JobID))
+	if err == nil && job.RequesterID != "" {
+		return job.RequesterID
+	}
+	return "agent:" + scope.JobID
 }
 
 func (b *Bridge) authorize(ctx context.Context, scope JobScope) error {
@@ -218,6 +428,14 @@ func (b *Bridge) authorize(ctx context.Context, scope JobScope) error {
 }
 
 func jobsID(value string) types.JobID { return types.JobID(value) }
+
+func approvalTTL(scope JobScope) time.Duration {
+	ttl := 30 * time.Minute
+	if remaining := time.Until(scope.ExpiresAt); remaining > 0 && remaining < ttl {
+		ttl = remaining
+	}
+	return ttl
+}
 
 func randomCapability() (string, error) {
 	value := make([]byte, 32)

@@ -42,9 +42,31 @@ func (s *MongoStore) ApproveContext(ctx context.Context, organizationID, id, app
 	now := s.now().UTC()
 	after := options.After
 	var doc approvalDoc
-	err := s.db.Collection(models.CollectionApprovals).FindOneAndUpdate(ctx, bson.M{"organization_id": organizationID, "public_id": id, "requester_id": bson.M{"$ne": approverID}, "approver_id": "", "approved_at": time.Time{}, "consumed_at": time.Time{}, "expires_at": bson.M{"$gt": now}}, bson.M{"$set": bson.M{"approver_id": approverID, "approved_at": now}}, options.FindOneAndUpdate().SetReturnDocument(after)).Decode(&doc)
+	err := s.db.Collection(models.CollectionApprovals).FindOneAndUpdate(ctx, bson.M{"organization_id": organizationID, "public_id": id, "requester_id": bson.M{"$ne": approverID}, "approver_id": "", "approved_at": time.Time{}, "denied_at": time.Time{}, "consumed_at": time.Time{}, "expires_at": bson.M{"$gt": now}}, bson.M{"$set": bson.M{"approver_id": approverID, "approved_at": now}}, options.FindOneAndUpdate().SetReturnDocument(after)).Decode(&doc)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return Approval{}, errors.New("approval is not approvable")
+	}
+	return doc.approval(), err
+}
+
+func (s *MongoStore) DenyContext(ctx context.Context, organizationID, id, denierID string) (Approval, error) {
+	if organizationID == "" || id == "" || denierID == "" {
+		return Approval{}, errors.New("organization, approval, and denier are required")
+	}
+	now := s.now().UTC()
+	var doc approvalDoc
+	err := s.db.Collection(models.CollectionApprovals).FindOneAndUpdate(ctx, bson.M{"organization_id": organizationID, "public_id": id, "requester_id": bson.M{"$ne": denierID}, "approved_at": time.Time{}, "denied_at": time.Time{}, "consumed_at": time.Time{}, "expires_at": bson.M{"$gt": now}}, bson.M{"$set": bson.M{"denied_by": denierID, "denied_at": now}}, options.FindOneAndUpdate().SetReturnDocument(options.After)).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return Approval{}, errors.New("approval is not deniable")
+	}
+	return doc.approval(), err
+}
+
+func (s *MongoStore) GetContext(ctx context.Context, organizationID, id string) (Approval, error) {
+	var doc approvalDoc
+	err := s.db.Collection(models.CollectionApprovals).FindOne(ctx, bson.M{"organization_id": organizationID, "public_id": id}).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return Approval{}, ErrNotFound
 	}
 	return doc.approval(), err
 }
@@ -57,7 +79,7 @@ func (s *MongoStore) ConsumeContext(ctx context.Context, organizationID, id stri
 	now := s.now().UTC()
 	after := options.After
 	var doc approvalDoc
-	err = s.db.Collection(models.CollectionApprovals).FindOneAndUpdate(ctx, bson.M{"organization_id": organizationID, "public_id": id, "action_hash": hash, "approved_at": bson.M{"$ne": time.Time{}}, "consumed_at": time.Time{}, "expires_at": bson.M{"$gt": now}}, bson.M{"$set": bson.M{"consumed_at": now}}, options.FindOneAndUpdate().SetReturnDocument(after)).Decode(&doc)
+	err = s.db.Collection(models.CollectionApprovals).FindOneAndUpdate(ctx, bson.M{"organization_id": organizationID, "public_id": id, "action_hash": hash, "approved_at": bson.M{"$ne": time.Time{}}, "denied_at": time.Time{}, "consumed_at": time.Time{}, "expires_at": bson.M{"$gt": now}}, bson.M{"$set": bson.M{"consumed_at": now}}, options.FindOneAndUpdate().SetReturnDocument(after)).Decode(&doc)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return Approval{}, errors.New("approval does not authorize these action bytes")
 	}
@@ -93,15 +115,17 @@ type approvalDoc struct {
 	Action         Action    `bson:"action"`
 	ExpiresAt      time.Time `bson:"expires_at"`
 	ApprovedAt     time.Time `bson:"approved_at"`
+	DeniedBy       string    `bson:"denied_by"`
+	DeniedAt       time.Time `bson:"denied_at"`
 	ConsumedAt     time.Time `bson:"consumed_at"`
 	CleanupAt      time.Time `bson:"cleanup_at"`
 }
 
 func approvalDocument(value Approval) approvalDoc {
-	return approvalDoc{value.ID, value.OrganizationID, value.RequesterID, value.ApproverID, value.ActionHash, value.Action, value.ExpiresAt, value.ApprovedAt, value.ConsumedAt, value.CleanupAt}
+	return approvalDoc{ID: value.ID, OrganizationID: value.OrganizationID, RequesterID: value.RequesterID, ApproverID: value.ApproverID, ActionHash: value.ActionHash, Action: value.Action, ExpiresAt: value.ExpiresAt, ApprovedAt: value.ApprovedAt, DeniedBy: value.DeniedBy, DeniedAt: value.DeniedAt, ConsumedAt: value.ConsumedAt, CleanupAt: value.CleanupAt}
 }
 func (d approvalDoc) approval() Approval {
-	return Approval{ID: d.ID, OrganizationID: d.OrganizationID, RequesterID: d.RequesterID, ApproverID: d.ApproverID, ActionHash: d.ActionHash, Action: d.Action, ExpiresAt: d.ExpiresAt, ApprovedAt: d.ApprovedAt, ConsumedAt: d.ConsumedAt, CleanupAt: d.CleanupAt}
+	return Approval{ID: d.ID, OrganizationID: d.OrganizationID, RequesterID: d.RequesterID, ApproverID: d.ApproverID, ActionHash: d.ActionHash, Action: d.Action, ExpiresAt: d.ExpiresAt, ApprovedAt: d.ApprovedAt, DeniedBy: d.DeniedBy, DeniedAt: d.DeniedAt, ConsumedAt: d.ConsumedAt, CleanupAt: d.CleanupAt}
 }
 
 var _ Repository = (*MongoStore)(nil)

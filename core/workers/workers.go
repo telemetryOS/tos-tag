@@ -20,9 +20,18 @@ type Spec struct {
 	AttemptID      string
 	Command        []string
 	Environment    map[string]string
+	Provider       *ProviderRoute
 	Skills         []marketplace.SkillSnapshot
 	CustomTools    map[string][]byte
 	WallTime       time.Duration
+}
+
+// ProviderRoute is a short-lived capability to a control-plane model gateway.
+// Token is never an upstream provider credential.
+type ProviderRoute struct {
+	ID      string
+	BaseURL string
+	Token   string
 }
 
 type CapabilityRevoker interface {

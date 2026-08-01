@@ -22,6 +22,7 @@ type WorkerOpenCodeOptions struct {
 	Timeout    time.Duration
 	ToolBridge *tools.Bridge
 	ToolIDs    []string
+	Provider   *ProviderGateway
 }
 
 type workerSession struct {
@@ -38,6 +39,7 @@ type WorkerOpenCode struct {
 	timeout    time.Duration
 	toolBridge *tools.Bridge
 	toolIDs    []string
+	provider   *ProviderGateway
 	mu         sync.Mutex
 	sessions   map[string]workerSession
 }
@@ -46,7 +48,7 @@ func NewWorkerOpenCode(options WorkerOpenCodeOptions) (*WorkerOpenCode, error) {
 	if options.Manager == nil || options.Command == "" || options.Timeout <= 0 {
 		return nil, errors.New("worker OpenCode manager, command, and timeout are required")
 	}
-	return &WorkerOpenCode{manager: options.Manager, command: options.Command, skills: append([]marketplace.SkillSnapshot(nil), options.Skills...), timeout: options.Timeout, toolBridge: options.ToolBridge, toolIDs: append([]string(nil), options.ToolIDs...), sessions: make(map[string]workerSession)}, nil
+	return &WorkerOpenCode{manager: options.Manager, command: options.Command, skills: append([]marketplace.SkillSnapshot(nil), options.Skills...), timeout: options.Timeout, toolBridge: options.ToolBridge, toolIDs: append([]string(nil), options.ToolIDs...), provider: options.Provider, sessions: make(map[string]workerSession)}, nil
 }
 
 func (w *WorkerOpenCode) Health(context.Context) error { return nil }
@@ -70,14 +72,34 @@ func (w *WorkerOpenCode) createSession(ctx context.Context, spec JobSessionSpec)
 	attemptID := types.NewID("attempt")
 	environment := map[string]string{}
 	customTools := map[string][]byte{}
+	var providerRoute *workers.ProviderRoute
+	providerRegistered := false
+	defer func() {
+		if providerRegistered {
+			w.provider.Revoke(attemptID)
+		}
+	}()
+	if w.provider != nil {
+		route, routeErr := w.provider.Register(ProviderGatewayScope{AttemptID: attemptID, JobID: spec.JobID, LeaseToken: spec.LeaseToken, SteeringEpoch: spec.SteeringEpoch, ExpiresAt: spec.ExpiresAt})
+		if routeErr != nil {
+			return Session{}, routeErr
+		}
+		providerRoute = &route
+		providerRegistered = true
+	}
 	if w.toolBridge != nil && spec.JobID != "" {
-		access, accessErr := w.toolBridge.Register(tools.JobScope{OrganizationID: spec.OrganizationID, WorkspaceID: spec.WorkspaceID, ChannelID: spec.ChannelID, JobID: spec.JobID, AttemptID: attemptID, LeaseToken: spec.LeaseToken, SteeringEpoch: spec.SteeringEpoch, ExpiresAt: spec.ExpiresAt, AllowedTools: w.toolIDs})
+		access, accessErr := w.toolBridge.Register(tools.JobScope{OrganizationID: spec.OrganizationID, WorkspaceID: spec.WorkspaceID, ChannelID: spec.ChannelID, ThreadTS: spec.ThreadTS, JobID: spec.JobID, AttemptID: attemptID, LeaseToken: spec.LeaseToken, SteeringEpoch: spec.SteeringEpoch, ExpiresAt: spec.ExpiresAt, AllowedTools: w.toolIDs})
 		if accessErr != nil {
+			if w.provider != nil {
+				w.provider.Revoke(attemptID)
+			}
 			return Session{}, accessErr
 		}
 		environment["TOS_TAG_TOOL_ENDPOINT"] = access.Endpoint
+		environment["TOS_TAG_TRIGGER_ENDPOINT"] = access.TriggerEndpoint
 		environment["TOS_TAG_CAPABILITY"] = access.Capability
 		customTools["tos_tag_tool.ts"] = []byte(openCodeToolSource)
+		customTools["tos_tag_trigger.ts"] = []byte(openCodeTriggerSource)
 	}
 	jobID := spec.JobID
 	if jobID == "" {
@@ -86,8 +108,11 @@ func (w *WorkerOpenCode) createSession(ctx context.Context, spec JobSessionSpec)
 	// The worker has a clean HOME/XDG root, so host plugins cannot load. Do not
 	// pass --pure: that also suppresses the one project-local custom tool that
 	// implements the capability bridge.
-	workspace, err := w.manager.Provision(ctx, workers.Spec{OrganizationID: spec.OrganizationID, JobID: jobID, AttemptID: attemptID, Command: []string{w.command, "serve", "--hostname", "127.0.0.1", "--port", strconv.Itoa(port)}, Environment: environment, Skills: w.skills, CustomTools: customTools, WallTime: w.timeout})
+	workspace, err := w.manager.Provision(ctx, workers.Spec{OrganizationID: spec.OrganizationID, JobID: jobID, AttemptID: attemptID, Command: []string{w.command, "serve", "--hostname", "127.0.0.1", "--port", strconv.Itoa(port)}, Environment: environment, Provider: providerRoute, Skills: w.skills, CustomTools: customTools, WallTime: w.timeout})
 	if err != nil {
+		if w.provider != nil {
+			w.provider.Revoke(attemptID)
+		}
 		if w.toolBridge != nil {
 			_ = w.toolBridge.RevokeAttempt(context.Background(), attemptID)
 		}
@@ -127,6 +152,7 @@ func (w *WorkerOpenCode) createSession(ctx context.Context, spec JobSessionSpec)
 	w.mu.Lock()
 	w.sessions[session.ID] = workerSession{client: client, workspace: workspace}
 	w.mu.Unlock()
+	providerRegistered = false
 	return session, nil
 }
 
@@ -143,6 +169,32 @@ export default tool({
   },
   async execute(args) {
     const response = await fetch(process.env.TOS_TAG_TOOL_ENDPOINT!, {
+      method: "POST",
+      headers: {"authorization": "Bearer " + process.env.TOS_TAG_CAPABILITY!, "content-type": "application/json"},
+      body: JSON.stringify(args)
+    })
+    return JSON.stringify(await response.json())
+  }
+})
+`
+
+const openCodeTriggerSource = `import { tool } from "@opencode-ai/plugin"
+
+export default tool({
+  description: "List, inspect, create, update, pause, or resume classifier-gated tos-tag heartbeat subscriptions in the current Slack channel. Mutations require an independently approved approval_id.",
+  args: {
+    operation: tool.schema.enum(["list", "get", "put", "disable"]),
+    id: tool.schema.string().optional(),
+    instruction: tool.schema.string().optional(),
+    interval_seconds: tool.schema.number().int().optional(),
+    next_run: tool.schema.string().optional(),
+    min_confidence: tool.schema.number().min(0).max(1).optional(),
+    enabled: tool.schema.boolean().optional(),
+    root_thread_ts: tool.schema.string().optional(),
+    approval_id: tool.schema.string().optional()
+  },
+  async execute(args) {
+    const response = await fetch(process.env.TOS_TAG_TRIGGER_ENDPOINT!, {
       method: "POST",
       headers: {"authorization": "Bearer " + process.env.TOS_TAG_CAPABILITY!, "content-type": "application/json"},
       body: JSON.stringify(args)
@@ -237,6 +289,9 @@ func (w *WorkerOpenCode) Close(context.Context) error {
 	for _, id := range ids {
 		w.terminate(id)
 	}
+	if w.provider != nil {
+		return w.provider.Close(context.Background())
+	}
 	return nil
 }
 
@@ -256,6 +311,9 @@ func (w *WorkerOpenCode) terminate(id string) {
 	delete(w.sessions, id)
 	w.mu.Unlock()
 	if ok {
+		if w.provider != nil {
+			w.provider.Revoke(session.workspace.AttemptID)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = w.manager.Terminate(ctx, session.workspace)

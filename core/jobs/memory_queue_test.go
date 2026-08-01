@@ -130,3 +130,26 @@ func TestInvalidTransitionRejected(t *testing.T) {
 		t.Fatalf("invalid transition accepted: %v", err)
 	}
 }
+
+func TestApprovalResumeRestoresFinalAttemptClaimability(t *testing.T) {
+	queue := NewMemoryQueue(nil)
+	ctx := context.Background()
+	job, _, err := queue.Enqueue(ctx, Spec{OrganizationID: "org", WorkspaceID: "team", ChannelID: "channel", RootThreadTS: "1", SessionID: "session", Generation: 1, IdempotencyKey: "approval-final-attempt", Kind: "agent", MaxAttempts: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, _ = queue.Claim(ctx, "worker-1", time.Minute)
+	job, _ = queue.Transition(ctx, job.ID, job.Lease.Token, StateRunning, nil)
+	job, _ = queue.SuspendForApproval(ctx, job.ID, job.Lease.Token, "approval-1")
+	resumed, err := queue.ResumeFromApproval(ctx, job.ID, "approval-1", "sha256:approved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.State != StateQueued || resumed.Attempt != 0 {
+		t.Fatalf("resumed job is not claimable: %#v", resumed)
+	}
+	claimed, err := queue.Claim(ctx, "worker-2", time.Minute)
+	if err != nil || claimed.Attempt != 1 {
+		t.Fatalf("fresh worker could not claim approved final attempt: %#v err=%v", claimed, err)
+	}
+}

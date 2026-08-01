@@ -33,10 +33,17 @@ type LiveIngress struct {
 	options LiveOptions
 	client  socketModeTransport
 
-	mu      sync.Mutex
-	cancel  context.CancelFunc
-	done    chan struct{}
-	started bool
+	mu                 sync.Mutex
+	cancel             context.CancelFunc
+	done               chan struct{}
+	started            bool
+	interactionHandler ApprovalInteractionHandler
+}
+
+func (s *LiveIngress) SetApprovalInteractionHandler(handler ApprovalInteractionHandler) {
+	s.mu.Lock()
+	s.interactionHandler = handler
+	s.mu.Unlock()
 }
 
 type socketModeTransport interface {
@@ -63,6 +70,7 @@ func (t managedSocketModeTransport) EventsChannel() <-chan socketmode.Event {
 
 type deliveryAPI interface {
 	PostMessageContext(context.Context, string, ...slackapi.MsgOption) (string, string, error)
+	UpdateMessageContext(context.Context, string, string, ...slackapi.MsgOption) (string, string, string, error)
 	AddReactionContext(context.Context, string, slackapi.ItemRef) error
 	GetConversationHistoryContext(context.Context, *slackapi.GetConversationHistoryParameters) (*slackapi.GetConversationHistoryResponse, error)
 	GetConversationRepliesContext(context.Context, *slackapi.GetConversationRepliesParameters) ([]slackapi.Message, bool, string, error)
@@ -167,6 +175,37 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 				continue
 			case socketmode.EventTypeEventsAPI:
 				eventLogger.Info("Slack Events API envelope received")
+			case socketmode.EventTypeInteractive:
+				if event.Request == nil {
+					eventLogger.Error("Slack interaction missing request metadata")
+					continue
+				}
+				interaction, eligible, normalizeErr := NormalizeApprovalInteraction(s.options, event.Data)
+				if normalizeErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", normalizeErr)}).Error("Slack approval interaction rejected")
+					continue
+				}
+				if !eligible {
+					eventLogger.Debug("Slack interaction ignored")
+					continue
+				}
+				s.mu.Lock()
+				interactionHandler := s.interactionHandler
+				s.mu.Unlock()
+				if interactionHandler == nil {
+					eventLogger.Error("Slack approval interaction has no durable handler")
+					continue
+				}
+				if handleErr := interactionHandler(ctx, interaction); handleErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"approval_id": interaction.ApprovalID, "approver_id": interaction.UserID, "error_type": fmt.Sprintf("%T", handleErr)}).Error("Slack approval interaction persistence failed; acknowledgement withheld")
+					continue
+				}
+				if ackErr := s.client.AckCtx(ctx, event.Request.EnvelopeID, nil); ackErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"approval_id": interaction.ApprovalID, "error_type": fmt.Sprintf("%T", ackErr)}).Error("Slack approval interaction acknowledgement failed")
+					continue
+				}
+				eventLogger.WithCtx(blackbox.Ctx{"approval_id": interaction.ApprovalID, "approver_id": interaction.UserID, "approved": interaction.Approve}).Info("Slack approval interaction durably handled and acknowledged")
+				continue
 			default:
 				eventLogger.Debug("Slack Socket Mode event ignored by Events API ingress")
 				continue
@@ -199,12 +238,70 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 				continue
 			}
 			if ackErr := s.client.AckCtx(ctx, event.Request.EnvelopeID, nil); ackErr != nil {
-				envelopeLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "duplicate": accepted.Duplicate, "error_type": fmt.Sprintf("%T", ackErr)}).Error("Slack event persisted but acknowledgement failed")
+				envelopeLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "duplicate": accepted.Duplicate, "ignored": accepted.Ignored, "error_type": fmt.Sprintf("%T", ackErr)}).Error("Slack event acknowledgement failed")
 				continue
 			}
-			envelopeLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "duplicate": accepted.Duplicate}).Info("Slack event durably accepted and acknowledged")
+			if accepted.Ignored {
+				envelopeLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "ignored": true}).Info("Slack policy-excluded envelope acknowledged without persistence")
+				continue
+			}
+			envelopeLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "duplicate": accepted.Duplicate, "ignored": false}).Info("Slack event durably accepted and acknowledged")
 		}
 	}
+}
+
+func NormalizeApprovalInteraction(options LiveOptions, data any) (ApprovalInteraction, bool, error) {
+	var callback slackapi.InteractionCallback
+	switch value := data.(type) {
+	case slackapi.InteractionCallback:
+		callback = value
+	case *slackapi.InteractionCallback:
+		if value == nil {
+			return ApprovalInteraction{}, false, errors.New("Slack interaction payload is nil")
+		}
+		callback = *value
+	default:
+		return ApprovalInteraction{}, false, nil
+	}
+	if callback.Type != slackapi.InteractionTypeBlockActions {
+		return ApprovalInteraction{}, false, nil
+	}
+	if callback.APIAppID != "" && callback.APIAppID != options.AppID {
+		return ApprovalInteraction{}, false, errors.New("Slack interaction app does not match installation")
+	}
+	if callback.Team.ID != options.TeamID || callback.User.ID == "" || len(callback.ActionCallback.BlockActions) != 1 {
+		return ApprovalInteraction{}, false, errors.New("Slack interaction scope is invalid")
+	}
+	action := callback.ActionCallback.BlockActions[0]
+	if action == nil || action.Value == "" {
+		return ApprovalInteraction{}, false, errors.New("Slack interaction action is invalid")
+	}
+	approve := false
+	switch action.ActionID {
+	case "tos_tag_approval_approve":
+		approve = true
+	case "tos_tag_approval_deny":
+	default:
+		return ApprovalInteraction{}, false, nil
+	}
+	channelID := callback.Channel.ID
+	if channelID == "" {
+		channelID = callback.Container.ChannelID
+	}
+	if channelID == "" {
+		return ApprovalInteraction{}, false, errors.New("Slack interaction channel is missing")
+	}
+	messageTS := callback.Container.MessageTs
+	if messageTS == "" {
+		messageTS = callback.Message.Timestamp
+	}
+	if messageTS == "" {
+		messageTS = callback.MessageTs
+	}
+	if messageTS == "" {
+		return ApprovalInteraction{}, false, errors.New("Slack interaction message is missing")
+	}
+	return ApprovalInteraction{OrganizationID: options.OrganizationID, WorkspaceID: callback.Team.ID, ChannelID: channelID, UserID: callback.User.ID, ApprovalID: action.Value, MessageTS: messageTS, Approve: approve}, true, nil
 }
 
 func slackEnvelopeLogContext(envelope types.SlackEnvelope) blackbox.Ctx {
@@ -267,14 +364,14 @@ func NormalizeEventsAPI(organizationID, botUserID, envelopeID string, data any) 
 	case *slackevents.AppMentionEvent:
 		base.ChannelID, base.MessageTS, base.ThreadTS = inner.Channel, inner.TimeStamp, inner.ThreadTimeStamp
 		base.UserID, base.BotID, base.Text = inner.User, inner.BotID, inner.Text
-		base.Kind, base.IsMention = types.SlackEventMessage, true
+		base.Kind, base.IsMention, base.OriginTag = types.SlackEventMessage, true, "slack_app_mention"
 		base.EventID = canonicalMessageEventID(base.EventID, base.TeamID, base.ChannelID, base.MessageTS)
 		return base, true, nil
 	case *slackevents.MessageEvent:
 		base.ChannelID, base.MessageTS, base.ThreadTS = inner.Channel, inner.TimeStamp, inner.ThreadTimeStamp
 		base.UserID, base.BotID, base.Text, base.Subtype = inner.User, inner.BotID, inner.Text, inner.SubType
 		base.Restricted = inner.ChannelType == slackevents.ChannelTypeGroup || inner.ChannelType == slackevents.ChannelTypeIM || inner.ChannelType == slackevents.ChannelTypeMPIM
-		base.Kind = types.SlackEventMessage
+		base.Kind, base.OriginTag = types.SlackEventMessage, "slack_message"
 		switch inner.SubType {
 		case "message_changed":
 			base.Kind = types.SlackEventEdit
@@ -329,6 +426,9 @@ func (d *LiveDelivery) Send(ctx context.Context, request types.SlackDeliveryRequ
 		requestLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Error("Slack delivery rendering failed")
 		return types.SlackDeliveryResult{}, err
 	}
+	if request.Destination.UpdateTS != "" && len(payloads) != 1 {
+		return types.SlackDeliveryResult{}, errors.New("Slack message updates must render as exactly one payload")
+	}
 	existing, err := d.deliveryParts(ctx, request)
 	if err != nil {
 		requestLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Error("Slack delivery reconciliation failed")
@@ -354,12 +454,24 @@ func (d *LiveDelivery) Send(ctx context.Context, request types.SlackDeliveryRequ
 			slackapi.MsgOptionBlocks(blocks...),
 			slackapi.MsgOptionMetadata(slackapi.SlackMetadata{EventType: "tos_tag_delivery", EventPayload: map[string]any{"delivery_id": string(request.ID), "part": index + 1}}),
 		}
-		if request.Destination.ThreadTS != "" {
+		if request.Destination.ThreadTS != "" && request.Destination.UpdateTS == "" {
 			options = append(options, slackapi.MsgOptionTS(request.Destination.ThreadTS))
 		}
-		_, timestamp, err := d.api.PostMessageContext(ctx, request.Destination.ChannelID, options...)
+		var timestamp string
+		if request.Destination.UpdateTS != "" {
+			_, timestamp, _, err = d.api.UpdateMessageContext(ctx, request.Destination.ChannelID, request.Destination.UpdateTS, options...)
+			if timestamp == "" {
+				timestamp = request.Destination.UpdateTS
+			}
+		} else {
+			_, timestamp, err = d.api.PostMessageContext(ctx, request.Destination.ChannelID, options...)
+		}
 		if err != nil {
-			requestLogger.WithCtx(blackbox.Ctx{"part": index + 1, "error_type": fmt.Sprintf("%T", err)}).Error("Slack delivery part failed")
+			failureContext := blackbox.Ctx{"part": index + 1, "error_type": fmt.Sprintf("%T", err)}
+			if code := slackAPIErrorCode(err); code != "" {
+				failureContext["slack_error_code"] = code
+			}
+			requestLogger.WithCtx(failureContext).Error("Slack delivery part failed")
 			return types.SlackDeliveryResult{}, err
 		}
 		requestLogger.WithCtx(blackbox.Ctx{"part": index + 1, "message_ts": timestamp}).Info("Slack delivery part accepted")
@@ -399,7 +511,11 @@ func (d *LiveDelivery) React(ctx context.Context, request types.SlackReactionReq
 		if errors.As(err, &slackError) && slackError.Err == "already_reacted" {
 			duplicate = true
 		} else {
-			requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err)}).Error("Slack reaction failed")
+			failureContext := blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err)}
+			if code := slackAPIErrorCode(err); code != "" {
+				failureContext["slack_error_code"] = code
+			}
+			requestLogger.WithCtx(failureContext).Error("Slack reaction failed")
 			return types.SlackReactionResult{}, err
 		}
 	}

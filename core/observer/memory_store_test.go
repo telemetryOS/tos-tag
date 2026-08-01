@@ -136,3 +136,28 @@ func TestRecentEnforcesExpiryAndAuthorizedChannels(t *testing.T) {
 		t.Fatalf("got %v, want not found", err)
 	}
 }
+
+func TestImportedHistoryIsResolvedContextAndNeverClaimed(t *testing.T) {
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	store := NewMemoryStore(30*24*time.Hour, func() time.Time { return now })
+	envelope := baseEnvelope(now)
+	envelope.BotID = "B-agent"
+	accepted, err := store.Import(context.Background(), envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted.Observation.ScopeState != "authorized" || accepted.Observation.DecisionState != "resolved" {
+		t.Fatalf("imported observation state = %#v", accepted.Observation)
+	}
+	if _, err := store.ClaimPending(context.Background(), "worker", time.Minute); !errors.Is(err, ErrNoPendingObservation) {
+		t.Fatalf("imported history became an ambient trigger: %v", err)
+	}
+	message, err := store.CurrentMessage(context.Background(), "org-1", "team-1", "channel-1", "100.1")
+	if err != nil || message.BotID != "B-agent" {
+		t.Fatalf("imported bot provenance was not retained: message=%#v err=%v", message, err)
+	}
+	duplicate, err := store.Accept(context.Background(), envelope)
+	if err != nil || !duplicate.Duplicate || duplicate.Observation.PublicID != accepted.Observation.PublicID {
+		t.Fatalf("live/history idempotency failed: duplicate=%#v err=%v", duplicate, err)
+	}
+}
