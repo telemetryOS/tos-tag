@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,6 +34,7 @@ type Manifest struct {
 type Operation struct {
 	ID             string   `json:"id"`
 	Env            []string `json:"env,omitempty"`
+	PublicEnv      []string `json:"public_env,omitempty"`
 	TimeoutSeconds int      `json:"timeout_seconds"`
 	MaxOutputBytes int      `json:"max_output_bytes"`
 	Risk           string   `json:"risk"`
@@ -130,11 +132,26 @@ func LoadBundle(root, manifestPath string) (Bundle, error) {
 		if operation.ID == "" || seen[operation.ID] || !validRisk(operation.Risk) || !validApprovalPolicy(operation.Approval) || operation.TimeoutSeconds <= 0 || operation.TimeoutSeconds > 300 || operation.MaxOutputBytes <= 0 || operation.MaxOutputBytes > 8<<20 {
 			return Bundle{}, errors.New("invalid tool operation")
 		}
+		if manifest.ID == "telemetryos.code" && (operation.ID != "read" || operation.Risk != "read") {
+			return Bundle{}, errors.New("telemetryos.code is permanently read-only")
+		}
 		seen[operation.ID] = true
+		declaredEnvironment := make(map[string]struct{}, len(operation.Env))
 		for _, name := range operation.Env {
 			if !envName.MatchString(name) || strings.HasPrefix(name, "TOS_TAG_") {
 				return Bundle{}, fmt.Errorf("invalid environment name %q", name)
 			}
+			declaredEnvironment[name] = struct{}{}
+		}
+		publicEnvironment := make(map[string]struct{}, len(operation.PublicEnv))
+		for _, name := range operation.PublicEnv {
+			if _, declared := declaredEnvironment[name]; !declared || !strings.HasSuffix(name, "_URL") {
+				return Bundle{}, fmt.Errorf("invalid public environment name %q", name)
+			}
+			if _, duplicate := publicEnvironment[name]; duplicate {
+				return Bundle{}, fmt.Errorf("duplicate public environment name %q", name)
+			}
+			publicEnvironment[name] = struct{}{}
 		}
 	}
 	scriptBytes, err := readRootFile(absolute, manifest.Script, 1<<20)
@@ -155,6 +172,9 @@ func (e Executor) Execute(parent context.Context, bundle Bundle, request Request
 	operation, ok := findOperation(bundle.Manifest, request.OperationID)
 	if !ok {
 		return Result{}, errors.New("operation is not declared")
+	}
+	if bundle.Manifest.ID == "telemetryos.code" && (operation.ID != "read" || operation.Risk != "read") {
+		return Result{}, errors.New("telemetryos.code is permanently read-only")
 	}
 	if operation.Risk == "admin" {
 		return Result{}, errors.New("admin tool operations are disabled")
@@ -197,8 +217,9 @@ func (e Executor) Execute(parent context.Context, bundle Bundle, request Request
 			return Result{}, fmt.Errorf("undeclared environment binding %s", name)
 		}
 	}
+	sensitiveValues := sensitiveEnvironmentValues(operation, request.SecretValues)
 	for _, argument := range request.Args {
-		for _, secret := range request.SecretValues {
+		for _, secret := range sensitiveValues {
 			if secret != "" && strings.Contains(argument, secret) {
 				return Result{}, errors.New("secret values must be passed only through declared environment bindings")
 			}
@@ -220,7 +241,7 @@ func (e Executor) Execute(parent context.Context, bundle Bundle, request Request
 	command.Stdout, command.Stderr = limited, limited
 	started := time.Now()
 	err = command.Run()
-	result := Result{Output: redactSecrets(limited.String(), request.SecretValues), Duration: time.Since(started)}
+	result := Result{Output: redactSecrets(limited.String(), sensitiveValues), Duration: time.Since(started)}
 	if exitErr := new(exec.ExitError); errors.As(err, &exitErr) {
 		result.ExitCode = exitErr.ExitCode()
 	}
@@ -237,6 +258,31 @@ func (e Executor) Execute(parent context.Context, bundle Bundle, request Request
 		_ = e.Usage.Record(parent, usage.Event{OrganizationID: request.OrganizationID, JobID: request.JobID, Category: "tool", Calls: 1, DurationMS: result.Duration.Milliseconds()})
 	}
 	return result, nil
+}
+
+// sensitiveEnvironmentValues separates reviewed public URL configuration from
+// credentials. Public URL values may appear in typed argv and tool output only
+// when they are plain HTTPS URLs without embedded credentials, query strings,
+// or fragments. Any malformed or unexpectedly secret-bearing value remains
+// sensitive and is rejected/redacted fail-closed.
+func sensitiveEnvironmentValues(operation Operation, values map[string]string) map[string]string {
+	public := make(map[string]struct{}, len(operation.PublicEnv))
+	for _, name := range operation.PublicEnv {
+		public[name] = struct{}{}
+	}
+	sensitive := make(map[string]string, len(values))
+	for name, value := range values {
+		if _, ok := public[name]; ok && safePublicURL(value) {
+			continue
+		}
+		sensitive[name] = value
+	}
+	return sensitive
+}
+
+func safePublicURL(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == ""
 }
 
 func validRisk(value string) bool {

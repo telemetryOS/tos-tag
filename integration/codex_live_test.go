@@ -21,7 +21,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/workers"
 )
 
-func TestLiveCodexAppServerTurn(t *testing.T) {
+func TestLiveCodexAppServerWebSearchTurn(t *testing.T) {
 	if os.Getenv("TOS_TAG_LIVE_CODEX") != "1" {
 		t.Skip("set TOS_TAG_LIVE_CODEX=1 to run the real Codex App Server smoke")
 	}
@@ -53,7 +53,7 @@ func TestLiveCodexAppServerTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = bridge.Stop(context.Background()) })
-	worker, err := harness.NewWorkerCodex(harness.WorkerCodexOptions{Manager: manager, Command: command, CodexHome: codexHome, Timeout: 2 * time.Minute, ToolBridge: bridge})
+	worker, err := harness.NewWorkerCodex(harness.WorkerCodexOptions{Manager: manager, Command: command, CodexHome: codexHome, Timeout: 2 * time.Minute, WebSearchMode: "live", ToolBridge: bridge})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,21 +64,28 @@ func TestLiveCodexAppServerTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v: %v", err, errors.Unwrap(err))
 	}
-	if err := worker.Prompt(ctx, session.ID, harness.Prompt{Text: "Return exactly one short Slack result saying Codex App Server is ready.", System: deliveries.WithSlackOutputContract("Answer the request directly."), Model: "openai/gpt-5.6-luna", Variant: "low", RequestID: "live-codex-smoke", SlackFormat: deliveries.SlackOutputContractVersion}); err != nil {
+	if err := worker.Prompt(ctx, session.ID, harness.Prompt{Text: "Use web search to open https://www.iana.org/help/example-domains and return one short Slack result containing the page title and source URL.", System: deliveries.WithSlackOutputContract("Answer the request directly and use live web search."), Model: "openai/gpt-5.6-luna", Variant: "low", RequestID: "live-codex-smoke", SlackFormat: deliveries.SlackOutputContractVersion}); err != nil {
 		t.Fatalf("%v: %v", err, errors.Unwrap(err))
 	}
 	events, errs := worker.Events(ctx, session.ID)
 	var output strings.Builder
+	webSearchObserved := false
+	usageObserved := false
 	for event := range events {
 		if event.Type == "message.delta" {
 			text, _ := event.Data["text"].(string)
 			output.WriteString(text)
+		} else if event.Type == "web.search.completed" {
+			webSearchObserved = true
+		} else if event.Type == "usage.updated" {
+			totalTokens, _ := event.Data["total_tokens"].(int64)
+			usageObserved = totalTokens > 0
 		}
 	}
 	if err := <-errs; err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), `"segments"`) || !strings.Contains(output.String(), "Codex App Server") {
+	if !webSearchObserved || !usageObserved || !strings.Contains(output.String(), `"segments"`) || !strings.Contains(strings.ToLower(output.String()), "iana") {
 		t.Fatalf("unexpected App Server output: %q", output.String())
 	}
 }

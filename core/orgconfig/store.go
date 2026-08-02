@@ -21,23 +21,26 @@ import (
 var ErrNotFound = errors.New("organization scope not found")
 
 type ChannelPolicy struct {
-	OrganizationID        string                  `json:"organization_id"`
-	TeamID                string                  `json:"team_id"`
-	ChannelID             string                  `json:"channel_id"`
-	Name                  string                  `json:"name,omitempty"`
-	Enrolled              bool                    `json:"enrolled"`
-	Restricted            bool                    `json:"restricted"`
-	ParticipationMode     types.ParticipationMode `json:"participation_mode"`
-	KillSwitch            bool                    `json:"kill_switch"`
-	Cooldown              time.Duration           `json:"cooldown"`
-	MaxResponsesPerHour   int                     `json:"max_responses_per_hour"`
-	MaxConcurrentJobs     int                     `json:"max_concurrent_jobs"`
-	DefaultModelProfile   string                  `json:"default_model_profile,omitempty"`
-	ApproverUserIDs       []string                `json:"approver_user_ids,omitempty"`
-	WorkspaceEnabled      bool                    `json:"workspace_enabled"`
-	MembershipRevision    string                  `json:"membership_revision"`
-	MembershipRefreshedAt time.Time               `json:"membership_refreshed_at"`
-	Version               int64                   `json:"version"`
+	OrganizationID                   string                  `json:"organization_id"`
+	TeamID                           string                  `json:"team_id"`
+	ChannelID                        string                  `json:"channel_id"`
+	Name                             string                  `json:"name,omitempty"`
+	Enrolled                         bool                    `json:"enrolled"`
+	Restricted                       bool                    `json:"restricted"`
+	ParticipationMode                types.ParticipationMode `json:"participation_mode"`
+	KillSwitch                       bool                    `json:"kill_switch"`
+	Cooldown                         time.Duration           `json:"cooldown"`
+	MaxResponsesPerHour              int                     `json:"max_responses_per_hour"`
+	MaxConcurrentJobs                int                     `json:"max_concurrent_jobs"`
+	DefaultModelProfile              string                  `json:"default_model_profile,omitempty"`
+	ApproverUserIDs                  []string                `json:"approver_user_ids,omitempty"`
+	BotIsMember                      bool                    `json:"bot_is_member"`
+	BotMembershipKnown               bool                    `json:"bot_membership_known"`
+	ParticipationManagedByMembership bool                    `json:"participation_managed_by_membership"`
+	WorkspaceEnabled                 bool                    `json:"workspace_enabled"`
+	MembershipRevision               string                  `json:"membership_revision"`
+	MembershipRefreshedAt            time.Time               `json:"membership_refreshed_at"`
+	Version                          int64                   `json:"version"`
 }
 
 type Resolver interface {
@@ -47,6 +50,7 @@ type Resolver interface {
 type Store interface {
 	Resolver
 	GetOrganization(context.Context, string) (models.Organization, error)
+	ListOrganizations(context.Context) ([]models.Organization, error)
 	GetWorkspace(context.Context, string, string) (models.Workspace, error)
 	PutOrganization(context.Context, models.Organization) (models.Organization, error)
 	PutWorkspace(context.Context, models.Workspace) (models.Workspace, error)
@@ -118,6 +122,21 @@ func (s *Memory) GetOrganization(_ context.Context, organizationID string) (mode
 	}
 	return value, nil
 }
+func (s *Memory) ListOrganizations(_ context.Context) ([]models.Organization, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]models.Organization, 0, len(s.organizations))
+	for _, organization := range s.organizations {
+		out = append(out, organization)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name == out[j].Name {
+			return out[i].PublicID < out[j].PublicID
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
+}
 func (s *Memory) PutOrganization(_ context.Context, value models.Organization) (models.Organization, error) {
 	if value.PublicID == "" {
 		return models.Organization{}, ErrNotFound
@@ -172,9 +191,9 @@ func (s *Memory) PutChannel(_ context.Context, value ChannelPolicy) (ChannelPoli
 	return value, nil
 }
 
-// UpsertContextChannel refreshes Slack-observed membership metadata without
-// widening or replacing an existing channel's behavior policy. A newly seen
-// channel receives the supplied context-only defaults.
+// UpsertContextChannel refreshes Slack-observed membership metadata. Operator
+// policy remains intact unless the caller explicitly enables membership-managed
+// participation, in which case Slack bot membership owns observe/assist mode.
 func (s *Memory) UpsertContextChannel(_ context.Context, value ChannelPolicy) (ChannelPolicy, error) {
 	if err := ValidateChannel(value); err != nil {
 		return ChannelPolicy{}, err
@@ -189,6 +208,17 @@ func (s *Memory) UpsertContextChannel(_ context.Context, value ChannelPolicy) (C
 		current.Restricted = current.Restricted || value.Restricted
 		current.MembershipRevision = value.MembershipRevision
 		current.MembershipRefreshedAt = value.MembershipRefreshedAt
+		if value.BotMembershipKnown {
+			current.BotIsMember = value.BotIsMember
+			current.BotMembershipKnown = true
+		}
+		if value.ParticipationManagedByMembership {
+			current.ParticipationMode = value.ParticipationMode
+			current.ParticipationManagedByMembership = true
+		} else if value.BotMembershipKnown && current.ParticipationManagedByMembership {
+			current.ParticipationMode = types.ModeObserve
+			current.ParticipationManagedByMembership = false
+		}
 		current.Version++
 		s.channels[key] = current
 		return current, nil
@@ -238,6 +268,19 @@ func (s *Mongo) GetOrganization(ctx context.Context, organizationID string) (mod
 	return value, nil
 }
 
+func (s *Mongo) ListOrganizations(ctx context.Context) ([]models.Organization, error) {
+	cursor, err := s.db.Collection(models.CollectionOrganizations).Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "name", Value: 1}, {Key: "public_id", Value: 1}}))
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+	var organizations []models.Organization
+	if err := cursor.All(ctx, &organizations); err != nil {
+		return nil, err
+	}
+	return organizations, nil
+}
+
 func (s *Mongo) GetWorkspace(ctx context.Context, organizationID, teamID string) (models.Workspace, error) {
 	var value models.Workspace
 	err := s.db.Collection(models.CollectionWorkspaces).FindOne(ctx, bson.M{"organization_id": organizationID, "team_id": teamID}).Decode(&value)
@@ -275,21 +318,30 @@ func (s *Mongo) PutChannel(ctx context.Context, value ChannelPolicy) (ChannelPol
 	now := s.now().UTC()
 	after := options.After
 	var doc models.Channel
-	err := s.db.Collection(models.CollectionChannels).FindOneAndUpdate(ctx, bson.M{"organization_id": value.OrganizationID, "team_id": value.TeamID, "channel_id": value.ChannelID}, bson.M{"$set": bson.M{"name": value.Name, "enrolled": value.Enrolled, "restricted": value.Restricted, "participation_mode": string(value.ParticipationMode), "kill_switch": value.KillSwitch, "cooldown_seconds": int(value.Cooldown.Seconds()), "max_responses_per_hour": value.MaxResponsesPerHour, "max_concurrent_jobs": value.MaxConcurrentJobs, "default_model_profile": value.DefaultModelProfile, "approver_user_ids": value.ApproverUserIDs, "membership_revision": value.MembershipRevision, "membership_refreshed_at": value.MembershipRefreshedAt, "updated_at": now}, "$setOnInsert": bson.M{"public_id": types.NewID("channel"), "organization_id": value.OrganizationID, "team_id": value.TeamID, "channel_id": value.ChannelID, "created_at": now}, "$inc": bson.M{"version": 1}}, options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(after)).Decode(&doc)
+	err := s.db.Collection(models.CollectionChannels).FindOneAndUpdate(ctx, bson.M{"organization_id": value.OrganizationID, "team_id": value.TeamID, "channel_id": value.ChannelID}, bson.M{"$set": bson.M{"name": value.Name, "enrolled": value.Enrolled, "restricted": value.Restricted, "participation_mode": string(value.ParticipationMode), "kill_switch": value.KillSwitch, "cooldown_seconds": int(value.Cooldown.Seconds()), "max_responses_per_hour": value.MaxResponsesPerHour, "max_concurrent_jobs": value.MaxConcurrentJobs, "default_model_profile": value.DefaultModelProfile, "approver_user_ids": value.ApproverUserIDs, "bot_is_member": value.BotIsMember, "bot_membership_known": value.BotMembershipKnown, "participation_managed_by_membership": value.ParticipationManagedByMembership, "membership_revision": value.MembershipRevision, "membership_refreshed_at": value.MembershipRefreshedAt, "updated_at": now}, "$setOnInsert": bson.M{"public_id": types.NewID("channel"), "organization_id": value.OrganizationID, "team_id": value.TeamID, "channel_id": value.ChannelID, "created_at": now}, "$inc": bson.M{"version": 1}}, options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(after)).Decode(&doc)
 	if err != nil {
 		return ChannelPolicy{}, err
 	}
 	return channelFromModel(doc), nil
 }
 
-// UpsertContextChannel atomically refreshes only Slack-derived membership
-// fields for existing policies. Enrollment, participation, limits, model
-// routing, and kill switches remain operator-owned.
+// UpsertContextChannel atomically refreshes Slack-derived membership fields.
+// Enrollment, limits, model routing, and kill switches remain operator-owned;
+// participation changes only when membership management is explicitly enabled.
 func (s *Mongo) UpsertContextChannel(ctx context.Context, value ChannelPolicy) (ChannelPolicy, error) {
 	if err := ValidateChannel(value); err != nil {
 		return ChannelPolicy{}, err
 	}
 	now := s.now().UTC()
+	if value.BotMembershipKnown && !value.ParticipationManagedByMembership {
+		_, err := s.db.Collection(models.CollectionChannels).UpdateOne(ctx,
+			bson.M{"organization_id": value.OrganizationID, "team_id": value.TeamID, "channel_id": value.ChannelID, "participation_managed_by_membership": true},
+			bson.M{"$set": bson.M{"participation_mode": string(types.ModeObserve), "participation_managed_by_membership": false, "updated_at": now}, "$inc": bson.M{"version": 1}},
+		)
+		if err != nil {
+			return ChannelPolicy{}, err
+		}
+	}
 	set := bson.M{
 		"membership_revision":     value.MembershipRevision,
 		"membership_refreshed_at": value.MembershipRefreshedAt,
@@ -301,20 +353,31 @@ func (s *Mongo) UpsertContextChannel(ctx context.Context, value ChannelPolicy) (
 	if value.Restricted {
 		set["restricted"] = true
 	}
+	if value.BotMembershipKnown {
+		set["bot_is_member"] = value.BotIsMember
+		set["bot_membership_known"] = true
+	}
+	if value.ParticipationManagedByMembership {
+		set["participation_mode"] = string(value.ParticipationMode)
+		set["participation_managed_by_membership"] = true
+	}
 	setOnInsert := bson.M{
-		"public_id":              types.NewID("channel"),
-		"organization_id":        value.OrganizationID,
-		"team_id":                value.TeamID,
-		"channel_id":             value.ChannelID,
-		"enrolled":               value.Enrolled,
-		"restricted":             value.Restricted,
-		"participation_mode":     string(value.ParticipationMode),
-		"kill_switch":            value.KillSwitch,
-		"cooldown_seconds":       int(value.Cooldown.Seconds()),
-		"max_responses_per_hour": value.MaxResponsesPerHour,
-		"max_concurrent_jobs":    value.MaxConcurrentJobs,
-		"default_model_profile":  value.DefaultModelProfile,
-		"created_at":             now,
+		"public_id":                           types.NewID("channel"),
+		"organization_id":                     value.OrganizationID,
+		"team_id":                             value.TeamID,
+		"channel_id":                          value.ChannelID,
+		"enrolled":                            value.Enrolled,
+		"restricted":                          value.Restricted,
+		"participation_mode":                  string(value.ParticipationMode),
+		"kill_switch":                         value.KillSwitch,
+		"cooldown_seconds":                    int(value.Cooldown.Seconds()),
+		"max_responses_per_hour":              value.MaxResponsesPerHour,
+		"max_concurrent_jobs":                 value.MaxConcurrentJobs,
+		"default_model_profile":               value.DefaultModelProfile,
+		"bot_is_member":                       value.BotIsMember,
+		"bot_membership_known":                value.BotMembershipKnown,
+		"participation_managed_by_membership": value.ParticipationManagedByMembership,
+		"created_at":                          now,
 	}
 	if value.Name != "" {
 		delete(setOnInsert, "name")
@@ -323,6 +386,14 @@ func (s *Mongo) UpsertContextChannel(ctx context.Context, value ChannelPolicy) (
 	}
 	if value.Restricted {
 		delete(setOnInsert, "restricted")
+	}
+	if value.BotMembershipKnown {
+		delete(setOnInsert, "bot_is_member")
+		delete(setOnInsert, "bot_membership_known")
+	}
+	if value.ParticipationManagedByMembership {
+		delete(setOnInsert, "participation_mode")
+		delete(setOnInsert, "participation_managed_by_membership")
 	}
 	var doc models.Channel
 	err := s.db.Collection(models.CollectionChannels).FindOneAndUpdate(
@@ -395,5 +466,5 @@ func (s *Mongo) ListChannels(ctx context.Context, org string) ([]ChannelPolicy, 
 	return out, nil
 }
 func channelFromModel(d models.Channel) ChannelPolicy {
-	return ChannelPolicy{OrganizationID: d.OrganizationID, TeamID: d.TeamID, ChannelID: d.ChannelID, Name: d.Name, Enrolled: d.Enrolled, Restricted: d.Restricted, ParticipationMode: types.ParticipationMode(d.ParticipationMode), KillSwitch: d.KillSwitch, Cooldown: time.Duration(d.CooldownSeconds) * time.Second, MaxResponsesPerHour: d.MaxResponsesPerHour, MaxConcurrentJobs: d.MaxConcurrentJobs, DefaultModelProfile: d.DefaultModelProfile, ApproverUserIDs: append([]string(nil), d.ApproverUserIDs...), MembershipRevision: d.MembershipRevision, MembershipRefreshedAt: d.MembershipRefreshedAt, Version: d.Version}
+	return ChannelPolicy{OrganizationID: d.OrganizationID, TeamID: d.TeamID, ChannelID: d.ChannelID, Name: d.Name, Enrolled: d.Enrolled, Restricted: d.Restricted, ParticipationMode: types.ParticipationMode(d.ParticipationMode), KillSwitch: d.KillSwitch, Cooldown: time.Duration(d.CooldownSeconds) * time.Second, MaxResponsesPerHour: d.MaxResponsesPerHour, MaxConcurrentJobs: d.MaxConcurrentJobs, DefaultModelProfile: d.DefaultModelProfile, ApproverUserIDs: append([]string(nil), d.ApproverUserIDs...), BotIsMember: d.BotIsMember, BotMembershipKnown: d.BotMembershipKnown, ParticipationManagedByMembership: d.ParticipationManagedByMembership, MembershipRevision: d.MembershipRevision, MembershipRefreshedAt: d.MembershipRefreshedAt, Version: d.Version}
 }

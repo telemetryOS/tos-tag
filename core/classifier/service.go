@@ -85,10 +85,11 @@ func (s *Service) Decide(ctx context.Context, target Target, pack types.ContextP
 func (s *Service) predict(ctx context.Context, target Target, pack types.ContextPackRevision) types.ClassificationDecision {
 	if target.ActiveThread {
 		predicted, err := s.classifier.Decide(ctx, target, pack)
+		predicted = sanitizeEvidenceReferences(predicted, pack)
 		predicted = enforceDirectReplyPlacement(predicted, target)
 		if err == nil && validateDecision(predicted, pack) == nil && predicted.Outcome != types.OutcomeSilent && predicted.Outcome != types.OutcomeReact {
 			if predicted.DirectReply != "" {
-				if predicted.Confidence >= s.assistThreshold && validateDirectReplyForTarget(predicted, target) == nil {
+				if predicted.Confidence >= s.assistThreshold && validateDirectReplyForTarget(predicted, target, pack) == nil {
 					return predicted
 				}
 			} else {
@@ -118,6 +119,7 @@ func (s *Service) predict(ctx context.Context, target Target, pack types.Context
 	}
 	if target.Envelope.IsMention {
 		predicted, err := s.classifier.Decide(ctx, target, pack)
+		predicted = sanitizeEvidenceReferences(predicted, pack)
 		predicted = enforceDirectReplyPlacement(predicted, target)
 		// A direct mention is already a hard participation trigger. The ambient
 		// confidence threshold must not discard an otherwise valid placement and
@@ -125,7 +127,7 @@ func (s *Service) predict(ctx context.Context, target Target, pack types.Context
 		// the deployment-default (usually max-effort) profile.
 		if err == nil && validateDecision(predicted, pack) == nil && predicted.Outcome != types.OutcomeSilent && predicted.Outcome != types.OutcomeReact && (predicted.DirectReply == "" || predicted.Confidence >= s.channelReplyThreshold) {
 			predicted = enforceDirectMentionPlacement(predicted, target.Envelope.Text)
-			if predicted.DirectReply == "" || validateDirectReplyForTarget(predicted, target) == nil {
+			if predicted.DirectReply == "" || validateDirectReplyForTarget(predicted, target, pack) == nil {
 				return predicted
 			}
 		}
@@ -142,11 +144,12 @@ func (s *Service) predict(ctx context.Context, target Target, pack types.Context
 	if err != nil {
 		return silent("classifier.error")
 	}
+	predicted = sanitizeEvidenceReferences(predicted, pack)
 	predicted = enforceDirectReplyPlacement(predicted, target)
 	if err := validateDecision(predicted, pack); err != nil {
 		return silent("classifier.invalid")
 	}
-	if predicted.DirectReply != "" && validateDirectReplyForTarget(predicted, target) != nil {
+	if predicted.DirectReply != "" && validateDirectReplyForTarget(predicted, target, pack) != nil {
 		return silent("classifier.invalid_direct_reply")
 	}
 	if predicted.Outcome != types.OutcomeSilent && predicted.Confidence < s.assistThreshold {
@@ -162,6 +165,42 @@ func (s *Service) predict(ctx context.Context, target Target, pack types.Context
 		predicted = silent("admission.destination_disclosure_denied")
 	}
 	return predicted
+}
+
+// sanitizeEvidenceReferences preserves an otherwise valid participation
+// decision while removing source IDs that the immutable context pack does not
+// authorize for the requested disclosure class. The worker can still retrieve
+// fresh product or web evidence through reviewed capabilities; an invented or
+// misclassified Slack source must never turn into context authority or make a
+// useful standalone question disappear.
+func sanitizeEvidenceReferences(decision types.ClassificationDecision, pack types.ContextPackRevision) types.ClassificationDecision {
+	available := make(map[string]types.DisclosureClass, len(pack.Sources))
+	for _, source := range pack.Sources {
+		available[source.ID] = source.DisclosureClass
+	}
+	pruned := false
+	releasable := make([]string, 0, len(decision.ReleasableEvidenceIDs))
+	for _, id := range decision.ReleasableEvidenceIDs {
+		if available[id] == types.DisclosureDestinationSafe {
+			releasable = append(releasable, id)
+		} else {
+			pruned = true
+		}
+	}
+	restricted := make([]string, 0, len(decision.RestrictedSignalIDs))
+	for _, id := range decision.RestrictedSignalIDs {
+		if available[id] == types.DisclosureRestrictedAwareness {
+			restricted = append(restricted, id)
+		} else {
+			pruned = true
+		}
+	}
+	decision.ReleasableEvidenceIDs = releasable
+	decision.RestrictedSignalIDs = restricted
+	if pruned {
+		decision.ReasonCodes = append(decision.ReasonCodes, "policy.invalid_evidence_pruned")
+	}
+	return decision
 }
 
 func enforceDirectReplyPlacement(decision types.ClassificationDecision, target Target) types.ClassificationDecision {
@@ -213,6 +252,17 @@ func enforceDirectMentionPlacement(decision types.ClassificationDecision, text s
 			decision.Outcome = requested
 			decision.ReasonCodes = append(decision.ReasonCodes, reason)
 		}
+		return decision
+	}
+	if decision.SourceWriteRequested {
+		return decision
+	}
+	if decision.ProductRetrievalRequired {
+		return decision
+	}
+	if decision.Outcome == types.OutcomeReplyInThread && briefSelfContainedMention(text) {
+		decision.Outcome = types.OutcomeReplyInChannel
+		decision.ReasonCodes = append(decision.ReasonCodes, "policy.brief_surface_channel")
 		return decision
 	}
 	if decision.Outcome == types.OutcomeReplyInChannel && requiresThreadSurface(text) {
@@ -377,12 +427,14 @@ func normalizedSocialText(text string) string {
 	return strings.Trim(text, " \t\r\n.!?,;:")
 }
 
-func validateDirectReplyForTarget(decision types.ClassificationDecision, target Target) error {
+func validateDirectReplyForTarget(decision types.ClassificationDecision, target Target, pack types.ContextPackRevision) error {
 	if decision.DirectReply == "" {
 		return errors.New("direct reply is empty")
 	}
-	if !isDirectSocialCandidate(target.Envelope.Text) {
-		return errors.New("target is not an allowlisted social message")
+	policyRedirect := decision.SourceWriteRequested && decision.DirectReply == sourceWriteRedirectReply
+	boundedClarification := likelyConversationallyAddressedToAgent(target, pack) && isMissingLocationWeatherQuestion(target.Envelope.Text) && decision.DirectReply == weatherLocationClarificationReply
+	if !policyRedirect && !boundedClarification && !isDirectSocialCandidate(target.Envelope.Text) {
+		return errors.New("target is not an allowlisted direct-reply message")
 	}
 	if decision.RequiresFullAgent || len(decision.ReleasableEvidenceIDs) != 0 || len(decision.RestrictedSignalIDs) != 0 {
 		return errors.New("direct reply requested agent or evidence")
@@ -505,6 +557,24 @@ type DeterministicClassifier struct{}
 
 func (DeterministicClassifier) Decide(_ context.Context, target Target, pack types.ContextPackRevision) (types.ClassificationDecision, error) {
 	lower := strings.ToLower(target.Envelope.Text)
+	if corrected := withConversationalAddressPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeSilent, ReasonCodes: []string{"deterministic.ambient"}}, target, pack); corrected.Outcome != types.OutcomeSilent {
+		return corrected, nil
+	}
+	if isObviousSourceWriteRequest(target.Envelope.Text) {
+		return withSourceWritePolicyCorrections(types.ClassificationDecision{ReasonCodes: []string{"deterministic.source_write"}}, target), nil
+	}
+	if isObviousProductKnowledgeQuestion(target.Envelope.Text, types.ClassificationDecision{}) {
+		return types.ClassificationDecision{
+			Outcome:                  types.OutcomeReplyInThread,
+			Confidence:               0.99,
+			ReasonCodes:              []string{"deterministic.product_knowledge"},
+			ResponseIntent:           "retrieve authoritative TelemetryOS product evidence before answering",
+			ProductRetrievalRequired: true,
+			DisclosureClass:          types.DisclosureDestinationSafe,
+			RequiresFullAgent:        true,
+			Reaction:                 "thinking_face",
+		}, nil
+	}
 	if isDirectSocialCandidate(target.Envelope.Text) {
 		outcome := types.OutcomeReplyInChannel
 		if target.ActiveThread {

@@ -58,6 +58,38 @@ printf '%s' "$API_TOKEN"
 	}
 }
 
+func TestReviewedPublicURLCanEnterArgvAndOutputWithoutUnredactingToken(t *testing.T) {
+	root := t.TempDir()
+	script := filepath.Join(root, "wiki.sh")
+	content := "#!/bin/sh\nprintf 'arg=%s\\nurl=%s\\ntoken=%s\\n' \"$1\" \"$WIKI_URL\" \"$WIKI_TOKEN\"\n"
+	if err := os.WriteFile(script, []byte(content), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"id":"wiki","version":"1.0.0","script":"wiki.sh","operations":[{"id":"read","env":["WIKI_URL","WIKI_TOKEN"],"public_env":["WIKI_URL"],"timeout_seconds":2,"max_output_bytes":4096,"risk":"read"}]}`
+	if err := os.WriteFile(filepath.Join(root, "tool.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := LoadBundle(root, "tool.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const publicURL = "https://wiki.example/pages/0123456789abcdef01234567"
+	request := Request{OperationID: "read", Args: []string{publicURL}, SecretValues: map[string]string{"WIKI_URL": "https://wiki.example", "WIKI_TOKEN": "secret-token"}, Capability: Capability{ToolID: "wiki", ToolVersion: "1.0.0", OperationID: "read", AttemptToken: "lease", SteeringEpoch: 1, ExpiresAt: time.Now().Add(time.Minute)}}
+	result, err := (Executor{Enabled: true}).Execute(context.Background(), bundle, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Output, publicURL) || !strings.Contains(result.Output, "url=https://wiki.example") || !strings.Contains(result.Output, "token=[REDACTED]") || strings.Contains(result.Output, "secret-token") {
+		t.Fatalf("unexpected public URL output: %q", result.Output)
+	}
+
+	request.SecretValues["WIKI_URL"] = "https://user:password@wiki.example"
+	request.Args = []string{"https://user:password@wiki.example"}
+	if _, err := (Executor{Enabled: true}).Execute(context.Background(), bundle, request); err == nil {
+		t.Fatal("credential-bearing public URL was accepted in argv")
+	}
+}
+
 func TestToolUsageIsContentFree(t *testing.T) {
 	root := writeBundle(t, "#!/bin/sh\nprintf ok\n")
 	bundle, err := LoadBundle(root, "tool.json")
@@ -140,6 +172,26 @@ func TestLoadBundleRejectsAdminRisk(t *testing.T) {
 	}
 }
 
+func TestTelemetryOSCodeToolIsPermanentlyReadOnly(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "run.sh"), []byte("#!/bin/sh\nprintf ok\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"id":"telemetryos.code","version":"v1","script":"run.sh","operations":[{"id":"write","timeout_seconds":1,"max_output_bytes":10,"risk":"write"}]}`
+	if err := os.WriteFile(filepath.Join(root, "tool.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadBundle(root, "tool.json"); err == nil || !strings.Contains(err.Error(), "permanently read-only") {
+		t.Fatalf("source write manifest error=%v", err)
+	}
+
+	bundle := Bundle{Root: root, ScriptHash: digest([]byte("#!/bin/sh\nprintf ok\n")), Manifest: Manifest{ID: "telemetryos.code", Version: "v1", Script: "run.sh", Operations: []Operation{{ID: "write", TimeoutSeconds: 1, MaxOutputBytes: 10, Risk: "write"}}}}
+	request := Request{OperationID: "write", Capability: Capability{ToolID: "telemetryos.code", ToolVersion: "v1", OperationID: "write", AttemptToken: "attempt", SteeringEpoch: 1, ExpiresAt: time.Now().Add(time.Minute)}}
+	if _, err := (Executor{Enabled: true}).Execute(context.Background(), bundle, request); err == nil || !strings.Contains(err.Error(), "permanently read-only") {
+		t.Fatalf("source write execution error=%v", err)
+	}
+}
+
 func TestLoadBundleValidatesExplicitApprovalPolicy(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "run.sh"), []byte("#!/bin/sh\n"), 0o700); err != nil {
@@ -177,6 +229,26 @@ func TestLoadBundleRejectsReservedControlEnvironment(t *testing.T) {
 	}
 	if _, err := LoadBundle(root, "tool.json"); err == nil {
 		t.Fatal("reserved control environment was accepted")
+	}
+}
+
+func TestLoadBundleRejectsUndeclaredOrNonURLPublicEnvironment(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "run.sh"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, manifest := range map[string]string{
+		"undeclared": `{"id":"tool","version":"v1","script":"run.sh","operations":[{"id":"read","env":["API_TOKEN"],"public_env":["WIKI_URL"],"timeout_seconds":1,"max_output_bytes":10,"risk":"read"}]}`,
+		"non URL":    `{"id":"tool","version":"v1","script":"run.sh","operations":[{"id":"read","env":["PUBLIC_VALUE"],"public_env":["PUBLIC_VALUE"],"timeout_seconds":1,"max_output_bytes":10,"risk":"read"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(root, "tool.json"), []byte(manifest), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadBundle(root, "tool.json"); err == nil {
+				t.Fatal("invalid public environment was accepted")
+			}
+		})
 	}
 }
 

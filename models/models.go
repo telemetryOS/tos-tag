@@ -42,6 +42,7 @@ const (
 	CollectionApprovals             = "tool_approvals"
 	CollectionRoutines              = "routines"
 	CollectionEventSubscriptions    = "event_subscriptions"
+	CollectionSlackContextSync      = "slack_context_sync_states"
 )
 
 type Observation struct {
@@ -132,26 +133,43 @@ type Workspace struct {
 }
 
 type Channel struct {
-	ID                    bson.ObjectID `bson:"_id,omitempty"`
-	PublicID              string        `bson:"public_id"`
-	OrganizationID        string        `bson:"organization_id"`
-	TeamID                string        `bson:"team_id"`
-	ChannelID             string        `bson:"channel_id"`
-	Name                  string        `bson:"name"`
-	Enrolled              bool          `bson:"enrolled"`
-	Restricted            bool          `bson:"restricted"`
-	ParticipationMode     string        `bson:"participation_mode"`
-	KillSwitch            bool          `bson:"kill_switch"`
-	CooldownSeconds       int           `bson:"cooldown_seconds"`
-	MaxResponsesPerHour   int           `bson:"max_responses_per_hour"`
-	MaxConcurrentJobs     int           `bson:"max_concurrent_jobs"`
-	DefaultModelProfile   string        `bson:"default_model_profile,omitempty"`
-	ApproverUserIDs       []string      `bson:"approver_user_ids,omitempty"`
-	MembershipRevision    string        `bson:"membership_revision"`
-	MembershipRefreshedAt time.Time     `bson:"membership_refreshed_at"`
-	CreatedAt             time.Time     `bson:"created_at"`
-	UpdatedAt             time.Time     `bson:"updated_at"`
-	Version               int64         `bson:"version"`
+	ID                               bson.ObjectID `bson:"_id,omitempty"`
+	PublicID                         string        `bson:"public_id"`
+	OrganizationID                   string        `bson:"organization_id"`
+	TeamID                           string        `bson:"team_id"`
+	ChannelID                        string        `bson:"channel_id"`
+	Name                             string        `bson:"name"`
+	Enrolled                         bool          `bson:"enrolled"`
+	Restricted                       bool          `bson:"restricted"`
+	ParticipationMode                string        `bson:"participation_mode"`
+	KillSwitch                       bool          `bson:"kill_switch"`
+	CooldownSeconds                  int           `bson:"cooldown_seconds"`
+	MaxResponsesPerHour              int           `bson:"max_responses_per_hour"`
+	MaxConcurrentJobs                int           `bson:"max_concurrent_jobs"`
+	DefaultModelProfile              string        `bson:"default_model_profile,omitempty"`
+	ApproverUserIDs                  []string      `bson:"approver_user_ids,omitempty"`
+	BotIsMember                      bool          `bson:"bot_is_member"`
+	BotMembershipKnown               bool          `bson:"bot_membership_known"`
+	ParticipationManagedByMembership bool          `bson:"participation_managed_by_membership"`
+	MembershipRevision               string        `bson:"membership_revision"`
+	MembershipRefreshedAt            time.Time     `bson:"membership_refreshed_at"`
+	CreatedAt                        time.Time     `bson:"created_at"`
+	UpdatedAt                        time.Time     `bson:"updated_at"`
+	Version                          int64         `bson:"version"`
+}
+
+// SlackContextSyncState records durable history-bootstrap progress separately
+// from retained message content. Message TTL expiry must not cause a completed
+// conversation to be fully fetched again on every process restart.
+type SlackContextSyncState struct {
+	ID                   bson.ObjectID `bson:"_id,omitempty"`
+	OrganizationID       string        `bson:"organization_id"`
+	TeamID               string        `bson:"team_id"`
+	ChannelID            string        `bson:"channel_id"`
+	BootstrapCompleted   bool          `bson:"bootstrap_completed"`
+	BootstrapCompletedAt time.Time     `bson:"bootstrap_completed_at,omitempty"`
+	SyncedThrough        time.Time     `bson:"synced_through,omitempty"`
+	UpdatedAt            time.Time     `bson:"updated_at"`
 }
 
 type ContextPack struct {
@@ -257,6 +275,7 @@ type Job struct {
 	FailureReason          string        `bson:"failure_reason,omitempty"`
 	ApprovalID             string        `bson:"approval_id,omitempty"`
 	ApprovedActionHash     string        `bson:"approved_action_hash,omitempty"`
+	ProgressMessageTS      string        `bson:"progress_message_ts,omitempty"`
 	AvailableAt            time.Time     `bson:"available_at"`
 	CreatedAt              time.Time     `bson:"created_at"`
 	UpdatedAt              time.Time     `bson:"updated_at"`
@@ -288,6 +307,7 @@ type Delivery struct {
 	ChannelID      string        `bson:"channel_id"`
 	ThreadTS       string        `bson:"thread_ts,omitempty"`
 	UpdateTS       string        `bson:"update_ts,omitempty"`
+	StreamTS       string        `bson:"stream_ts,omitempty"`
 	Result         any           `bson:"result"`
 	Status         string        `bson:"status"`
 	Attempt        int           `bson:"attempt"`

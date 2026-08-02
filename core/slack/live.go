@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,6 +47,7 @@ type LiveIngress struct {
 	done               chan struct{}
 	started            bool
 	interactionHandler ApprovalInteractionHandler
+	membershipHandler  BotMembershipHandler
 	directiveLoad      DirectiveLoadHandler
 	directiveSave      DirectiveSaveHandler
 }
@@ -53,6 +55,12 @@ type LiveIngress struct {
 func (s *LiveIngress) SetApprovalInteractionHandler(handler ApprovalInteractionHandler) {
 	s.mu.Lock()
 	s.interactionHandler = handler
+	s.mu.Unlock()
+}
+
+func (s *LiveIngress) SetBotMembershipHandler(handler BotMembershipHandler) {
+	s.mu.Lock()
+	s.membershipHandler = handler
 	s.mu.Unlock()
 }
 
@@ -92,6 +100,9 @@ func (t managedSocketModeTransport) EventsChannel() <-chan socketmode.Event {
 type deliveryAPI interface {
 	PostMessageContext(context.Context, string, ...slackapi.MsgOption) (string, string, error)
 	UpdateMessageContext(context.Context, string, string, ...slackapi.MsgOption) (string, string, string, error)
+	StartStreamContext(context.Context, string, ...slackapi.MsgOption) (string, string, error)
+	AppendStreamContext(context.Context, string, string, ...slackapi.MsgOption) (string, string, error)
+	StopStreamContext(context.Context, string, string, ...slackapi.MsgOption) (string, string, error)
 	AddReactionContext(context.Context, string, slackapi.ItemRef) error
 	GetConversationHistoryContext(context.Context, *slackapi.GetConversationHistoryParameters) (*slackapi.GetConversationHistoryResponse, error)
 	GetConversationRepliesContext(context.Context, *slackapi.GetConversationRepliesParameters) ([]slackapi.Message, bool, string, error)
@@ -102,6 +113,98 @@ type LiveDelivery struct {
 	api      deliveryAPI
 	renderer *deliveries.Renderer
 	logger   *blackbox.Logger
+}
+
+func (d *LiveDelivery) StartProgress(ctx context.Context, request types.SlackProgressStartRequest) (types.SlackProgressResult, error) {
+	started := time.Now()
+	logger := d.logger
+	if logger == nil {
+		logger = blackbox.New()
+	}
+	requestLogger := logger.WithCtx(blackbox.Ctx{"job_id": request.JobID, "channel_id": request.ChannelID, "thread_ts": request.ThreadTS, "progress_step_id": request.Step.ID})
+	requestLogger.Info("Slack Thinking Steps start requested")
+	if request.TeamID != d.teamID {
+		return types.SlackProgressResult{}, errors.New("Slack progress team does not match the configured installation")
+	}
+	if request.IdempotencyKey == "" || request.ChannelID == "" || request.ThreadTS == "" || request.JobID == "" || request.RecipientUserID == "" || request.Title == "" {
+		return types.SlackProgressResult{}, errors.New("invalid Slack progress start request")
+	}
+	chunk, err := slackTaskUpdate(request.Step)
+	if err != nil {
+		return types.SlackProgressResult{}, err
+	}
+	if timestamp, findErr := d.progressMessage(ctx, request.ChannelID, request.ThreadTS, request.IdempotencyKey); findErr != nil {
+		return types.SlackProgressResult{}, fmt.Errorf("reconcile Slack progress: %w", findErr)
+	} else if timestamp != "" {
+		requestLogger.WithCtx(blackbox.Ctx{"message_ts": timestamp, "duration_ms": time.Since(started).Milliseconds(), "duplicate": true}).Info("Slack Thinking Steps reconciled")
+		return types.SlackProgressResult{MessageTS: timestamp, UpdatedAt: time.Now().UTC(), Duplicate: true}, nil
+	}
+	options := []slackapi.MsgOption{
+		slackapi.MsgOptionRecipientTeamID(request.TeamID),
+		slackapi.MsgOptionRecipientUserID(request.RecipientUserID),
+		slackapi.MsgOptionTaskDisplayMode(slackapi.TaskDisplayModeTimeline),
+		slackapi.MsgOptionChunks(slackapi.NewPlanUpdateChunk(request.Title), chunk),
+		slackapi.MsgOptionMetadata(slackapi.SlackMetadata{EventType: "tos_tag_progress", EventPayload: map[string]any{"job_id": string(request.JobID), "idempotency_key": request.IdempotencyKey}}),
+	}
+	options = append(options, slackapi.MsgOptionTS(request.ThreadTS))
+	_, timestamp, err := d.api.StartStreamContext(ctx, request.ChannelID, options...)
+	if err != nil {
+		requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err), "slack_error_code": slackAPIErrorCode(err)}).Error("Slack Thinking Steps start failed")
+		return types.SlackProgressResult{}, err
+	}
+	requestLogger.WithCtx(blackbox.Ctx{"message_ts": timestamp, "duration_ms": time.Since(started).Milliseconds()}).Info("Slack Thinking Steps started")
+	return types.SlackProgressResult{MessageTS: timestamp, UpdatedAt: time.Now().UTC()}, nil
+}
+
+func (d *LiveDelivery) UpdateProgress(ctx context.Context, request types.SlackProgressUpdateRequest) (types.SlackProgressResult, error) {
+	started := time.Now()
+	logger := d.logger
+	if logger == nil {
+		logger = blackbox.New()
+	}
+	requestLogger := logger.WithCtx(blackbox.Ctx{"job_id": request.JobID, "channel_id": request.ChannelID, "message_ts": request.MessageTS, "progress_step_id": request.Step.ID, "progress_status": request.Step.Status})
+	if request.TeamID != d.teamID {
+		return types.SlackProgressResult{}, errors.New("Slack progress team does not match the configured installation")
+	}
+	if request.ChannelID == "" || request.MessageTS == "" || request.JobID == "" {
+		return types.SlackProgressResult{}, errors.New("invalid Slack progress update request")
+	}
+	chunk, err := slackTaskUpdate(request.Step)
+	if err != nil {
+		return types.SlackProgressResult{}, err
+	}
+	_, timestamp, err := d.api.AppendStreamContext(ctx, request.ChannelID, request.MessageTS, slackapi.MsgOptionChunks(chunk))
+	if err != nil {
+		requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err), "slack_error_code": slackAPIErrorCode(err)}).Error("Slack Thinking Steps update failed")
+		return types.SlackProgressResult{}, err
+	}
+	if timestamp == "" {
+		timestamp = request.MessageTS
+	}
+	requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds()}).Info("Slack Thinking Steps updated")
+	return types.SlackProgressResult{MessageTS: timestamp, UpdatedAt: time.Now().UTC()}, nil
+}
+
+func slackTaskUpdate(step types.SlackProgressStep) (slackapi.TaskUpdateChunk, error) {
+	if step.ID == "" || step.Title == "" {
+		return slackapi.TaskUpdateChunk{}, errors.New("Slack progress step requires id and title")
+	}
+	status := slackapi.TaskCardStatus(step.Status)
+	switch status {
+	case slackapi.TaskCardStatusPending, slackapi.TaskCardStatusInProgress, slackapi.TaskCardStatusComplete, slackapi.TaskCardStatusError:
+	default:
+		return slackapi.TaskUpdateChunk{}, errors.New("invalid Slack progress status")
+	}
+	chunk := slackapi.NewTaskUpdateChunk(step.ID, step.Title)
+	chunk.Status, chunk.Details, chunk.Output = status, step.Details, step.Output
+	for _, source := range step.Sources {
+		parsed, err := url.Parse(source.URL)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || source.Text == "" {
+			return slackapi.TaskUpdateChunk{}, errors.New("invalid Slack progress source")
+		}
+		chunk.Sources = append(chunk.Sources, slackapi.NewTaskCardSource(source.URL, source.Text))
+	}
+	return chunk, nil
 }
 
 // NewLive constructs the production adapters without opening a connection.
@@ -303,6 +406,30 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 				eventLogger.Error("Slack Events API envelope missing request metadata")
 				continue
 			}
+			membership, membershipEligible, membershipErr := NormalizeBotMembershipChange(s.options.OrganizationID, s.options.BotUserID, event.Data)
+			if membershipErr != nil {
+				eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", membershipErr)}).Error("Slack bot membership event rejected")
+				continue
+			}
+			if membershipEligible {
+				s.mu.Lock()
+				membershipHandler := s.membershipHandler
+				s.mu.Unlock()
+				if membershipHandler == nil {
+					eventLogger.Error("Slack bot membership event has no policy handler")
+					continue
+				}
+				if handleErr := membershipHandler(ctx, membership); handleErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"channel_id": membership.ChannelID, "joined": membership.Joined, "error_type": fmt.Sprintf("%T", handleErr)}).Error("Slack bot membership policy reconciliation failed; acknowledgement withheld")
+					continue
+				}
+				if ackErr := s.client.AckCtx(ctx, event.Request.EnvelopeID, nil); ackErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"channel_id": membership.ChannelID, "joined": membership.Joined, "error_type": fmt.Sprintf("%T", ackErr)}).Error("Slack bot membership event acknowledgement failed")
+					continue
+				}
+				eventLogger.WithCtx(blackbox.Ctx{"channel_id": membership.ChannelID, "joined": membership.Joined}).Info("Slack bot membership policy reconciled and acknowledged")
+				continue
+			}
 			started := time.Now()
 			normalized, eligible, err := NormalizeEventsAPI(s.options.OrganizationID, s.options.BotUserID, event.Request.EnvelopeID, event.Data)
 			if err != nil {
@@ -337,6 +464,42 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 			envelopeLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "duplicate": accepted.Duplicate, "ignored": false}).Info("Slack event durably accepted and acknowledged")
 		}
 	}
+}
+
+func NormalizeBotMembershipChange(organizationID, botUserID string, data any) (BotMembershipChange, bool, error) {
+	event, ok := data.(slackevents.EventsAPIEvent)
+	if !ok || event.Type != slackevents.CallbackEvent {
+		return BotMembershipChange{}, false, nil
+	}
+	var callback *slackevents.EventsAPICallbackEvent
+	switch value := event.Data.(type) {
+	case *slackevents.EventsAPICallbackEvent:
+		callback = value
+	case slackevents.EventsAPICallbackEvent:
+		callback = &value
+	}
+	if callback == nil {
+		return BotMembershipChange{}, false, errors.New("Slack callback payload is malformed")
+	}
+	change := BotMembershipChange{OrganizationID: organizationID, WorkspaceID: callback.TeamID, EventID: callback.EventID}
+	switch inner := event.InnerEvent.Data.(type) {
+	case *slackevents.MemberJoinedChannelEvent:
+		if inner.User != botUserID {
+			return BotMembershipChange{}, false, nil
+		}
+		change.ChannelID, change.Joined = inner.Channel, true
+	case *slackevents.MemberLeftChannelEvent:
+		if inner.User != botUserID {
+			return BotMembershipChange{}, false, nil
+		}
+		change.ChannelID, change.Joined = inner.Channel, false
+	default:
+		return BotMembershipChange{}, false, nil
+	}
+	if botUserID == "" || change.WorkspaceID == "" || change.ChannelID == "" {
+		return BotMembershipChange{}, false, errors.New("Slack bot membership event is incomplete")
+	}
+	return change, true, nil
 }
 
 func approvalInteractionDiagnosticCode(err error) string {
@@ -445,14 +608,19 @@ func directiveModal(request DirectiveConfigurationRequest, current DirectiveConf
 	if current.Revision > 0 {
 		revision = fmt.Sprintf("Editing active revision %d.", current.Revision)
 	}
-	intro := slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", "Set the operating directive for this channel. It guides both the ambient classifier and any admitted full-agent work, but cannot grant tools or override safety policy.\n\n"+revision, false, false), nil, nil)
+	alert := slackapi.NewAlertBlock(
+		slackapi.NewTextBlockObject("plain_text", "This directive affects only this channel. It cannot grant tools or override safety policy.", false, false),
+		slackapi.AlertBlockOptionLevel(slackapi.AlertLevelInfo),
+		slackapi.AlertBlockOptionBlockID("tos_tag_directive_scope"),
+	)
+	intro := slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", "Set the operating directive for this channel. It guides both the ambient classifier and admitted full-agent work.\n\n"+revision, false, false), nil, nil)
 	input := slackapi.NewInputBlock(directivePromptBlockID, slackapi.NewTextBlockObject("plain_text", "Channel directive", false, false), slackapi.NewTextBlockObject("plain_text", "Example: Investigate each alert, correlate it with OpenTelemetry and related systems, and report the most likely root cause with evidence.", false, false), plain)
 	return slackapi.ModalViewRequest{
 		Type:            slackapi.VTModal,
 		Title:           slackapi.NewTextBlockObject("plain_text", "Channel directive", false, false),
 		Submit:          slackapi.NewTextBlockObject("plain_text", "Save directive", false, false),
 		Close:           slackapi.NewTextBlockObject("plain_text", "Cancel", false, false),
-		Blocks:          slackapi.Blocks{BlockSet: []slackapi.Block{intro, input}},
+		Blocks:          slackapi.Blocks{BlockSet: []slackapi.Block{alert, intro, input}},
 		PrivateMetadata: string(metadata),
 		CallbackID:      directiveCallbackID,
 	}
@@ -657,20 +825,66 @@ func (d *LiveDelivery) Send(ctx context.Context, request types.SlackDeliveryRequ
 		if _, alreadyDelivered := existing[index+1]; alreadyDelivered {
 			continue
 		}
-		blocks, err := slackBlocksFromRendered(payload.Blocks)
+		regularRendered, err := downgradeAgentUIBlocks(payload.Blocks)
+		if err != nil {
+			return types.SlackDeliveryResult{}, err
+		}
+		regularBlocks, err := slackBlocksFromRendered(regularRendered)
 		if err != nil {
 			return types.SlackDeliveryResult{}, err
 		}
 		options := []slackapi.MsgOption{
 			slackapi.MsgOptionText(payload.Text, false),
-			slackapi.MsgOptionBlocks(blocks...),
+			slackapi.MsgOptionBlocks(regularBlocks...),
 			slackapi.MsgOptionMetadata(slackapi.SlackMetadata{EventType: "tos_tag_delivery", EventPayload: map[string]any{"delivery_id": string(request.ID), "part": index + 1}}),
 		}
-		if request.Destination.ThreadTS != "" && request.Destination.UpdateTS == "" {
+		if request.Destination.ThreadTS != "" && request.Destination.UpdateTS == "" && !(request.Destination.StreamTS != "" && index == 0) {
 			options = append(options, slackapi.MsgOptionTS(request.Destination.ThreadTS))
 		}
 		var timestamp string
-		if request.Destination.UpdateTS != "" {
+		if request.Destination.StreamTS != "" && index == 0 {
+			// A Thinking Steps stream is opened in chunks mode, so its final
+			// content must remain in chunks mode as well. Sending markdown_text or
+			// top-level blocks here makes Slack reject the close with
+			// streaming_mode_mismatch. A blocks chunk preserves the renderer's
+			// validated Block Kit result and finalizes it atomically with metadata.
+			nativeBlocks, conversionErr := slackBlocksFromRendered(payload.Blocks)
+			if conversionErr != nil {
+				return types.SlackDeliveryResult{}, conversionErr
+			}
+			var finalChunk slackapi.StreamChunk = slackapi.NewMarkdownTextChunk(payload.Text)
+			if len(nativeBlocks) > 0 {
+				finalChunk = slackapi.NewBlocksChunk(nativeBlocks...)
+			}
+			streamOptions := []slackapi.MsgOption{slackapi.MsgOptionChunks(finalChunk), slackapi.MsgOptionMetadata(slackapi.SlackMetadata{EventType: "tos_tag_delivery", EventPayload: map[string]any{"delivery_id": string(request.ID), "part": index + 1}})}
+			_, timestamp, err = d.api.StopStreamContext(ctx, request.Destination.ChannelID, request.Destination.StreamTS, streamOptions...)
+			if timestamp == "" {
+				timestamp = request.Destination.StreamTS
+			}
+			if err != nil {
+				failureContext := blackbox.Ctx{"part": index + 1, "error_type": fmt.Sprintf("%T", err)}
+				if code := slackAPIErrorCode(err); code != "" {
+					failureContext["slack_error_code"] = code
+				}
+				requestLogger.WithCtx(failureContext).Warn("Slack stream finalization failed; falling back to normal delivery")
+				expiredStreamText := "Agent work completed. The final answer follows in this thread."
+				expiredStreamBlock := slackapi.NewSectionBlock(slackapi.NewTextBlockObject(slackapi.MarkdownType, expiredStreamText, false, false), nil, nil)
+				if _, _, _, updateErr := d.api.UpdateMessageContext(
+					ctx,
+					request.Destination.ChannelID,
+					request.Destination.StreamTS,
+					slackapi.MsgOptionText(expiredStreamText, false),
+					slackapi.MsgOptionBlocks(expiredStreamBlock),
+				); updateErr != nil {
+					requestLogger.WithCtx(blackbox.Ctx{"part": index + 1, "error_type": fmt.Sprintf("%T", updateErr)}).Warn("Slack expired stream cleanup failed; continuing with final fallback delivery")
+				}
+				fallbackOptions := append([]slackapi.MsgOption(nil), options...)
+				if request.Destination.ThreadTS != "" {
+					fallbackOptions = append(fallbackOptions, slackapi.MsgOptionTS(request.Destination.ThreadTS))
+				}
+				_, timestamp, err = d.api.PostMessageContext(ctx, request.Destination.ChannelID, fallbackOptions...)
+			}
+		} else if request.Destination.UpdateTS != "" {
 			_, timestamp, _, err = d.api.UpdateMessageContext(ctx, request.Destination.ChannelID, request.Destination.UpdateTS, options...)
 			if timestamp == "" {
 				timestamp = request.Destination.UpdateTS
@@ -694,6 +908,41 @@ func (d *LiveDelivery) Send(ctx context.Context, request types.SlackDeliveryRequ
 	result := types.SlackDeliveryResult{MessageTS: firstTimestamp, DeliveredAt: time.Now().UTC(), Duplicate: len(existing) == len(payloads)}
 	requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "duplicate": result.Duplicate, "message_ts": result.MessageTS}).Info("Slack delivery completed")
 	return result, nil
+}
+
+// progressMessage reconciles a started Thinking Steps stream by immutable
+// metadata. This closes the crash window between Slack accepting startStream
+// and the job persisting the returned timestamp.
+func (d *LiveDelivery) progressMessage(ctx context.Context, channelID, threadTS, idempotencyKey string) (string, error) {
+	cursor := ""
+	for page := 0; page < 20; page++ {
+		var messages []slackapi.Message
+		var hasMore bool
+		var next string
+		if threadTS != "" {
+			var err error
+			messages, hasMore, next, err = d.api.GetConversationRepliesContext(ctx, &slackapi.GetConversationRepliesParameters{ChannelID: channelID, Timestamp: threadTS, Cursor: cursor, Limit: 100, IncludeAllMetadata: true})
+			if err != nil {
+				return "", err
+			}
+		} else {
+			response, err := d.api.GetConversationHistoryContext(ctx, &slackapi.GetConversationHistoryParameters{ChannelID: channelID, Cursor: cursor, Limit: 100, IncludeAllMetadata: true})
+			if err != nil {
+				return "", err
+			}
+			messages, hasMore, next = response.Messages, response.HasMore, response.ResponseMetaData.NextCursor
+		}
+		for _, message := range messages {
+			if message.Metadata.EventType == "tos_tag_progress" && fmt.Sprint(message.Metadata.EventPayload["idempotency_key"]) == idempotencyKey {
+				return message.Timestamp, nil
+			}
+		}
+		if !hasMore || next == "" {
+			break
+		}
+		cursor = next
+	}
+	return "", nil
 }
 
 func (d *LiveDelivery) React(ctx context.Context, request types.SlackReactionRequest) (types.SlackReactionResult, error) {
@@ -746,6 +995,77 @@ func validReactionName(value string) bool {
 		}
 	}
 	return true
+}
+
+// downgradeAgentUIBlocks preserves rich agent blocks for the streaming path
+// while making ordinary post/update and stream-fallback delivery reliable.
+// Slack rejects Card, Carousel, and Data Table blocks on chat.postMessage even
+// though they are valid inside a streaming blocks chunk.
+func downgradeAgentUIBlocks(rendered []map[string]any) ([]map[string]any, error) {
+	blocks := make([]map[string]any, 0, len(rendered))
+	for _, block := range rendered {
+		switch block["type"] {
+		case "card":
+			text := agentCardText(block)
+			if text == "" {
+				return nil, errors.New("rendered Slack card lacks fallback content")
+			}
+			blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": text}, "expand": true})
+		case "carousel":
+			elements, ok := block["elements"].([]any)
+			if !ok || len(elements) == 0 {
+				return nil, errors.New("rendered Slack carousel lacks cards")
+			}
+			parts := make([]string, 0, len(elements))
+			for _, element := range elements {
+				card, ok := element.(map[string]any)
+				if !ok {
+					return nil, errors.New("rendered Slack carousel has an invalid card")
+				}
+				parts = append(parts, agentCardText(card))
+			}
+			text := strings.Join(parts, "\n\n")
+			if text == "" || len([]rune(text)) > 3000 {
+				return nil, errors.New("rendered Slack carousel fallback exceeds one section")
+			}
+			blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": text}, "expand": true})
+		case "data_table":
+			rows, ok := block["rows"].([]any)
+			if !ok || len(rows) < 2 {
+				return nil, errors.New("rendered Slack data table lacks rows")
+			}
+			first, ok := rows[0].([]any)
+			if !ok || len(first) == 0 {
+				return nil, errors.New("rendered Slack data table lacks columns")
+			}
+			columns := make([]any, len(first))
+			for index := range columns {
+				columns[index] = map[string]any{"is_wrapped": false}
+			}
+			blocks = append(blocks, map[string]any{"type": "table", "column_settings": columns, "rows": rows})
+		default:
+			blocks = append(blocks, block)
+		}
+	}
+	return blocks, nil
+}
+
+func agentCardText(card map[string]any) string {
+	value := func(field string) string {
+		object, _ := card[field].(map[string]any)
+		text, _ := object["text"].(string)
+		return strings.TrimSpace(text)
+	}
+	parts := make([]string, 0, 4)
+	if title := value("title"); title != "" {
+		parts = append(parts, "*"+title+"*")
+	}
+	for _, field := range []string{"subtitle", "body", "subtext"} {
+		if text := value(field); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // slackBlocksFromRendered preserves the renderer's validated JSON exactly.

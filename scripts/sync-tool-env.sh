@@ -127,7 +127,7 @@ fi
 tool_path="${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 upsert TAG__MARKETPLACES__TOOL_ROOT "${repo_root}/tool-marketplace"
 upsert TAG__MARKETPLACES__TOOL_CATALOG_PATH catalog.json
-upsert TAG__MARKETPLACES__INJECTED_TOOLS telemetryos.linear,telemetryos.wiki,telemetryos.otel,telemetryos.device-logs,telemetryos.code
+upsert TAG__MARKETPLACES__INJECTED_TOOLS telemetryos.linear,telemetryos.wiki,telemetryos.otel,telemetryos.device-logs,telemetryos.code,telemetryos.product-docs
 upsert TAG__MARKETPLACES__TOOL_PATH "${tool_path}"
 upsert TAG__MARKETPLACES__TOOLS_ENABLED true
 upsert TAG__KEYSTORE__ENABLED true

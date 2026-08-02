@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/RobertWHurst/blackbox"
@@ -20,12 +21,15 @@ type ContextSyncOptions struct {
 	OrganizationID     string
 	TeamID             string
 	UserOAuthToken     string
+	BotUserOAuthToken  string
 	BotUserID          string
 	Lookback           time.Duration
 	Timeout            time.Duration
 	MaxChannels        int
 	MaxMessages        int
 	MessagesPerChannel int
+	RequestInterval    time.Duration
+	StateStore         ContextSyncStateStore
 	Logger             *blackbox.Logger
 }
 
@@ -33,6 +37,8 @@ type ContextSyncStats struct {
 	ChannelsDiscovered int
 	ChannelsRegistered int
 	ChannelsSkipped    int
+	ChannelsCurrent    int
+	ChannelsBackfilled int
 	MessagesImported   int
 	StartedAt          time.Time
 	CompletedAt        time.Time
@@ -42,9 +48,10 @@ type ContextSyncStats struct {
 // registration. Its channel inventory stays private to the Slack adapter so
 // callers cannot use the User OAuth client for unrelated operations.
 type ContextSyncRun struct {
-	stats    ContextSyncStats
-	channels []slackapi.Channel
-	cutoff   time.Time
+	stats       ContextSyncStats
+	channels    []slackapi.Channel
+	cutoff      time.Time
+	syncThrough time.Time
 }
 
 type ContextChannelHandler func(context.Context, types.SlackContextChannel) (bool, error)
@@ -54,6 +61,10 @@ type contextSyncAPI interface {
 	GetConversationsForUserContext(context.Context, *slackapi.GetConversationsForUserParameters) ([]slackapi.Channel, string, error)
 	GetConversationHistoryContext(context.Context, *slackapi.GetConversationHistoryParameters) (*slackapi.GetConversationHistoryResponse, error)
 	GetConversationRepliesContext(context.Context, *slackapi.GetConversationRepliesParameters) ([]slackapi.Message, bool, string, error)
+}
+
+type botContextAPI interface {
+	GetConversationsContext(context.Context, *slackapi.GetConversationsParameters) ([]slackapi.Channel, string, error)
 }
 
 type contextChannelPage struct {
@@ -71,26 +82,46 @@ type contextReplyPage struct {
 // user's conversations and import a bounded, fair recent-history snapshot.
 // It never posts, reacts, joins a channel, or changes Slack state.
 type ContextSyncer struct {
-	options ContextSyncOptions
-	api     contextSyncAPI
+	options     ContextSyncOptions
+	api         contextSyncAPI
+	botAPI      botContextAPI
+	backfillMu  sync.Mutex
+	paceMu      sync.Mutex
+	nextRequest map[string]time.Time
 }
 
 func NewContextSyncer(options ContextSyncOptions) (*ContextSyncer, error) {
 	if !strings.HasPrefix(options.UserOAuthToken, "xoxp-") {
 		return nil, errors.New("Slack context sync requires a User OAuth xoxp token")
 	}
-	api := slackapi.New(options.UserOAuthToken)
-	return newContextSyncer(options, api)
+	if !strings.HasPrefix(options.BotUserOAuthToken, "xoxb-") {
+		return nil, errors.New("Slack context sync requires a Bot User OAuth xoxb token for membership reconciliation")
+	}
+	return newContextSyncerWithAPIs(options, slackapi.New(options.UserOAuthToken), slackapi.New(options.BotUserOAuthToken))
 }
 
 func newContextSyncer(options ContextSyncOptions, api contextSyncAPI) (*ContextSyncer, error) {
-	if options.OrganizationID == "" || options.TeamID == "" || options.Lookback <= 0 || options.Timeout <= 0 || options.MaxChannels <= 0 || options.MaxMessages <= 0 || options.MessagesPerChannel <= 0 || api == nil {
+	botAPI, ok := api.(botContextAPI)
+	if !ok {
+		return nil, errors.New("Slack context sync bot membership API is required")
+	}
+	return newContextSyncerWithAPIs(options, api, botAPI)
+}
+
+func newContextSyncerWithAPIs(options ContextSyncOptions, api contextSyncAPI, botAPI botContextAPI) (*ContextSyncer, error) {
+	if options.OrganizationID == "" || options.TeamID == "" || options.Lookback <= 0 || options.Timeout <= 0 || options.RequestInterval < 0 || options.MaxChannels <= 0 || options.MaxMessages <= 0 || options.MessagesPerChannel <= 0 || api == nil {
 		return nil, errors.New("invalid Slack context sync options")
+	}
+	if botAPI == nil {
+		return nil, errors.New("Slack context sync bot membership API is required")
 	}
 	if options.Logger == nil {
 		options.Logger = blackbox.New()
 	}
-	return &ContextSyncer{options: options, api: api}, nil
+	if options.StateStore == nil {
+		options.StateStore = NewMemoryContextSyncStateStore()
+	}
+	return &ContextSyncer{options: options, api: api, botAPI: botAPI, nextRequest: make(map[string]time.Time)}, nil
 }
 
 func (s *ContextSyncer) Sync(parent context.Context, register ContextChannelHandler, importMessage ContextMessageHandler) (ContextSyncStats, error) {
@@ -110,7 +141,7 @@ func (s *ContextSyncer) Sync(parent context.Context, register ContextChannelHand
 // event-capture gap during startup.
 func (s *ContextSyncer) Discover(parent context.Context, register ContextChannelHandler) (*ContextSyncRun, error) {
 	stats := ContextSyncStats{StartedAt: time.Now().UTC()}
-	run := &ContextSyncRun{stats: stats, cutoff: time.Now().UTC().Add(-s.options.Lookback)}
+	run := &ContextSyncRun{stats: stats, cutoff: stats.StartedAt.Add(-s.options.Lookback), syncThrough: stats.StartedAt}
 	if register == nil {
 		return run, errors.New("Slack context channel handler is required")
 	}
@@ -127,10 +158,14 @@ func (s *ContextSyncer) Discover(parent context.Context, register ContextChannel
 	if err != nil {
 		return run, err
 	}
+	botMembership, err := s.listBotMembership(ctx)
+	if err != nil {
+		return run, err
+	}
 	run.stats.ChannelsDiscovered = len(channels)
 	registeredChannels := make([]slackapi.Channel, 0, len(channels))
 	for _, channel := range channels {
-		authorized, err := register(ctx, contextChannel(s.options.OrganizationID, s.options.TeamID, channel))
+		authorized, err := register(ctx, contextChannel(s.options.OrganizationID, s.options.TeamID, channel, botMembership))
 		if err != nil {
 			return run, fmt.Errorf("register Slack context channel %s: %w", channel.ID, err)
 		}
@@ -149,6 +184,38 @@ func (s *ContextSyncer) Discover(parent context.Context, register ContextChannel
 	return run, nil
 }
 
+func (s *ContextSyncer) listBotMembership(ctx context.Context) (map[string]bool, error) {
+	membership := make(map[string]bool)
+	cursor := ""
+	count := 0
+	for {
+		limit := min(200, s.options.MaxChannels-count)
+		if limit <= 0 {
+			return nil, fmt.Errorf("Slack bot channel count exceeds configured maximum %d", s.options.MaxChannels)
+		}
+		result, err := withSlackRateLimitRetry(ctx, s, "conversations.list", func() (contextChannelPage, error) {
+			page, next, callErr := s.botAPI.GetConversationsContext(ctx, &slackapi.GetConversationsParameters{
+				Cursor: cursor, Types: []string{"public_channel", "private_channel"}, Limit: limit, ExcludeArchived: true, TeamID: s.options.TeamID,
+			})
+			return contextChannelPage{channels: page, nextCursor: next}, callErr
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list bot conversations: %w", err)
+		}
+		count += len(result.channels)
+		for _, channel := range result.channels {
+			membership[channel.ID] = channel.IsMember
+		}
+		if result.nextCursor == "" {
+			return membership, nil
+		}
+		if count >= s.options.MaxChannels {
+			return nil, fmt.Errorf("Slack bot channel count exceeds configured maximum %d", s.options.MaxChannels)
+		}
+		cursor = result.nextCursor
+	}
+}
+
 // Backfill imports a bounded, idempotent history snapshot for a previously
 // authorized discovery run. It may run concurrently with live Socket Mode
 // ingestion because both paths share canonical event IDs.
@@ -156,12 +223,22 @@ func (s *ContextSyncer) Backfill(parent context.Context, run *ContextSyncRun, im
 	if run == nil || importMessage == nil {
 		return ContextSyncStats{}, errors.New("Slack context backfill run and message handler are required")
 	}
+	s.backfillMu.Lock()
+	defer s.backfillMu.Unlock()
 	ctx, cancel := context.WithTimeout(parent, s.options.Timeout)
 	defer cancel()
 	stats := run.stats
+	states, err := s.options.StateStore.List(ctx, s.options.OrganizationID, s.options.TeamID)
+	if err != nil {
+		return stats, err
+	}
 
 	remaining := s.options.MaxMessages
 	for index, channel := range run.channels {
+		if states[channel.ID].BootstrapCompleted {
+			stats.ChannelsCurrent++
+			continue
+		}
 		if remaining <= 0 {
 			break
 		}
@@ -172,6 +249,9 @@ func (s *ContextSyncer) Backfill(parent context.Context, run *ContextSyncRun, im
 		if err != nil {
 			if code, recoverable := recoverableContextChannelError(err); recoverable {
 				stats.ChannelsSkipped++
+				if stateErr := s.options.StateStore.CompleteBootstrap(ctx, s.options.OrganizationID, s.options.TeamID, channel.ID, run.syncThrough); stateErr != nil {
+					return stats, stateErr
+				}
 				s.options.Logger.WithCtx(blackbox.Ctx{
 					"organization_id": s.options.OrganizationID,
 					"channel_id":      channel.ID,
@@ -181,6 +261,10 @@ func (s *ContextSyncer) Backfill(parent context.Context, run *ContextSyncRun, im
 			}
 			return stats, fmt.Errorf("backfill Slack context channel %s: %w", channel.ID, err)
 		}
+		if err := s.options.StateStore.CompleteBootstrap(ctx, s.options.OrganizationID, s.options.TeamID, channel.ID, run.syncThrough); err != nil {
+			return stats, err
+		}
+		stats.ChannelsBackfilled++
 		stats.MessagesImported += imported
 		remaining -= imported
 	}
@@ -190,6 +274,8 @@ func (s *ContextSyncer) Backfill(parent context.Context, run *ContextSyncRun, im
 		"channels_discovered": stats.ChannelsDiscovered,
 		"channels_registered": stats.ChannelsRegistered,
 		"channels_skipped":    stats.ChannelsSkipped,
+		"channels_current":    stats.ChannelsCurrent,
+		"channels_backfilled": stats.ChannelsBackfilled,
 		"messages_imported":   stats.MessagesImported,
 		"duration_ms":         stats.CompletedAt.Sub(stats.StartedAt).Milliseconds(),
 	}).Info("Slack user context sync completed")
@@ -211,7 +297,7 @@ func (s *ContextSyncer) listChannels(ctx context.Context) ([]slackapi.Channel, e
 		if limit <= 0 {
 			return nil, fmt.Errorf("Slack context channel count exceeds configured maximum %d", s.options.MaxChannels)
 		}
-		result, err := withSlackRateLimitRetry(ctx, s.options.Logger, "users.conversations", func() (contextChannelPage, error) {
+		result, err := withSlackRateLimitRetry(ctx, s, "users.conversations", func() (contextChannelPage, error) {
 			page, next, callErr := s.api.GetConversationsForUserContext(ctx, &slackapi.GetConversationsForUserParameters{
 				Cursor: cursor, Types: []string{"public_channel", "private_channel", "mpim", "im"},
 				Limit: limit, ExcludeArchived: true, TeamID: s.options.TeamID,
@@ -247,7 +333,7 @@ func (s *ContextSyncer) backfillChannel(ctx context.Context, channel slackapi.Ch
 	cursor := ""
 	for imported < rootBudget {
 		pageLimit := min(contextHistoryPageSize, rootBudget-imported)
-		page, err := withSlackRateLimitRetry(ctx, s.options.Logger, "conversations.history", func() (*slackapi.GetConversationHistoryResponse, error) {
+		page, err := withSlackRateLimitRetry(ctx, s, "conversations.history", func() (*slackapi.GetConversationHistoryResponse, error) {
 			return s.api.GetConversationHistoryContext(ctx, &slackapi.GetConversationHistoryParameters{
 				ChannelID: channel.ID, Cursor: cursor, Limit: pageLimit, Oldest: oldest,
 			})
@@ -284,7 +370,7 @@ func (s *ContextSyncer) backfillChannel(ctx context.Context, channel slackapi.Ch
 		replyCursor := ""
 		for imported < budget {
 			pageLimit := min(contextHistoryPageSize, budget-imported+1)
-			page, err := withSlackRateLimitRetry(ctx, s.options.Logger, "conversations.replies", func() (contextReplyPage, error) {
+			page, err := withSlackRateLimitRetry(ctx, s, "conversations.replies", func() (contextReplyPage, error) {
 				replies, hasMore, next, callErr := s.api.GetConversationRepliesContext(ctx, &slackapi.GetConversationRepliesParameters{
 					ChannelID: channel.ID, Timestamp: root.Timestamp, Cursor: replyCursor,
 					Limit: pageLimit, Oldest: oldest,
@@ -359,9 +445,12 @@ func slackAPIErrorCode(err error) string {
 	return ""
 }
 
-func withSlackRateLimitRetry[T any](ctx context.Context, logger *blackbox.Logger, operation string, call func() (T, error)) (T, error) {
+func withSlackRateLimitRetry[T any](ctx context.Context, s *ContextSyncer, operation string, call func() (T, error)) (T, error) {
 	var zero T
 	for attempt := 1; ; attempt++ {
+		if err := s.waitForSlackMethod(ctx, operation); err != nil {
+			return zero, err
+		}
 		value, err := call()
 		if err == nil {
 			return value, nil
@@ -374,7 +463,7 @@ func withSlackRateLimitRetry[T any](ctx context.Context, logger *blackbox.Logger
 		if retryAfter <= 0 {
 			retryAfter = time.Second
 		}
-		logger.WithCtx(blackbox.Ctx{
+		s.options.Logger.WithCtx(blackbox.Ctx{
 			"operation":      operation,
 			"attempt":        attempt,
 			"retry_after_ms": retryAfter.Milliseconds(),
@@ -388,6 +477,36 @@ func withSlackRateLimitRetry[T any](ctx context.Context, logger *blackbox.Logger
 			return zero, ctx.Err()
 		case <-timer.C:
 		}
+	}
+}
+
+func (s *ContextSyncer) waitForSlackMethod(ctx context.Context, operation string) error {
+	if s.options.RequestInterval <= 0 || (operation != "conversations.history" && operation != "conversations.replies") {
+		return nil
+	}
+	s.paceMu.Lock()
+	now := time.Now()
+	next := s.nextRequest[operation]
+	wait := next.Sub(now)
+	if wait < 0 {
+		wait = 0
+	}
+	base := now
+	if next.After(base) {
+		base = next
+	}
+	s.nextRequest[operation] = base.Add(s.options.RequestInterval)
+	s.paceMu.Unlock()
+	if wait == 0 {
+		return nil
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -413,18 +532,22 @@ func (s *ContextSyncer) historyEnvelope(channelID string, restricted bool, messa
 	}
 }
 
-func contextChannel(organizationID, teamID string, channel slackapi.Channel) types.SlackContextChannel {
+func contextChannel(organizationID, teamID string, channel slackapi.Channel, botMembership map[string]bool) types.SlackContextChannel {
 	name := channel.Name
 	if name == "" && channel.IsIM {
 		name = channel.User
 	}
+	isChannel := channel.IsChannel || channel.IsGroup
 	return types.SlackContextChannel{
-		OrganizationID:   organizationID,
-		TeamID:           teamID,
-		ChannelID:        channel.ID,
-		Name:             name,
-		Restricted:       channelRestricted(channel),
-		RestrictionKnown: true,
+		OrganizationID:     organizationID,
+		TeamID:             teamID,
+		ChannelID:          channel.ID,
+		Name:               name,
+		Restricted:         channelRestricted(channel),
+		RestrictionKnown:   true,
+		IsChannel:          isChannel,
+		BotIsMember:        isChannel && botMembership[channel.ID],
+		BotMembershipKnown: isChannel,
 	}
 }
 

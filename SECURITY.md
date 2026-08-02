@@ -14,10 +14,16 @@ token, provider credential, connector secret, or live customer content is
 required or permitted in normal tests, fixtures, or behavioral evals.
 
 The explicitly approved local development deployment may observe all
-user-authorized conversations and backfill bounded history, but newly discovered
-conversations are observe-only. Only `#tos-tag` is in assist mode and all
-reactions/messages are hard-restricted to that destination. This local authority
-does not become a tracked default or production authorization.
+user-authorized conversations and bootstrap bounded history once. Durable,
+content-free per-conversation completion state prevents repeated bulk reads on
+restart; Socket Mode advances the watermark and newly discovered or interrupted
+conversations alone re-enter the paced bootstrap. Newly discovered
+conversations begin observe-only; public/private channels become assist only
+after an independent bot-token inventory or membership event confirms Tag has
+joined. Leaving reverts the channel to observe before further execution or
+delivery. DMs and group DMs are never auto-enabled, and an optional exact-ID
+output allowlist can narrow joined-channel authority. This local authority does
+not become a tracked default or production authorization.
 
 ## Non-negotiable boundaries
 
@@ -29,6 +35,14 @@ does not become a tracked default or production authorization.
   private channels, DMs, and group DMs are destination-local before and after
   the content query. Do not reveal even content-free awareness of another
   private conversation.
+- Generated memory carries the same disclosure class as its source. Restricted
+  memory is destination-local at the Mongo query and context post-filter;
+  thread memory is also root-thread-local. Public memory alone never widens
+  enrollment or output authority.
+- Memory consolidation is an asynchronous, tool-free OpenAI call using strict
+  structured output and `store: false`. It receives bounded recent human
+  messages, never credentials, and cannot execute instructions found in them.
+  Model-derived memory is not independent proof for consequential claims.
 - Ambient alignment may cite only classifier-selected destination-safe public
   evidence. Human reports remain attributed rather than promoted to verified
   facts, recent participation never becomes a membership claim, and opinions,
@@ -40,7 +54,26 @@ does not become a tracked default or production authorization.
   server-side read capability limited to bounded list/search/read requests and
   rejects traversal, symlinks, environment files, credential ledgers, and
   private tool state.
+- The code bundle is rejected at load and execution unless every operation is
+  exactly `read` risk. Source edits, patches, commits, pushes, merges, and
+  deploys have no worker approval path; the classifier redirects them to
+  Linear bug or feature intake.
+- `telemetryos.product-docs` remains a deterministic fixed-host reader: it
+  constructs HTTPS GETs only for TelemetryOS docs/corporate hosts, rejects
+  redirects and arbitrary URLs, has no credential environment, and returns
+  bounded output through the normal job-scoped gateway. Separately, Codex may
+  receive unrestricted first-party live web search when
+  `TAG__CODEX__WEB_SEARCH_MODE=live`. Web content is untrusted, receives no
+  credentials or private context authority, and shell/subprocess networking
+  remains disabled. Each completed native web search produces a hashed audit
+  receipt without persisting its raw query.
+- Classifier-marked product answers cannot be delivered unless the same attempt
+  successfully reads a full Primer Wiki page, public docs page, or corporate
+  full-content source. Search results and model memory are not proof.
 - Output destinations derive from admitted server state, never model output.
+- Model output may select presentation-only Card and Carousel segments, but its
+  strict schema exposes no action/button fields. Interactive controls, modal
+  Alerts, approvals, and destinations remain control-plane-owned.
 - Model-created Slack mentions are denied by default. The renderer accepts only
   exact user/channel IDs attached by the control plane from selected releasable
   evidence; broadcast, user-group, unselected, and self-authorized mentions are
@@ -60,6 +93,9 @@ does not become a tracked default or production authorization.
   or kill-switch checks.
 - The direct OpenAI classifier key is control-plane-only and is never reused for
   Codex App Server. Codex authenticates through its private persisted home.
+- The memory curator is also control-plane-only. It may use a separately
+  configured key or the existing control-plane classifier key, but neither is
+  passed to Codex or helper subprocesses.
 - Rotate development Slack and provider credentials before production use, and
   immediately after suspected disclosure.
 
@@ -99,6 +135,21 @@ text, prompts, model/provider bodies, secrets, tool credentials, lease tokens,
 or unbounded results. Keep owner-readable JSONL diagnostics outside Git, retain
 durable audit receipts in MongoDB, and honor TTL/source deletion across derived
 messages, context packs, prompts, and delivery state.
+
+Generated memory expires no later than its retained sources. Operator
+correction pins a reviewed record; forgetting erases its summary, facts, model
+metadata, and source IDs while retaining only a content-free source hash and
+scope tombstone to prevent immediate relearning. Memory API mutations require
+management authentication/CSRF and append audit receipts. Memory prompts and
+results never enter the SSE activity feed or broad logs.
+
+The authenticated management activity feed is separately constrained: require
+an explicit organization on API and SSE requests, never fan one tenant's record
+to another tenant, cap the in-memory replay window, and include source Slack
+text only as a bounded public-message excerpt on an explicit classifier record.
+Replace restricted-conversation text before publication. Codex activity may
+name lifecycle/RPC methods and statuses but must never include prompts, model
+output, provider bodies, dynamic-tool arguments/results, or credentials.
 
 Report security issues privately to the repository owners. Do not include live
 credentials, private Slack excerpts, or customer data in an issue.

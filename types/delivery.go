@@ -10,6 +10,8 @@ const (
 	SlackSegmentContext  SlackSegmentKind = "context"
 	SlackSegmentDivider  SlackSegmentKind = "divider"
 	SlackSegmentTable    SlackSegmentKind = "table"
+	SlackSegmentCard     SlackSegmentKind = "card"
+	SlackSegmentCarousel SlackSegmentKind = "carousel"
 	SlackSegmentImage    SlackSegmentKind = "image"
 	SlackSegmentArtifact SlackSegmentKind = "artifact"
 	SlackSegmentApproval SlackSegmentKind = "approval"
@@ -19,6 +21,7 @@ const (
 type SlackResult struct {
 	Segments        []SlackSegment        `json:"segments" bson:"segments"`
 	AllowedMentions SlackMentionAllowlist `json:"-" bson:"allowed_mentions,omitempty"`
+	AgentFooter     *SlackAgentFooter     `json:"-" bson:"agent_footer,omitempty"`
 }
 
 // SlackMentionAllowlist is control-plane-owned provenance attached after model
@@ -28,14 +31,49 @@ type SlackMentionAllowlist struct {
 	ChannelIDs []string `json:"-" bson:"channel_ids,omitempty"`
 }
 
+// SlackAgentFooter is control-plane-owned execution metadata for a full-agent
+// response. Model JSON cannot set it, and classifier-only replies omit it.
+type SlackAgentFooter struct {
+	ModelID               string `json:"-" bson:"model_id,omitempty"`
+	ReasoningEffort       string `json:"-" bson:"reasoning_effort,omitempty"`
+	InputTokens           int64  `json:"-" bson:"input_tokens,omitempty"`
+	OutputTokens          int64  `json:"-" bson:"output_tokens,omitempty"`
+	CachedInputTokens     int64  `json:"-" bson:"cached_input_tokens,omitempty"`
+	ReasoningOutputTokens int64  `json:"-" bson:"reasoning_output_tokens,omitempty"`
+	TotalTokens           int64  `json:"-" bson:"total_tokens,omitempty"`
+	DurationMS            int64  `json:"-" bson:"duration_ms,omitempty"`
+}
+
 type SlackSegment struct {
 	Kind     SlackSegmentKind `json:"kind"`
 	Text     string           `json:"text,omitempty"`
 	Table    *SlackTable      `json:"table,omitempty"`
+	Card     *SlackCard       `json:"card,omitempty"`
+	Carousel *SlackCarousel   `json:"carousel,omitempty"`
 	Image    *SlackImage      `json:"image,omitempty"`
 	Artifact *SlackArtifact   `json:"artifact,omitempty"`
 	Approval *SlackApproval   `json:"approval,omitempty"`
 	Notice   *SlackNotice     `json:"notice,omitempty"`
+}
+
+// SlackCard is the model-safe subset of Slack's native Card block. Actions are
+// intentionally absent: interactive controls remain control-plane owned.
+type SlackCard struct {
+	Title     string          `json:"title"`
+	Subtitle  string          `json:"subtitle,omitempty"`
+	Body      string          `json:"body"`
+	Subtext   string          `json:"subtext,omitempty"`
+	Icon      *SlackCardImage `json:"icon,omitempty"`
+	HeroImage *SlackCardImage `json:"hero_image,omitempty"`
+}
+
+type SlackCardImage struct {
+	URL     string `json:"url"`
+	AltText string `json:"alt_text"`
+}
+
+type SlackCarousel struct {
+	Cards []SlackCard `json:"cards"`
 }
 
 type SlackImage struct {
@@ -65,8 +103,11 @@ type SlackNotice struct {
 }
 
 type SlackTable struct {
-	Columns []SlackTableColumn `json:"columns"`
-	Rows    [][]SlackTableCell `json:"rows"`
+	Columns              []SlackTableColumn `json:"columns"`
+	Rows                 [][]SlackTableCell `json:"rows"`
+	Caption              string             `json:"caption,omitempty"`
+	PageSize             int                `json:"page_size,omitempty"`
+	RowHeaderColumnIndex int                `json:"row_header_column_index,omitempty"`
 }
 
 type SlackTableColumn struct {
@@ -92,6 +133,7 @@ type SlackDestination struct {
 	ChannelID string `json:"channel_id"`
 	ThreadTS  string `json:"thread_ts,omitempty"`
 	UpdateTS  string `json:"update_ts,omitempty"`
+	StreamTS  string `json:"stream_ts,omitempty"`
 }
 
 type SlackDeliveryRequest struct {
@@ -117,5 +159,56 @@ type SlackReactionRequest struct {
 
 type SlackReactionResult struct {
 	AppliedAt time.Time `json:"applied_at"`
+	Duplicate bool      `json:"duplicate"`
+}
+
+type SlackProgressStatus string
+
+const (
+	SlackProgressPending    SlackProgressStatus = "pending"
+	SlackProgressInProgress SlackProgressStatus = "in_progress"
+	SlackProgressComplete   SlackProgressStatus = "complete"
+	SlackProgressError      SlackProgressStatus = "error"
+)
+
+// SlackProgressStep is a safe operational summary for Slack's Thinking Steps
+// timeline. It must never contain hidden reasoning, tool arguments, raw model
+// output, credentials, or private context.
+type SlackProgressStep struct {
+	ID      string                `json:"id"`
+	Title   string                `json:"title"`
+	Status  SlackProgressStatus   `json:"status"`
+	Details string                `json:"details,omitempty"`
+	Output  string                `json:"output,omitempty"`
+	Sources []SlackProgressSource `json:"sources,omitempty"`
+}
+
+type SlackProgressSource struct {
+	URL  string `json:"url"`
+	Text string `json:"text"`
+}
+
+type SlackProgressStartRequest struct {
+	IdempotencyKey  string            `json:"idempotency_key"`
+	TeamID          string            `json:"team_id"`
+	ChannelID       string            `json:"channel_id"`
+	ThreadTS        string            `json:"thread_ts,omitempty"`
+	JobID           JobID             `json:"job_id"`
+	RecipientUserID string            `json:"recipient_user_id"`
+	Title           string            `json:"title"`
+	Step            SlackProgressStep `json:"step"`
+}
+
+type SlackProgressUpdateRequest struct {
+	TeamID    string            `json:"team_id"`
+	ChannelID string            `json:"channel_id"`
+	MessageTS string            `json:"message_ts"`
+	JobID     JobID             `json:"job_id"`
+	Step      SlackProgressStep `json:"step"`
+}
+
+type SlackProgressResult struct {
+	MessageTS string    `json:"message_ts"`
+	UpdatedAt time.Time `json:"updated_at"`
 	Duplicate bool      `json:"duplicate"`
 }

@@ -148,6 +148,7 @@ func (q *MongoQueue) Transition(ctx context.Context, id types.JobID, leaseToken 
 		"available_at":         current.AvailableAt,
 		"approval_id":          current.ApprovalID,
 		"approved_action_hash": current.ApprovedActionHash,
+		"progress_message_ts":  current.ProgressMessageTS,
 		"updated_at":           now,
 	}
 	if to == StateSucceeded || to == StateFailed || to == StateCancelled || to == StateRetryWait || to == StateNeedsReconciliation || to == StateWaitingApproval {
@@ -348,7 +349,7 @@ func fromModel(doc models.Job) Job {
 		AdmissionReservationID: doc.AdmissionReservationID,
 		ResolvedModel:          resolved, RouteTrace: trace,
 		SteeringEpoch: doc.SteeringEpoch, Lease: Lease{Owner: types.WorkerID(doc.Lease.Owner), Token: doc.Lease.Token, ExpiresAt: doc.Lease.ExpiresAt, Heartbeat: doc.Lease.Heartbeat},
-		Result: result, FailureReason: doc.FailureReason, ApprovalID: doc.ApprovalID, ApprovedActionHash: doc.ApprovedActionHash,
+		Result: result, FailureReason: doc.FailureReason, ApprovalID: doc.ApprovalID, ApprovedActionHash: doc.ApprovedActionHash, ProgressMessageTS: doc.ProgressMessageTS,
 		AvailableAt: doc.AvailableAt, CreatedAt: doc.CreatedAt, UpdatedAt: doc.UpdatedAt, ExpiresAt: doc.ExpiresAt, Version: doc.Version,
 	}
 }

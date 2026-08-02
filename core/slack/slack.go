@@ -34,6 +34,16 @@ type ApprovalInteraction struct {
 
 type ApprovalInteractionHandler func(context.Context, ApprovalInteraction) error
 
+type BotMembershipChange struct {
+	OrganizationID string
+	WorkspaceID    string
+	ChannelID      string
+	EventID        string
+	Joined         bool
+}
+
+type BotMembershipHandler func(context.Context, BotMembershipChange) error
+
 type DirectiveConfigurationRequest struct {
 	OrganizationID string
 	WorkspaceID    string
@@ -59,4 +69,6 @@ type Ingress interface {
 type Delivery interface {
 	Send(context.Context, types.SlackDeliveryRequest) (types.SlackDeliveryResult, error)
 	React(context.Context, types.SlackReactionRequest) (types.SlackReactionResult, error)
+	StartProgress(context.Context, types.SlackProgressStartRequest) (types.SlackProgressResult, error)
+	UpdateProgress(context.Context, types.SlackProgressUpdateRequest) (types.SlackProgressResult, error)
 }

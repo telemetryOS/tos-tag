@@ -15,14 +15,33 @@ Current initiative constraints:
   approval, and kill-switch checks still govern every read and write.
 - Load Slack credentials from an approved secret store or the gitignored local
   `runtime.env`; never commit, log, or expose them to workers or prompts.
+- Treat the web management home page as the live operations surface. Keep its
+  SSE activity feed organization-scoped and bounded; show source text only as a
+  bounded public classifier excerpt, hide restricted content, and expose Codex
+  method/status lifecycle without prompts, output, provider bodies, tool
+  payloads, or credentials. Configuration and raw-data inspection remain
+  secondary navigation.
 - Keep checked-in defaults fail-closed: Slack `stub`, classifier `shadow`, new
-  conversations `observe`, Codex/tools disabled. The currently approved local
-  regression deployment may use the live direct classifier and `assist` only
-  in `#tos-tag`; broad user-authorized discovery remains observe-only.
+  conversations `observe`, automatic membership participation disabled, and
+  Codex/tools disabled. The approved local deployment may derive `assist` for
+  public/private channels where Slack confirms Tag is a member; other
+  user-authorized conversations remain observe-only. DMs and group DMs are
+  never auto-enabled.
 - Treat a direct mention as a hard participation trigger, not a hard thread
   placement. Prefer an in-channel response for a brief, self-contained answer
   unlikely to continue; use a thread for deeper, multi-step, tool-heavy, narrow,
   or likely-to-continue work. Once a tos-tag thread is active, continue there.
+- Use Slack Thinking Steps for admitted full-agent thread jobs instead of an `eyes`
+  reaction as a generic working indicator. Keep task titles to safe operational
+  facts from reviewed control-plane events; never expose chain-of-thought, model
+  deltas, raw tool arguments/output, credentials, or private context. Preserve
+  reactions for intentional reaction-only and lightweight classifier outcomes.
+  Slack requires a stream `thread_ts`; do not force brief in-channel answers
+  into threads solely to obtain a progress surface.
+- Treat the full-agent model/effort/token/latency footer as control-plane-owned.
+  Capture provider-reported turn usage, append one final context block, and
+  omit it from direct classifier replies, reactions, approvals, and notices.
+  Never ask the model to author this execution metadata.
 - Ambient alignment interventions may use recent destination-safe public
   reports to surface a material factual conflict when doing so prevents
   confusion or a bad operational decision. Attribute reports neutrally, never
@@ -36,18 +55,30 @@ Current initiative constraints:
   back to a compact Slack answer if publication fails. The control plane must
   reject a model-created artifact segment unless its URL came from a successful
   reviewed tool call in that same worker attempt.
-- Do not broaden `assist`/`proactive`, the Slack output allowlist, credentialed
-  helpers, or external writes beyond the current explicit authorization.
+- Do not broaden `proactive`, credentialed helpers, or external writes beyond
+  current explicit authorization. Membership-managed `assist` is authorized
+  only for Slack-confirmed joined channels and reverts to `observe` on leave.
 - Keep normal tests and evals deterministic and network-free. Live Slack tests
   are opt-in and must report their exact scope and evidence separately.
 - Keep classifier tests naturalistic: put expected silence, reaction, placement,
-  model, and effort in evaluator metadata, never in the Slack message. Do not
-  send outcome cues such as `no response needed`, `stay silent`, or `reply in a
-  thread` merely to make a probe pass. Test explicit placement language only as
-  a separately labeled user-intent contract.
+  model, effort, retrieval, and source-rendering behavior in evaluator metadata,
+  never in the Slack message. Do not send outcome or method cues such as `no
+  response needed`, `stay silent`, `reply in a thread`, `use tools`, or `include
+  a clickable link` merely to make a probe pass. Test explicit placement or
+  citation language only as separately labeled user-intent contracts.
 - MongoDB is the production authority; unit tests may use project-owned memory
   stores behind the same consumer interfaces.
+- Treat durable agent memory as control-plane state, never Codex session state.
+  Curate it asynchronously with the configured Luna model, preserve source
+  IDs/hash/confidence/expiry, keep restricted memory destination-local, and
+  require corroboration before model-derived memory grounds consequential
+  claims. Human correction pins operator memory; forget must erase content and
+  retain only the source-hash tombstone.
 - Keep secrets outside workers, prompts, fixtures, logs, and artifacts.
+- Keep Slack context ingestion event-driven after a one-time bounded
+  conversation bootstrap. Persist content-free completion/live watermarks,
+  backfill only new or interrupted conversations, and proactively pace each Web
+  API history method rather than using HTTP 429 responses as the normal scheduler.
 - Update the checklist only after the implementation and its named verification
   are present.
 - Keep `README.md`, `architecture.md`, `IMPLEMENTATION_STATUS.md`,
@@ -56,16 +87,17 @@ Current initiative constraints:
   against `core/config`, `Makefile`, manifests, and tool catalogs instead of
   copying older status text.
 
-Current local regression baseline (2026-08-01): direct classifier and ambient
-silence/social placement, native tables, approval/resume, Wiki and reviewed
+Current local regression baseline (2026-08-02): direct classifier and ambient
+silence/social placement, native Tables/Data Tables, presentation-only
+Cards/Carousels, approval/resume, Wiki and reviewed
 source access, three overlapping jobs on the eight-worker pool, private-context
-isolation, the deterministic 35-case eval, the opt-in live OpenAI 35-case eval,
+isolation, the deterministic 41-case eval, the opt-in live OpenAI 41-case eval,
 and full `make verify` all passed. `make eval-live` must use only natural message
 text; evaluator outcomes, placement, reactions, model, and effort remain outside
 the provider input. Treat this as development evidence, not as authorization to
 widen output or as proof of production readiness.
 
-## Headless skill sources
+## Behavioral skill source
 
 tos-tag owns no ad hoc skills inside this repository. Future tos-tag-specific
 skills and their Bash helper source belong in the sibling private repository
@@ -79,19 +111,15 @@ skills and their Bash helper source belong in the sibling private repository
   `python3 scripts/validate.py`; and
 - commit and push that repository independently.
 
-The live local configuration automatically loads and injects two complete
-behavioral plugins into every response worker:
+The live local configuration automatically loads and injects the complete
+`base` plugin from `../tag-agent-skills` into every response worker. It owns
+Slack composition, triggers, alignment, product knowledge, read-only code
+inspection, Linear management, bug/feature intake, suitability, OTel, and Wiki
+behavior.
 
-1. `telemetryos-automation` from `../telemetryos-agent-skills` (the headless
-   TelemetryOS workflow plugin); and
-2. `base` from `../tag-agent-skills` (tos-tag-owned skills, currently including
-   `slack-message-design` for typed Block Kit composition, the job-scoped
-   `tag-triggers` heartbeat-subscription workflow, and `team-alignment` for
-   privacy-safe cross-channel factual reconciliation).
-
-Configure each source with its root, `.claude-plugin/marketplace.json`, and
-exact plugin name. Missing roots, manifests, or selected plugins fail startup.
-Skill runtime names are flat and must be unique across both plugins. The
+Configure its root, `.claude-plugin/marketplace.json`, and exact plugin name.
+A missing root, manifest, or selected plugin fails startup. Skill runtime names
+are flat and unique. The
 control plane snapshots validated behavioral files and materializes them
 read-only under `.agents/skills`; it never copies the entire repository or
 loads Codex/Claude/Cursor manifests as executable plugins.
@@ -103,11 +131,13 @@ manifest, pin the helper hash and exact argv/ENV contract, bind its scope, and
 invoke it only through the job-scoped `tos_tag_tool` capability gateway.
 
 The reviewed runtime catalog is `tool-marketplace/`. It is deliberately
-separate from both behavioral skill repositories. A tool bundle contains only
+separate from the behavioral skill repository. A tool bundle contains only
 `SKILL.md`, `tool.json`, and one executable reviewed script. Every operation
 declares its exact environment names, timeout, output bound, risk, and optional
 approval policy. Omitted approval remains risk-based; only reviewed manifests
-may opt out. The
+may opt out. A reviewed `public_env` entry may expose only a credential-free
+HTTPS `*_URL`; malformed, credential-bearing, query-bearing, and fragment-bearing
+values remain secret and fail closed. The
 Codex App Server worker cannot supply secret references: tos-tag imports only the
 selected tools' declared variables into its encrypted organization-scoped
 keystore and derives their opaque bindings server-side. Keep the executor PATH
@@ -119,6 +149,9 @@ The reviewed catalog currently contains:
   fixed-string search, and numbered source reads under the server-owned
   `TAG_AION_DEVELOPER_PATH`; rejects traversal, symlinks, runtime environment
   files, and credential ledgers;
+- `telemetryos.product-docs` (`read` only, no approval): fixed-host HTTPS reads
+  of the public documentation index/pages and corporate `llms-full.txt`; no
+  arbitrary URLs, redirects, headers, methods, credentials, or shell;
 - `telemetryos.linear` (`read`, `write`);
 - `telemetryos.wiki` (`read`, `write`, `delete`; page CRUD only): ordinary page
   reads/writes execute without per-action approval, recoverable page soft-delete
@@ -134,9 +167,43 @@ body argument. Disposable workers have no shared source filename; never invent
 `/workspace/...` paths. The exact body is committed by the Wiki execution audit
 receipt.
 
-Behavioral skill presence is not tool authority. The current plugin inventory
-is 29 skills in `telemetryos-automation` and three in `base`; use the checked-in
-plugin manifests as the source of truth and keep the exact list in `README.md`.
+Behavioral skill presence is not tool authority. The current inventory is 14
+skills in `base`; use the checked-in plugin manifest as the source of truth and
+keep the exact list in `README.md`.
+
+For TelemetryOS product questions, apply `product-knowledge`: retrieve named
+product claims from the Agent Wiki Primer, public docs, and/or corporate source
+according to the claim and audience. Do not let a worker substitute generic
+model memory for available product evidence. When the classifier marks
+authoritative product retrieval as required, the pipeline must observe a
+successful same-attempt full-content Wiki page, docs page, or corporate source
+read before delivery. Search/index/web/Slack context alone is insufficient.
+Every product answer automatically includes concise clickable links to the
+authoritative sources materially used; a requester never needs to ask for them.
+For a Wiki source, use the exact human HTTPS URL returned by the reviewed Wiki
+`get` or `url` read operation and render it as a descriptive Slack link.
+Namespace/slugs are internal lookup identifiers and must never be delivered as
+citations; opaque page URLs must never be guessed. Every reviewed `get` returns
+a full page envelope containing that URL.
+The reviewed product reader is the preferred deterministic path; arbitrary Codex live web search is available for
+broader/current research but remains untrusted and cannot widen authority.
+For customer-facing procedures and technical reference, apply
+`telemetryos-documentation`: read `docs-index`, select an exact listed page,
+then read that `docs-page` before answering. The index is discovery metadata,
+not sufficient authoritative evidence, and supplied references must use the
+exact indexed HTTPS URL.
+For TelemetryOS marketing copy, positioning, campaigns, landing pages, sales
+collateral, announcements, or social posts, apply `marketing-messaging` and
+require a same-attempt `telemetryos.product-docs/read corporate-full` before
+drafting. Use the relevant human page URL from that source for customer links.
+
+TelemetryOS source access is permanently read-only. Enforce that invariant when
+loading a reviewed code bundle and again immediately before execution; never
+add or approve an edit, patch, commit, push, merge, deploy, or generic shell
+operation. Classify source-mutation requests for a brief control-plane redirect
+to a Linear bug for broken existing behavior or a Linear feature for new or
+changed behavior. Use the `code-change-intake` skill only after explicit issue
+creation intent; normal reviewed Linear approval still applies.
 
 For local setup, run `make sync-tool-env`. The script copies only the known
 Linear, Wiki, SigNoz, and DLA variables from the current shell or
@@ -150,7 +217,7 @@ Never print, inspect, commit, or paste their values. Mongo access remains
 disabled until `MONGO_QA_URI` exists and a human has opened the security-key
 session; adding it requires an explicit injected-tool allowlist change.
 
-After either plugin changes, restart tos-tag to obtain new content hashes, run
+After the plugin changes, restart tos-tag to obtain new content hashes, run
 the marketplace and worker tests plus `make verify`, and use App Server
 `skills/list` with the disposable worker `cwd` when a live discovery check is
 needed.
@@ -162,8 +229,7 @@ define the reproducible development environment. The persistent layout is:
 
 - `/workspace/projects/tos-tag` for this repository;
 - `/workspace/code` for Aion's `developer_path` and `aion sync` output;
-- `/workspace/skills/telemetryos-agent-skills` and
-  `/workspace/skills/tag-agent-skills` for behavioral plugin sources; and
+- `/workspace/skills/tag-agent-skills` for the behavioral plugin source; and
 - `/workspace/state` plus `/home/tag` for retained local state and tool auth.
 
 Bootstrap also clones and installs `telemetry-otel-fetch`,

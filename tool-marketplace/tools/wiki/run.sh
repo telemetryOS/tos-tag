@@ -123,6 +123,16 @@ _human_url() {
   fi
 }
 
+# Normalize a page read to include the canonical human URL alongside the full
+# page JSON. The id comes from the reviewed API response; workers never infer or
+# reconstruct opaque page URLs themselves.
+_read_json() {
+  local resp="$1" human_url
+  human_url="$(_human_url "$resp")"
+  printf '%s' "$resp" | jq --arg url "$human_url" '
+    . + {url: (if ((.url // "") | length) > 0 then .url else $url end)}'
+}
+
 # ---------------------------------------------------------------------------
 # HTTP core
 # ---------------------------------------------------------------------------
@@ -366,14 +376,23 @@ cmd_get() {
     _die "get: --rev must be a positive integer"
   fi
 
+  # The reviewed tos-tag gateway always returns the full page envelope for a
+  # page read, even when a disposable worker omits --json. Besides the body,
+  # that envelope carries the server-derived opaque human URL needed for a
+  # useful Slack citation. Preserve the lean body-only default for direct CLI
+  # use outside the gateway.
+  local reviewed_read=0
+  [ "${TOS_TAG_OPERATION_ID:-}" = "read" ] && reviewed_read=1
+
   # Human links are opaque /pages/{id} URLs. Resolve them through the bearer-
   # authenticated API instead of hitting the session-gated HTML route or
   # enumerating namespaces (which cannot rediscover un-indexed artifacts).
   if _page_id_from_ref "$ref"; then
     local idq=""
     [ -n "$rev" ] && idq="?rev=$rev"
-    if [ "$as" = "json" ]; then
-      _api GET "/api/v1/page/$PAGE_ID$idq" | jq .
+    if [ "$as" = "json" ] || [ "$reviewed_read" -eq 1 ]; then
+      local out; out="$(_api GET "/api/v1/page/$PAGE_ID$idq")" || return 1
+      _read_json "$out"
     else
       if [ -n "$idq" ]; then idq="$idq&body-only"; else idq="?body-only"; fi
       _api GET "/api/v1/page/$PAGE_ID$idq"
@@ -385,17 +404,18 @@ cmd_get() {
 
   _split_ref "$ref"
 
-  # Default: the lean body-only HTML fragment (text/html, no JSON envelope, no
-  # chrome) — the representation agents read. Storage is HTML-only; there is no
-  # Markdown source. --json returns the full page JSON (meta + body_html).
+  # Direct CLI default: lean body-only HTML. Reviewed gateway reads always use
+  # the full JSON envelope so every page read has canonical-link provenance.
+  # Storage is HTML-only; there is no Markdown source.
   if [ -n "$rev" ]; then
     local out; out="$(_api GET "/api/v1/pages/$NS/$SLUG/revisions/$rev")" || return 1
-    if [ "$as" = "json" ]; then printf '%s' "$out" | jq .
+    if [ "$as" = "json" ] || [ "$reviewed_read" -eq 1 ]; then _read_json "$out"
     else printf '%s\n' "$(printf '%s' "$out" | jq -r '.body_html // empty')"; fi
     return 0
   fi
-  if [ "$as" = "json" ]; then
-    _api GET "/api/v1/pages/$NS/$SLUG" | jq .
+  if [ "$as" = "json" ] || [ "$reviewed_read" -eq 1 ]; then
+    local out; out="$(_api GET "/api/v1/pages/$NS/$SLUG")" || return 1
+    _read_json "$out"
   else
     # ?body-only returns the raw body fragment as text/html — print verbatim.
     _api GET "/api/v1/pages/$NS/$SLUG?body-only"

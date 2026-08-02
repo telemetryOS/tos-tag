@@ -29,7 +29,7 @@ func TestLocalWorkerHasCleanEnvironmentAndTerminatesProcessGroup(t *testing.T) {
 		t.Fatal("worker PID missing")
 	}
 	policy, err := os.ReadFile(filepath.Join(workspace.WorkDir, "AGENTS.md"))
-	if err != nil || !strings.Contains(string(policy), "disposable Codex worker") || !strings.Contains(string(policy), "tos_tag_tool") || !strings.Contains(string(policy), "Current full-agent work runs through Codex App Server") {
+	if err != nil || !strings.Contains(string(policy), "disposable Codex worker") || !strings.Contains(string(policy), "tos_tag_tool") || !strings.Contains(string(policy), "Current full-agent work runs through Codex App Server") || !strings.Contains(string(policy), "source links automatically in every product answer") {
 		t.Fatalf("worker policy=%q err=%v", policy, err)
 	}
 	if err := manager.Terminate(context.Background(), workspace); err != nil {

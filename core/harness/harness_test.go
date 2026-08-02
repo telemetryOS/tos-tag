@@ -11,7 +11,7 @@ func TestFakeHarnessLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prompt := Prompt{Text: "hello", Model: "fake/model", RequestID: "request-1", SlackFormat: "slack-output/v2"}
+	prompt := Prompt{Text: "hello", Model: "fake/model", RequestID: "request-1", SlackFormat: "slack-output/v3"}
 	if err := fake.Prompt(context.Background(), session.ID, prompt); err != nil {
 		t.Fatal(err)
 	}

@@ -1,7 +1,7 @@
 # Reviewed TelemetryOS tools
 
 This catalog is the executable counterpart to the behavioral skills injected
-from `telemetryos-agent-skills`. Codex App Server receives the bundle `SKILL.md` files
+from `tag-agent-skills`. Codex App Server receives the bundle `SKILL.md` files
 and typed `tos_tag_tool` capability only; it does not receive this directory,
 the control-plane environment, or keystore references.
 
@@ -10,12 +10,16 @@ bound from `TAG_AION_DEVELOPER_PATH`; it permits repository/file listing,
 fixed-string search, and bounded line reads while rejecting traversal,
 symlinks, runtime environment files, credential ledgers, and private tool
 state. It deliberately provides neither a generic shell nor a write operation.
+The loader and executor both reject the bundle unless every operation remains
+exactly `read` risk. Source-mutation intent is routed to Linear bug/feature
+intake and cannot be converted into an approval.
 
 ## Catalog
 
 | Tool ID | Operations | Approval | Declared environment |
 | --- | --- | --- | --- |
 | `telemetryos.code` | `read` | Risk-based | `TAG_AION_DEVELOPER_PATH` (server-owned path binding, not a credential) |
+| `telemetryos.product-docs` | `read` | Never | None; fixed public TelemetryOS HTTPS sources only |
 | `telemetryos.linear` | `read`, `write` | Risk-based | `LINEAR_API_KEY` |
 | `telemetryos.wiki` | `read`, `write`, `delete` | Never for read/write; always for recoverable page soft-delete | `WIKI_URL`, `WIKI_TOKEN` |
 | `telemetryos.otel` | `read` | Risk-based | `SIGNOZ_URL`, `SIGNOZ_API_KEY` |
@@ -34,14 +38,27 @@ Tool selection is also constrained by
 the configured tool-ID allowlist and by each injected skill's declared
 requirements.
 
-`tools/linear/run.sh` and `tools/wiki/run.sh` were vendored from
-`telemetryOS/telemetryos-agent-skills` commit
-`f53e1f738ca05df7575e6e3a84d7dc58baf483af`, then given operation guards driven
-by the executor-owned `TOS_TAG_OPERATION_ID`. The Wiki bundle's local `1.2.1`
-revision accepts an exact inline body for source-derived publications and opts
-normal Wiki read/write authoring out of per-action approval. OTel, DLA, and Mongo wrappers call
+`tools/linear/run.sh` and `tools/wiki/run.sh` are self-contained reviewed
+tos-tag helpers with operation guards driven by the executor-owned
+`TOS_TAG_OPERATION_ID`. The Wiki bundle's local `1.3.3`
+revision accepts an exact inline body for source-derived publications, returns
+the full page envelope with its canonical human URL for every reviewed `get`
+(even when a worker omits `--json`), declares the validated credential-free
+`WIKI_URL` binding public while retaining token redaction, and opts normal Wiki
+read/write authoring out of per-action approval. OTel, DLA, and Mongo wrappers call
 the separately pinned binaries documented in the root README and reject
 credential, endpoint, dotenv, and agent-launch overrides.
+
+`tools/product-docs/run.sh` is copied from
+`tag-agent-skills/src/skills/product-knowledge/scripts/read-product-source.sh`.
+It allows only the docs index, one constrained `docs/` or `reference/` Markdown
+page on `docs.telemetryos.com`, or the fixed corporate `llms-full.txt`. It does
+not follow redirects, accept headers or credentials, or expose a general URL
+fetcher.
+Classifier-marked product answers require a successful same-attempt
+`docs-page`, `corporate-full`, or Agent Wiki full-page read before delivery;
+an index, search result, arbitrary web result, Slack context, or memory is not
+accepted as authoritative retrieval.
 
 To update a bundle:
 

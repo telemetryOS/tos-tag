@@ -22,6 +22,39 @@ func TestDefaultConfigurationValid(t *testing.T) {
 	if cfg.Jobs.WorkerConcurrency != 8 {
 		t.Fatalf("unexpected default job worker concurrency: %#v", cfg.Jobs)
 	}
+	if cfg.Codex.WebSearchMode != "disabled" {
+		t.Fatalf("unexpected default Codex web search mode: %#v", cfg.Codex)
+	}
+	if cfg.Memory.Enabled || cfg.Memory.Model != "gpt-5.6-luna" || cfg.Memory.ReasoningEffort != "medium" {
+		t.Fatalf("unexpected default memory configuration: %#v", cfg.Memory)
+	}
+}
+
+func TestLoadMemoryEnvironment(t *testing.T) {
+	t.Setenv("TAG__MEMORY__ENABLED", "true")
+	t.Setenv("TAG__CLASSIFIER__OPENAI_API_KEY", "test-control-plane-key")
+	t.Setenv("TAG__MEMORY__REASONING_EFFORT", "low")
+	t.Setenv("TAG__MEMORY__INTERVAL", "15m")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Memory.Enabled || cfg.Memory.Model != "gpt-5.6-luna" || cfg.Memory.ReasoningEffort != "low" || cfg.Memory.Interval != 15*time.Minute {
+		t.Fatalf("memory environment did not map: %#v", cfg.Memory)
+	}
+	if strings.Contains(fmt.Sprint(cfg.RedactedStatus()), "test-control-plane-key") {
+		t.Fatal("redacted status leaked memory credential")
+	}
+}
+
+func TestValidateMemoryRequiresLuna(t *testing.T) {
+	cfg := DefaultConfiguration
+	cfg.Memory.Enabled = true
+	cfg.Memory.OpenAIAPIKey = "test"
+	cfg.Memory.Model = "other-model"
+	if err := Validate(&cfg); err == nil {
+		t.Fatal("expected non-Luna memory model to fail")
+	}
 }
 
 func TestLoadJobWorkerConcurrencyEnvironment(t *testing.T) {
@@ -138,9 +171,12 @@ func TestLoadSlackContextSyncEnvironment(t *testing.T) {
 	t.Setenv("TAG__SLACK__CONTEXT_SYNC_ENABLED", "true")
 	t.Setenv("TAG__SLACK__CONTEXT_SYNC_LOOKBACK", "24h")
 	t.Setenv("TAG__SLACK__CONTEXT_SYNC_TIMEOUT", "30s")
+	t.Setenv("TAG__SLACK__CONTEXT_SYNC_REFRESH", "2m")
+	t.Setenv("TAG__SLACK__CONTEXT_SYNC_REQUEST_INTERVAL", "1500ms")
 	t.Setenv("TAG__SLACK__CONTEXT_SYNC_MAX_CHANNELS", "40")
 	t.Setenv("TAG__SLACK__CONTEXT_SYNC_MAX_MESSAGES", "300")
 	t.Setenv("TAG__SLACK__CONTEXT_SYNC_MESSAGES_PER_CHANNEL", "20")
+	t.Setenv("TAG__SLACK__AUTO_ASSIST_JOINED_CHANNELS", "true")
 	t.Setenv("TAG__SLACK__OUTPUT_CHANNEL_IDS", "C-test,G-test")
 	t.Setenv("TAG__SLACK__MODE", "socket_mode")
 	t.Setenv("TAG__SLACK__LIVE_ENABLED", "true")
@@ -155,7 +191,7 @@ func TestLoadSlackContextSyncEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Slack.ContextSyncEnabled || cfg.Slack.ContextSyncLookback != 24*time.Hour || cfg.Slack.ContextSyncTimeout != 30*time.Second || cfg.Slack.ContextSyncMaxChannels != 40 || cfg.Slack.ContextSyncMaxMessages != 300 || cfg.Slack.ContextSyncMessagesPerChannel != 20 {
+	if !cfg.Slack.ContextSyncEnabled || !cfg.Slack.AutoAssistJoinedChannels || cfg.Slack.ContextSyncLookback != 24*time.Hour || cfg.Slack.ContextSyncTimeout != 30*time.Second || cfg.Slack.ContextSyncRefresh != 2*time.Minute || cfg.Slack.ContextSyncRequestInterval != 1500*time.Millisecond || cfg.Slack.ContextSyncMaxChannels != 40 || cfg.Slack.ContextSyncMaxMessages != 300 || cfg.Slack.ContextSyncMessagesPerChannel != 20 {
 		t.Fatalf("Slack context sync environment did not map: %#v", cfg.Slack)
 	}
 	if !reflect.DeepEqual(cfg.Slack.OutputChannelIDs, []string{"C-test", "G-test"}) {
@@ -193,6 +229,7 @@ func TestLoadCodexAndLiveClassifierEnvironment(t *testing.T) {
 	t.Setenv("TAG__CODEX__COMMAND", "/opt/codex")
 	t.Setenv("TAG__CODEX__HOME", "/var/lib/tos-tag/codex")
 	t.Setenv("TAG__CODEX__TIMEOUT", "45s")
+	t.Setenv("TAG__CODEX__WEB_SEARCH_MODE", "live")
 	t.Setenv("TAG__MODELS__DEFAULT_PROVIDER", "openai")
 	t.Setenv("TAG__CLASSIFIER__MODE", "live")
 
@@ -200,8 +237,16 @@ func TestLoadCodexAndLiveClassifierEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load configuration: %v", err)
 	}
-	if !cfg.Codex.Enabled || cfg.Codex.Command != "/opt/codex" || cfg.Codex.Home != "/var/lib/tos-tag/codex" || cfg.Codex.Timeout != 45*time.Second || cfg.Classifier.Mode != "live" {
+	if !cfg.Codex.Enabled || cfg.Codex.Command != "/opt/codex" || cfg.Codex.Home != "/var/lib/tos-tag/codex" || cfg.Codex.Timeout != 45*time.Second || cfg.Codex.WebSearchMode != "live" || cfg.Classifier.Mode != "live" {
 		t.Fatalf("Codex/classifier environment did not map: %#v %#v", cfg.Codex, cfg.Classifier)
+	}
+}
+
+func TestValidateRejectsUnsupportedCodexWebSearchMode(t *testing.T) {
+	cfg := DefaultConfiguration
+	cfg.Codex.WebSearchMode = "unrestricted-ish"
+	if err := Validate(&cfg); err == nil || !strings.Contains(err.Error(), "codex.webSearchMode") {
+		t.Fatalf("web search mode validation error = %v", err)
 	}
 }
 
@@ -295,13 +340,10 @@ func TestLoadInjectedToolsAndDeterministicPathFromEnvironment(t *testing.T) {
 
 func TestValidateBehavioralPluginSourcesAreComplete(t *testing.T) {
 	cfg := DefaultConfiguration
-	cfg.Marketplaces.HeadlessRoot = "../telemetryos-agent-skills"
-	if err := Validate(&cfg); err == nil {
-		t.Fatal("partial headless plugin source was accepted")
-	}
-	cfg.Marketplaces.HeadlessCatalogPath = ".claude-plugin/marketplace.json"
-	cfg.Marketplaces.HeadlessPlugin = "telemetryos-automation"
 	cfg.Marketplaces.BaseRoot = "../tag-agent-skills"
+	if err := Validate(&cfg); err == nil {
+		t.Fatal("partial base plugin source was accepted")
+	}
 	cfg.Marketplaces.BaseCatalogPath = ".claude-plugin/marketplace.json"
 	cfg.Marketplaces.BasePlugin = "base"
 	if err := Validate(&cfg); err != nil {

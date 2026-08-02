@@ -19,6 +19,7 @@ import (
 
 	"github.com/RobertWHurst/blackbox"
 
+	"github.com/telemetryos/tos-tag/core/activity"
 	"github.com/telemetryos/tos-tag/core/approvals"
 	"github.com/telemetryos/tos-tag/core/audit"
 	"github.com/telemetryos/tos-tag/core/channelconfig"
@@ -30,6 +31,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/keystore"
 	"github.com/telemetryos/tos-tag/core/management"
 	"github.com/telemetryos/tos-tag/core/marketplace"
+	agentmemory "github.com/telemetryos/tos-tag/core/memory"
 	"github.com/telemetryos/tos-tag/core/modelrouter"
 	"github.com/telemetryos/tos-tag/core/orgconfig"
 	"github.com/telemetryos/tos-tag/core/retention"
@@ -57,6 +59,7 @@ type StubDelivery interface {
 type Dependencies struct {
 	Config              *config.Config
 	Logger              *blackbox.Logger
+	Activity            *activity.Hub
 	Health              Pinger
 	Ingress             StubIngress
 	Transport           StubDelivery
@@ -72,6 +75,7 @@ type Dependencies struct {
 	Marketplaces        *marketplace.Registry
 	ToolMarketplaces    *tools.Registry
 	Intelligence        *intelligence.Mongo
+	Memory              agentmemory.Repository
 	Secrets             keystore.Repository
 	Audit               audit.Appender
 	Approvals           approvals.Repository
@@ -90,6 +94,7 @@ type Server struct {
 	httpServer *http.Server
 	listener   net.Listener
 	events     *eventHub
+	activity   *activity.Hub
 }
 
 func New(deps Dependencies) (*Server, error) {
@@ -104,7 +109,11 @@ func New(deps Dependencies) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create CSRF token: %w", err)
 	}
-	s := &Server{deps: deps, template: tmpl, csrf: csrf, events: newEventHub()}
+	activityFeed := deps.Activity
+	if activityFeed == nil {
+		activityFeed = activity.New(500)
+	}
+	s := &Server{deps: deps, template: tmpl, csrf: csrf, events: newEventHub(), activity: activityFeed}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /.health", s.health)
 	mux.HandleFunc("GET /.version", s.version)
@@ -113,10 +122,12 @@ func New(deps Dependencies) (*Server, error) {
 	mux.HandleFunc("GET /admin/", s.renderIndex)
 	mux.HandleFunc("GET /admin/api/csrf", s.csrfToken)
 	mux.HandleFunc("GET /admin/api/status", s.status)
+	mux.HandleFunc("GET /admin/api/activity", s.listActivity)
 	mux.HandleFunc("GET /admin/api/jobs", s.listJobs)
 	mux.HandleFunc("GET /admin/api/deliveries", s.listDeliveries)
 	mux.HandleFunc("GET /admin/api/decisions", s.listDecisions)
 	mux.HandleFunc("GET /admin/api/routes", s.listRoutes)
+	mux.HandleFunc("GET /admin/api/organizations", s.listOrganizations)
 	mux.HandleFunc("POST /admin/api/routes/preview", s.previewRoute)
 	mux.HandleFunc("PUT /admin/api/routes/profiles", s.putProfile)
 	mux.HandleFunc("PUT /admin/api/routes/rules", s.putRule)
@@ -139,6 +150,10 @@ func New(deps Dependencies) (*Server, error) {
 	mux.HandleFunc("GET /admin/api/notes", s.listNotes)
 	mux.HandleFunc("POST /admin/api/notes", s.proposeNote)
 	mux.HandleFunc("POST /admin/api/notes/review", s.reviewNote)
+	mux.HandleFunc("GET /admin/api/memory", s.listMemory)
+	mux.HandleFunc("POST /admin/api/memory/correct", s.correctMemory)
+	mux.HandleFunc("POST /admin/api/memory/pin", s.pinMemory)
+	mux.HandleFunc("POST /admin/api/memory/forget", s.forgetMemory)
 	mux.HandleFunc("GET /admin/api/keystore", s.listSecrets)
 	mux.HandleFunc("PUT /admin/api/keystore", s.putSecret)
 	mux.HandleFunc("GET /admin/api/approvals", s.listApprovals)
@@ -244,8 +259,33 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 }
 
 type pageData struct {
-	Page     string
-	Endpoint string
+	Page        string
+	Endpoint    string
+	Section     string
+	Title       string
+	Description string
+}
+
+var managementPageCopy = map[string]pageData{
+	"overview":     {Section: "Live operations", Title: "Activity", Description: "Watch Slack intake, classifier decisions, agent execution, Codex App Server traffic, tools, and delivery as they happen."},
+	"channels":     {Section: "Operations", Title: "Channel coverage", Description: "Understand where Tag can observe, where it can participate, and which safeguards are active."},
+	"jobs":         {Section: "Operations", Title: "Agent work", Description: "Track admitted work from classification through completion, retry, or failure."},
+	"approvals":    {Section: "Operations", Title: "Approvals", Description: "Review actions waiting for a human decision and inspect recently resolved requests."},
+	"decisions":    {Section: "Intelligence", Title: "Classifier decisions", Description: "See when Tag chose to answer, react, start a thread, or stay quiet—and why."},
+	"context":      {Section: "Intelligence", Title: "Context health", Description: "Monitor the freshness and source coverage of the context packs Tag uses to reason."},
+	"directives":   {Section: "Intelligence", Title: "Channel directives", Description: "Review the active instructions that shape Tag's behavior in each channel."},
+	"notes":        {Section: "Intelligence", Title: "Learned channel notes", Description: "Review durable channel-specific knowledge proposed or approved for future conversations."},
+	"memory":       {Section: "Intelligence", Title: "Agent memory", Description: "Review, correct, pin, or forget source-linked summaries and facts recalled in future conversations."},
+	"routines":     {Section: "Automation", Title: "Scheduled routines", Description: "Monitor recurring classifier-gated work and its next scheduled run."},
+	"triggers":     {Section: "Automation", Title: "Event triggers", Description: "See the event subscriptions that can launch agent work when their conditions match."},
+	"routes":       {Section: "Configuration", Title: "Model routing", Description: "Understand the available model profiles and how work is routed by strength and effort."},
+	"marketplaces": {Section: "Configuration", Title: "Agent skills", Description: "Inspect the validated behavioral capabilities injected into every admitted agent job."},
+	"tools":        {Section: "Configuration", Title: "Reviewed tools", Description: "Inspect the bounded external capabilities available through the control-plane gateway."},
+	"keystore":     {Section: "Configuration", Title: "Secrets", Description: "Manage write-only credential references used by reviewed tools."},
+	"observations": {Section: "Diagnostics", Title: "Message intake", Description: "Inspect normalized Slack events and their processing state when troubleshooting ingress."},
+	"usage":        {Section: "Diagnostics", Title: "Usage and latency", Description: "Understand model, tool, worker, reaction, and delivery activity over time."},
+	"audit":        {Section: "Diagnostics", Title: "Audit log", Description: "Trace administrative and agent actions through tamper-evident receipts."},
+	"retention":    {Section: "Diagnostics", Title: "Data retention", Description: "Monitor retention sweeps and lifecycle cleanup without exposing retained content."},
 }
 
 func (s *Server) renderIndex(w http.ResponseWriter, r *http.Request) {
@@ -263,6 +303,7 @@ func (s *Server) renderIndex(w http.ResponseWriter, r *http.Request) {
 		"marketplaces": "/admin/api/marketplaces",
 		"tools":        "/admin/api/tool-marketplaces",
 		"notes":        "/admin/api/notes",
+		"memory":       "/admin/api/memory",
 		"directives":   "/admin/api/directives",
 		"retention":    "/admin/api/retention",
 		"audit":        "/admin/api/audit",
@@ -273,12 +314,15 @@ func (s *Server) renderIndex(w http.ResponseWriter, r *http.Request) {
 		"triggers":     "/admin/api/trigger-subscriptions",
 	}
 	endpoint := endpoints[page]
-	if page != "overview" && endpoint == "" {
+	copy, exists := managementPageCopy[page]
+	if !exists || (page != "overview" && endpoint == "") {
 		writeError(w, http.StatusNotFound, "page_not_found")
 		return
 	}
+	copy.Page = page
+	copy.Endpoint = endpoint
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.template.Execute(w, pageData{Page: page, Endpoint: endpoint}); err != nil && s.deps.Logger != nil {
+	if err := s.template.Execute(w, copy); err != nil && s.deps.Logger != nil {
 		s.deps.Logger.Error("render management index", err)
 	}
 }
@@ -452,6 +496,26 @@ func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
 	values, err := s.deps.Organizations.ListChannels(r.Context(), organizationID)
 	writeList(w, values, err)
 }
+func (s *Server) listOrganizations(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Organizations == nil {
+		writeError(w, http.StatusNotFound, "organizations_disabled")
+		return
+	}
+	values, err := s.deps.Organizations.ListOrganizations(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "organizations_unavailable")
+		return
+	}
+	redacted := make([]map[string]any, len(values))
+	for i, organization := range values {
+		redacted[i] = map[string]any{
+			"id": organization.PublicID, "name": organization.Name,
+			"kill_switch": organization.KillSwitch, "enrollment_mode": organization.EnrollmentMode,
+			"default_model_profile": organization.DefaultModelProfile,
+		}
+	}
+	writeJSON(w, http.StatusOK, redacted)
+}
 func (s *Server) putOrganization(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Organizations == nil {
 		writeError(w, http.StatusNotFound, "organizations_disabled")
@@ -539,7 +603,7 @@ func (s *Server) listRecords(kind string) http.HandlerFunc {
 			writeError(w, http.StatusNotFound, "records_disabled")
 			return
 		}
-		values, err := s.deps.Records.List(r.Context(), kind, r.URL.Query().Get("organization_id"), 100)
+		values, err := s.deps.Records.List(r.Context(), kind, r.URL.Query().Get("organization_id"), 50)
 		writeList(w, values, err)
 	}
 }
@@ -712,6 +776,96 @@ func (s *Server) reviewNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.events.Publish("notes")
+	writeJSON(w, http.StatusOK, value)
+}
+
+func (s *Server) listMemory(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Memory == nil {
+		writeError(w, http.StatusNotFound, "memory_disabled")
+		return
+	}
+	organizationID, ok := requiredOrganization(w, r)
+	if !ok {
+		return
+	}
+	values, err := s.deps.Memory.List(r.Context(), organizationID, 500)
+	writeList(w, values, err)
+}
+
+func (s *Server) correctMemory(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Memory == nil {
+		writeError(w, http.StatusNotFound, "memory_disabled")
+		return
+	}
+	var input struct {
+		OrganizationID string `json:"organization_id"`
+		RecordID       string `json:"record_id"`
+		Text           string `json:"text"`
+		ActorID        string `json:"actor_id"`
+	}
+	if !decodeMutation(w, r, s.csrf, &input) {
+		return
+	}
+	if !s.auditMutation(w, r, input.OrganizationID, input.RecordID, "memory.correct", input.ActorID, nil) {
+		return
+	}
+	value, err := s.deps.Memory.Correct(r.Context(), input.OrganizationID, input.RecordID, input.Text, input.ActorID)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_memory_correction")
+		return
+	}
+	s.events.Publish("memory")
+	writeJSON(w, http.StatusOK, value)
+}
+
+func (s *Server) pinMemory(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Memory == nil {
+		writeError(w, http.StatusNotFound, "memory_disabled")
+		return
+	}
+	var input struct {
+		OrganizationID string `json:"organization_id"`
+		RecordID       string `json:"record_id"`
+		Pinned         bool   `json:"pinned"`
+		ActorID        string `json:"actor_id"`
+	}
+	if !decodeMutation(w, r, s.csrf, &input) {
+		return
+	}
+	if !s.auditMutation(w, r, input.OrganizationID, input.RecordID, "memory.pin", input.ActorID, map[string]any{"pinned": input.Pinned}) {
+		return
+	}
+	value, err := s.deps.Memory.SetPinned(r.Context(), input.OrganizationID, input.RecordID, input.Pinned, input.ActorID)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_memory_pin")
+		return
+	}
+	s.events.Publish("memory")
+	writeJSON(w, http.StatusOK, value)
+}
+
+func (s *Server) forgetMemory(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Memory == nil {
+		writeError(w, http.StatusNotFound, "memory_disabled")
+		return
+	}
+	var input struct {
+		OrganizationID string `json:"organization_id"`
+		RecordID       string `json:"record_id"`
+		ActorID        string `json:"actor_id"`
+	}
+	if !decodeMutation(w, r, s.csrf, &input) {
+		return
+	}
+	if !s.auditMutation(w, r, input.OrganizationID, input.RecordID, "memory.forget", input.ActorID, nil) {
+		return
+	}
+	value, err := s.deps.Memory.Forget(r.Context(), input.OrganizationID, input.RecordID, input.ActorID)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_memory_forget")
+		return
+	}
+	s.events.Publish("memory")
 	writeJSON(w, http.StatusOK, value)
 }
 

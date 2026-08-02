@@ -41,6 +41,8 @@ func ParseModelOutput(output string) (types.SlackResult, error) {
 			Kind     types.SlackSegmentKind `json:"kind"`
 			Text     string                 `json:"text"`
 			Table    *types.SlackTable      `json:"table"`
+			Card     *types.SlackCard       `json:"card"`
+			Carousel *types.SlackCarousel   `json:"carousel"`
 			Image    *types.SlackImage      `json:"image"`
 			Artifact *types.SlackArtifact   `json:"artifact"`
 			Notice   *types.SlackNotice     `json:"notice"`
@@ -51,7 +53,7 @@ func ParseModelOutput(output string) (types.SlackResult, error) {
 				kind = legacy.Type
 			}
 			if kind != "" && kind != types.SlackSegmentApproval && kind != types.SlackSegmentNotice && legacy.Notice == nil {
-				return promoteMarkdownTables(types.SlackResult{Segments: []types.SlackSegment{{Kind: kind, Text: legacy.Text, Table: legacy.Table, Image: legacy.Image, Artifact: legacy.Artifact}}}), nil
+				return promoteMarkdownTables(types.SlackResult{Segments: []types.SlackSegment{{Kind: kind, Text: legacy.Text, Table: legacy.Table, Card: legacy.Card, Carousel: legacy.Carousel, Image: legacy.Image, Artifact: legacy.Artifact}}}), nil
 			}
 		}
 	}

@@ -134,6 +134,9 @@ type StubDelivery struct {
 	failures         map[string]int
 	reactions        map[string]types.SlackReactionResult
 	reactionRequests []types.SlackReactionRequest
+	progress         map[string]types.SlackProgressResult
+	progressStarts   []types.SlackProgressStartRequest
+	progressUpdates  []types.SlackProgressUpdateRequest
 }
 
 func NewStubDelivery() *StubDelivery {
@@ -141,7 +144,29 @@ func NewStubDelivery() *StubDelivery {
 		results:   make(map[string]types.SlackDeliveryResult),
 		failures:  make(map[string]int),
 		reactions: make(map[string]types.SlackReactionResult),
+		progress:  make(map[string]types.SlackProgressResult),
 	}
+}
+
+func (s *StubDelivery) StartProgress(_ context.Context, req types.SlackProgressStartRequest) (types.SlackProgressResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing, ok := s.progress[req.IdempotencyKey]; ok {
+		existing.Duplicate = true
+		return existing, nil
+	}
+	seq := atomic.AddUint64(&s.sequence, 1)
+	result := types.SlackProgressResult{MessageTS: fmt.Sprintf("stub.%06d", seq), UpdatedAt: time.Now().UTC()}
+	s.progress[req.IdempotencyKey] = result
+	s.progressStarts = append(s.progressStarts, req)
+	return result, nil
+}
+
+func (s *StubDelivery) UpdateProgress(_ context.Context, req types.SlackProgressUpdateRequest) (types.SlackProgressResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.progressUpdates = append(s.progressUpdates, req)
+	return types.SlackProgressResult{MessageTS: req.MessageTS, UpdatedAt: time.Now().UTC()}, nil
 }
 
 func (s *StubDelivery) React(_ context.Context, req types.SlackReactionRequest) (types.SlackReactionResult, error) {
@@ -194,4 +219,16 @@ func (s *StubDelivery) ReactionRequests() []types.SlackReactionRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]types.SlackReactionRequest(nil), s.reactionRequests...)
+}
+
+func (s *StubDelivery) ProgressStarts() []types.SlackProgressStartRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]types.SlackProgressStartRequest(nil), s.progressStarts...)
+}
+
+func (s *StubDelivery) ProgressUpdates() []types.SlackProgressUpdateRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]types.SlackProgressUpdateRequest(nil), s.progressUpdates...)
 }

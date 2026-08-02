@@ -92,7 +92,6 @@ sync_pinned_repository() {
 }
 
 sync_repository telemetryOS/tos-tag "${projects_root}/tos-tag"
-sync_repository telemetryOS/telemetryos-agent-skills "${skills_root}/telemetryos-agent-skills"
 sync_repository telemetryOS/tag-agent-skills "${skills_root}/tag-agent-skills"
 sync_pinned_repository telemetryOS/telemetry-otel-fetch "${tools_root}/telemetry-otel-fetch" 0e94e929c39d4f1b9d76bce2a096eab1bca0582e
 sync_pinned_repository telemetryOS/Device-Log-Analyzer "${tools_root}/Device-Log-Analyzer" d885c144bc6548554534346618feb5144690dfdd

@@ -18,21 +18,29 @@ import (
 )
 
 const (
-	maxBlocksPerMessage  = 50
-	maxHeaderCharacters  = 150
-	maxSectionCharacters = 3000
-	maxContextCharacters = 2000
-	maxImageCharacters   = 2000
-	maxTableRows         = 100
-	maxTableColumns      = 20
-	maxTableCharacters   = 10_000
+	maxBlocksPerMessage    = 50
+	maxHeaderCharacters    = 150
+	maxSectionCharacters   = 3000
+	maxContextCharacters   = 2000
+	maxImageCharacters     = 2000
+	maxTableRows           = 100
+	maxTableColumns        = 20
+	maxTableCharacters     = 10_000
+	maxCardTextCharacters  = 200
+	maxCardTitleCharacters = 150
+	maxCarouselCards       = 10
 )
 
 var (
-	ErrInvalidResult   = errors.New("invalid Slack result")
-	gfmLinkPattern     = regexp.MustCompile(`\[[^\]\n]+\]\([^)\n]+\)`)
-	slackLinkPattern   = regexp.MustCompile(`<([^>|]+)\|([^>]+)>`)
-	slackEntityPattern = regexp.MustCompile(`<(?:@|#|!)[^>]*>`)
+	ErrInvalidResult     = errors.New("invalid Slack result")
+	gfmLinkPattern       = regexp.MustCompile(`\[[^\]\n]+\]\([^)\n]+\)`)
+	slackLinkPattern     = regexp.MustCompile(`<([^>|]+)\|([^>]+)>`)
+	slackEntityPattern   = regexp.MustCompile(`<(?:@|#|!)[^>]*>`)
+	httpsLinkPattern     = regexp.MustCompile(`(?i)https://[^\s<>()]+`)
+	bareWikiSlugPattern  = regexp.MustCompile(`(?i)(?:^|[\s(])` + "`?" + `(?:primer|artifacts)/[a-z0-9][a-z0-9._/-]*` + "`?" + `(?:$|[\s),.;:])`)
+	generalSlugPattern   = regexp.MustCompile(`(?i)(?:^|[\s(])` + "`?" + `[a-z][a-z0-9-]{1,63}/[a-z0-9][a-z0-9._/-]*` + "`?" + `(?:$|[\s),.;:])`)
+	wikiSlugTokenPattern = regexp.MustCompile("(?i)`?[a-z][a-z0-9-]{1,63}/[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?`?")
+	wikiReferenceCue     = regexp.MustCompile(`(?i)\b(?:agent wiki|wiki page|wiki reference|wiki source)\b`)
 )
 
 // ValidationCode returns a stable, content-free diagnostic for a renderer
@@ -53,6 +61,18 @@ func ValidationCode(err error) string {
 		{"invalid context payload", "context_payload"},
 		{"invalid divider payload", "divider_payload"},
 		{"invalid table payload", "table_payload"},
+		{"invalid card payload", "card_payload"},
+		{"invalid carousel payload", "carousel_payload"},
+		{"card title is invalid", "card_title"},
+		{"card body is invalid", "card_body"},
+		{"card subtitle is invalid", "card_subtitle"},
+		{"card subtext is invalid", "card_subtext"},
+		{"carousel must contain", "carousel_cards"},
+		{"card image URL must be HTTPS", "card_image_url"},
+		{"card image alt text is invalid", "card_image_alt_text"},
+		{"data table caption is invalid", "data_table_caption"},
+		{"data table page size", "data_table_page_size"},
+		{"data table row header", "data_table_row_header"},
 		{"invalid image payload", "image_payload"},
 		{"invalid artifact payload", "artifact_payload"},
 		{"invalid approval payload", "approval_payload"},
@@ -79,6 +99,7 @@ func ValidationCode(err error) string {
 		{"artifact name is required", "artifact_name"},
 		{"artifact URL must be HTTPS", "artifact_url"},
 		{"artifact URL lacks successful tool provenance", "artifact_unverified"},
+		{"bare Wiki page slug", "wiki_reference_slug"},
 	}
 	for _, check := range checks {
 		if strings.Contains(message, check.fragment) {
@@ -86,6 +107,140 @@ func ValidationCode(err error) string {
 		}
 	}
 	return "invalid_result"
+}
+
+// ValidateWikiReferenceLinks prevents internal Wiki identifiers from being
+// presented as citations. Namespace/slug values are useful to the reviewed
+// CLI, but Slack readers need the opaque human HTTPS URL returned by that CLI.
+// Existing Wiki pages belong in normal mrkdwn links rather than artifact
+// segments, whose provenance contract is reserved for newly published output.
+func ValidateWikiReferenceLinks(result types.SlackResult) error {
+	validate := func(text string) error {
+		withoutLinks := slackLinkPattern.ReplaceAllString(text, " ")
+		withoutLinks = httpsLinkPattern.ReplaceAllString(withoutLinks, " ")
+		if bareWikiSlugPattern.MatchString(withoutLinks) || (wikiReferenceCue.MatchString(withoutLinks) && generalSlugPattern.MatchString(withoutLinks)) {
+			return fmt.Errorf("%w: bare Wiki page slug must be replaced with an HTTPS link", ErrInvalidResult)
+		}
+		return nil
+	}
+	for _, segment := range result.Segments {
+		if err := validate(segment.Text); err != nil {
+			return err
+		}
+		if segment.Card != nil {
+			for _, text := range []string{segment.Card.Title, segment.Card.Subtitle, segment.Card.Body, segment.Card.Subtext} {
+				if err := validate(text); err != nil {
+					return err
+				}
+			}
+		}
+		if segment.Carousel != nil {
+			for _, card := range segment.Carousel.Cards {
+				for _, text := range []string{card.Title, card.Subtitle, card.Body, card.Subtext} {
+					if err := validate(text); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		if segment.Table == nil {
+			continue
+		}
+		for _, row := range segment.Table.Rows {
+			for _, cell := range row {
+				if err := validate(cell.Text); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// ResolveWikiReferenceLinks replaces a model-emitted namespace/slug only when
+// the same worker attempt returned the canonical human URL for that exact
+// reference. The map key is the lowercase SHA-256 fingerprint of the tool
+// reference, so the control plane does not need to expose page slugs in events
+// or logs. Unresolved slugs remain untouched and are rejected by validation.
+func ResolveWikiReferenceLinks(result types.SlackResult, resolvedURLs map[string]string) types.SlackResult {
+	if len(resolvedURLs) == 0 {
+		return result
+	}
+	result.Segments = append([]types.SlackSegment(nil), result.Segments...)
+	for index := range result.Segments {
+		if result.Segments[index].Table != nil {
+			table := *result.Segments[index].Table
+			table.Rows = make([][]types.SlackTableCell, len(result.Segments[index].Table.Rows))
+			for rowIndex := range result.Segments[index].Table.Rows {
+				table.Rows[rowIndex] = append([]types.SlackTableCell(nil), result.Segments[index].Table.Rows[rowIndex]...)
+			}
+			result.Segments[index].Table = &table
+		}
+		if result.Segments[index].Card != nil {
+			card := *result.Segments[index].Card
+			resolveCardWikiReferences(&card, resolvedURLs)
+			result.Segments[index].Card = &card
+		}
+		if result.Segments[index].Carousel != nil {
+			carousel := *result.Segments[index].Carousel
+			carousel.Cards = append([]types.SlackCard(nil), carousel.Cards...)
+			for cardIndex := range carousel.Cards {
+				resolveCardWikiReferences(&carousel.Cards[cardIndex], resolvedURLs)
+			}
+			result.Segments[index].Carousel = &carousel
+		}
+		result.Segments[index].Text = resolveWikiReferenceText(result.Segments[index].Text, resolvedURLs, true)
+		if result.Segments[index].Table == nil {
+			continue
+		}
+		for rowIndex := range result.Segments[index].Table.Rows {
+			for cellIndex := range result.Segments[index].Table.Rows[rowIndex] {
+				cell := &result.Segments[index].Table.Rows[rowIndex][cellIndex]
+				cell.Text = resolveWikiReferenceText(cell.Text, resolvedURLs, false)
+			}
+		}
+	}
+	return result
+}
+
+func resolveCardWikiReferences(card *types.SlackCard, resolvedURLs map[string]string) {
+	card.Title = resolveWikiReferenceText(card.Title, resolvedURLs, true)
+	card.Subtitle = resolveWikiReferenceText(card.Subtitle, resolvedURLs, true)
+	card.Body = resolveWikiReferenceText(card.Body, resolvedURLs, true)
+	card.Subtext = resolveWikiReferenceText(card.Subtext, resolvedURLs, true)
+}
+
+func resolveWikiReferenceText(text string, resolvedURLs map[string]string, slackLink bool) string {
+	matches := wikiSlugTokenPattern.FindAllStringIndex(text, -1)
+	if len(matches) == 0 {
+		return text
+	}
+	var output strings.Builder
+	last := 0
+	for _, match := range matches {
+		start, end := match[0], match[1]
+		output.WriteString(text[last:start])
+		token := text[start:end]
+		reference := strings.Trim(token, "`")
+		fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.ToLower(reference))))
+		resolvedURL, ok := resolvedURLs[fingerprint]
+		if !ok || insideSlackLink(text, start) {
+			output.WriteString(token)
+		} else if slackLink {
+			output.WriteString("<" + resolvedURL + "|Agent Wiki source>")
+		} else {
+			output.WriteString(resolvedURL)
+		}
+		last = end
+	}
+	output.WriteString(text[last:])
+	return output.String()
+}
+
+func insideSlackLink(text string, index int) bool {
+	open := strings.LastIndex(text[:index], "<")
+	close := strings.LastIndex(text[:index], ">")
+	return open > close
 }
 
 // ValidateArtifactProvenance ensures a model-created artifact segment refers to
@@ -117,10 +272,20 @@ func (r *Renderer) Render(result types.SlackResult) ([]Payload, error) {
 	if len(result.Segments) == 0 {
 		return nil, fmt.Errorf("%w: no segments", ErrInvalidResult)
 	}
+	if err := ValidateWikiReferenceLinks(result); err != nil {
+		return nil, err
+	}
+	footer := renderAgentFooter(result.AgentFooter)
+	blockLimit := maxBlocksPerMessage
+	if footer != "" {
+		// Reserve one block in every split payload so the final payload always
+		// has room for the control-plane-owned provenance footer.
+		blockLimit--
+	}
 	payloads := []Payload{{}}
 	appendBlock := func(block map[string]any, fallback string) {
 		last := &payloads[len(payloads)-1]
-		if len(last.Blocks) >= maxBlocksPerMessage {
+		if len(last.Blocks) >= blockLimit {
 			payloads = append(payloads, Payload{})
 			last = &payloads[len(payloads)-1]
 		}
@@ -134,7 +299,7 @@ func (r *Renderer) Render(result types.SlackResult) ([]Payload, error) {
 	}
 	appendBlockGroup := func(blocks []map[string]any, fallback string) {
 		last := &payloads[len(payloads)-1]
-		if len(last.Blocks) > 0 && (len(last.Blocks)+len(blocks) > maxBlocksPerMessage || (containsTable(blocks) && containsTable(last.Blocks))) {
+		if len(last.Blocks) > 0 && (len(last.Blocks)+len(blocks) > blockLimit || (containsTable(blocks) && containsTable(last.Blocks))) {
 			payloads = append(payloads, Payload{})
 		}
 		for blockIndex, block := range blocks {
@@ -149,7 +314,7 @@ func (r *Renderer) Render(result types.SlackResult) ([]Payload, error) {
 	for index, segment := range result.Segments {
 		switch segment.Kind {
 		case types.SlackSegmentHeader:
-			if segment.Table != nil || segment.Image != nil || segment.Artifact != nil || segment.Approval != nil || segment.Notice != nil || strings.TrimSpace(segment.Text) == "" || !utf8.ValidString(segment.Text) || strings.ContainsRune(segment.Text, '\x00') || utf8.RuneCountInString(segment.Text) > maxHeaderCharacters {
+			if segment.Table != nil || segment.Card != nil || segment.Carousel != nil || segment.Image != nil || segment.Artifact != nil || segment.Approval != nil || segment.Notice != nil || strings.TrimSpace(segment.Text) == "" || !utf8.ValidString(segment.Text) || strings.ContainsRune(segment.Text, '\x00') || utf8.RuneCountInString(segment.Text) > maxHeaderCharacters {
 				return nil, fmt.Errorf("%w: segment %d has invalid header payload", ErrInvalidResult, index)
 			}
 			appendBlock(map[string]any{
@@ -157,7 +322,7 @@ func (r *Renderer) Render(result types.SlackResult) ([]Payload, error) {
 				"text": map[string]any{"type": "plain_text", "text": segment.Text, "emoji": true},
 			}, segment.Text)
 		case types.SlackSegmentMRKDWN:
-			if segment.Table != nil || segment.Image != nil || segment.Artifact != nil || segment.Approval != nil || segment.Notice != nil {
+			if segment.Table != nil || segment.Card != nil || segment.Carousel != nil || segment.Image != nil || segment.Artifact != nil || segment.Approval != nil || segment.Notice != nil {
 				return nil, fmt.Errorf("%w: segment %d mixes mrkdwn with another payload", ErrInvalidResult, index)
 			}
 			if err := validateMRKDWN(segment.Text, result.AllowedMentions); err != nil {
@@ -169,12 +334,13 @@ func (r *Renderer) Render(result types.SlackResult) ([]Payload, error) {
 			}
 			for _, chunk := range chunks {
 				appendBlock(map[string]any{
-					"type": "section",
-					"text": map[string]any{"type": "mrkdwn", "text": chunk},
+					"type":   "section",
+					"text":   map[string]any{"type": "mrkdwn", "text": chunk},
+					"expand": true,
 				}, stripFormatting(chunk))
 			}
 		case types.SlackSegmentContext:
-			if segment.Table != nil || segment.Image != nil || segment.Artifact != nil || segment.Approval != nil || segment.Notice != nil || utf8.RuneCountInString(segment.Text) > maxContextCharacters {
+			if segment.Table != nil || segment.Card != nil || segment.Carousel != nil || segment.Image != nil || segment.Artifact != nil || segment.Approval != nil || segment.Notice != nil || utf8.RuneCountInString(segment.Text) > maxContextCharacters {
 				return nil, fmt.Errorf("%w: segment %d has invalid context payload", ErrInvalidResult, index)
 			}
 			if err := validateMRKDWN(segment.Text, result.AllowedMentions); err != nil {
@@ -185,12 +351,12 @@ func (r *Renderer) Render(result types.SlackResult) ([]Payload, error) {
 				"elements": []any{map[string]any{"type": "mrkdwn", "text": segment.Text}},
 			}, stripFormatting(segment.Text))
 		case types.SlackSegmentDivider:
-			if segment.Text != "" || segment.Table != nil || segment.Image != nil || segment.Artifact != nil || segment.Approval != nil || segment.Notice != nil {
+			if segment.Text != "" || segment.Table != nil || segment.Card != nil || segment.Carousel != nil || segment.Image != nil || segment.Artifact != nil || segment.Approval != nil || segment.Notice != nil {
 				return nil, fmt.Errorf("%w: segment %d has invalid divider payload", ErrInvalidResult, index)
 			}
 			appendBlock(map[string]any{"type": "divider"}, "")
 		case types.SlackSegmentTable:
-			if segment.Table == nil || segment.Text != "" || segment.Image != nil || segment.Artifact != nil || segment.Approval != nil || segment.Notice != nil {
+			if segment.Table == nil || segment.Text != "" || segment.Card != nil || segment.Carousel != nil || segment.Image != nil || segment.Artifact != nil || segment.Approval != nil || segment.Notice != nil {
 				return nil, fmt.Errorf("%w: segment %d has invalid table payload", ErrInvalidResult, index)
 			}
 			tables, err := renderTables(*segment.Table)
@@ -199,13 +365,40 @@ func (r *Renderer) Render(result types.SlackResult) ([]Payload, error) {
 			}
 			for tableIndex, table := range tables {
 				last := &payloads[len(payloads)-1]
-				if containsTable(last.Blocks) || len(last.Blocks) >= maxBlocksPerMessage {
+				if containsTable(last.Blocks) || len(last.Blocks) >= blockLimit {
 					payloads = append(payloads, Payload{})
 				}
 				appendBlock(table, tableFallback(*segment.Table, tableIndex, len(tables)))
 			}
+		case types.SlackSegmentCard:
+			if segment.Card == nil || segment.Text != "" || segment.Table != nil || segment.Carousel != nil || segment.Image != nil || segment.Artifact != nil || segment.Approval != nil || segment.Notice != nil {
+				return nil, fmt.Errorf("%w: segment %d has invalid card payload", ErrInvalidResult, index)
+			}
+			card, fallback, err := renderCard(*segment.Card, fmt.Sprintf("tos_tag_card_%d", index))
+			if err != nil {
+				return nil, fmt.Errorf("segment %d: %w", index, err)
+			}
+			appendBlock(card, fallback)
+		case types.SlackSegmentCarousel:
+			if segment.Carousel == nil || segment.Text != "" || segment.Table != nil || segment.Card != nil || segment.Image != nil || segment.Artifact != nil || segment.Approval != nil || segment.Notice != nil {
+				return nil, fmt.Errorf("%w: segment %d has invalid carousel payload", ErrInvalidResult, index)
+			}
+			if len(segment.Carousel.Cards) < 1 || len(segment.Carousel.Cards) > maxCarouselCards {
+				return nil, fmt.Errorf("%w: carousel must contain 1-%d cards", ErrInvalidResult, maxCarouselCards)
+			}
+			elements := make([]any, 0, len(segment.Carousel.Cards))
+			fallbacks := make([]string, 0, len(segment.Carousel.Cards))
+			for cardIndex, item := range segment.Carousel.Cards {
+				card, fallback, err := renderCard(item, "")
+				if err != nil {
+					return nil, fmt.Errorf("segment %d card %d: %w", index, cardIndex, err)
+				}
+				elements = append(elements, card)
+				fallbacks = append(fallbacks, fallback)
+			}
+			appendBlock(map[string]any{"type": "carousel", "block_id": fmt.Sprintf("tos_tag_carousel_%d", index), "elements": elements}, strings.Join(fallbacks, "\n"))
 		case types.SlackSegmentImage:
-			if segment.Image == nil || segment.Text != "" || segment.Table != nil || segment.Artifact != nil || segment.Approval != nil || segment.Notice != nil {
+			if segment.Image == nil || segment.Text != "" || segment.Table != nil || segment.Card != nil || segment.Carousel != nil || segment.Artifact != nil || segment.Approval != nil || segment.Notice != nil {
 				return nil, fmt.Errorf("%w: segment %d has invalid image payload", ErrInvalidResult, index)
 			}
 			if err := validateImage(*segment.Image); err != nil {
@@ -217,7 +410,7 @@ func (r *Renderer) Render(result types.SlackResult) ([]Payload, error) {
 			}
 			appendBlock(block, "Image: "+segment.Image.AltText+" ("+segment.Image.URL+")")
 		case types.SlackSegmentArtifact:
-			if segment.Artifact == nil || segment.Text != "" || segment.Table != nil || segment.Image != nil || segment.Approval != nil || segment.Notice != nil {
+			if segment.Artifact == nil || segment.Text != "" || segment.Table != nil || segment.Card != nil || segment.Carousel != nil || segment.Image != nil || segment.Approval != nil || segment.Notice != nil {
 				return nil, fmt.Errorf("%w: segment %d has invalid artifact payload", ErrInvalidResult, index)
 			}
 			if err := validateArtifact(*segment.Artifact); err != nil {
@@ -229,7 +422,7 @@ func (r *Renderer) Render(result types.SlackResult) ([]Payload, error) {
 				"text": map[string]any{"type": "mrkdwn", "text": text},
 			}, segment.Artifact.Name+": "+segment.Artifact.URL)
 		case types.SlackSegmentApproval:
-			if segment.Approval == nil || segment.Text != "" || segment.Table != nil || segment.Image != nil || segment.Artifact != nil || segment.Notice != nil {
+			if segment.Approval == nil || segment.Text != "" || segment.Table != nil || segment.Card != nil || segment.Carousel != nil || segment.Image != nil || segment.Artifact != nil || segment.Notice != nil {
 				return nil, fmt.Errorf("%w: segment %d has invalid approval payload", ErrInvalidResult, index)
 			}
 			approval := segment.Approval
@@ -250,7 +443,7 @@ func (r *Renderer) Render(result types.SlackResult) ([]Payload, error) {
 			}
 			appendBlockGroup(blocks, approvalFallback(approval, status))
 		case types.SlackSegmentNotice:
-			if segment.Notice == nil || segment.Text != "" || segment.Table != nil || segment.Image != nil || segment.Artifact != nil || segment.Approval != nil {
+			if segment.Notice == nil || segment.Text != "" || segment.Table != nil || segment.Card != nil || segment.Carousel != nil || segment.Image != nil || segment.Artifact != nil || segment.Approval != nil {
 				return nil, fmt.Errorf("%w: segment %d has invalid notice payload", ErrInvalidResult, index)
 			}
 			if err := validateNotice(*segment.Notice); err != nil {
@@ -266,7 +459,82 @@ func (r *Renderer) Render(result types.SlackResult) ([]Payload, error) {
 			return nil, fmt.Errorf("%w: rendered payload lacks accessible fallback text", ErrInvalidResult)
 		}
 	}
+	if footer != "" {
+		last := &payloads[len(payloads)-1]
+		last.Blocks = append(last.Blocks, map[string]any{
+			"type":     "context",
+			"block_id": "tos_tag_agent_footer",
+			"elements": []any{map[string]any{"type": "mrkdwn", "text": footer}},
+		})
+		last.Text += "\n" + footer
+	}
 	return payloads, nil
+}
+
+func renderAgentFooter(metadata *types.SlackAgentFooter) string {
+	if metadata == nil || strings.TrimSpace(metadata.ModelID) == "" {
+		return ""
+	}
+	parts := []string{humanizeModelID(metadata.ModelID)}
+	if effort := strings.TrimSpace(metadata.ReasoningEffort); effort != "" {
+		parts = append(parts, strings.ToLower(effort)+" effort")
+	}
+	totalTokens := metadata.TotalTokens
+	if totalTokens <= 0 {
+		totalTokens = metadata.InputTokens + metadata.OutputTokens
+	}
+	if totalTokens > 0 {
+		parts = append(parts, compactCount(totalTokens)+" tokens")
+	}
+	if metadata.DurationMS > 0 {
+		parts = append(parts, compactDuration(metadata.DurationMS))
+	}
+	return strings.Join(parts, "  •  ")
+}
+
+func humanizeModelID(modelID string) string {
+	modelID = strings.TrimSpace(strings.TrimPrefix(modelID, "openai/"))
+	if strings.HasPrefix(modelID, "gpt-") {
+		modelID = "ChatGPT " + strings.TrimPrefix(modelID, "gpt-")
+	}
+	words := strings.FieldsFunc(modelID, func(character rune) bool { return character == '-' || character == '_' })
+	for index, word := range words {
+		if index == 0 && strings.EqualFold(word, "ChatGPT") {
+			words[index] = "ChatGPT"
+			continue
+		}
+		if _, err := strconv.ParseFloat(word, 64); err == nil {
+			continue
+		}
+		words[index] = strings.ToUpper(word[:1]) + word[1:]
+	}
+	return strings.Join(words, " ")
+}
+
+func compactCount(value int64) string {
+	if value < 1_000 {
+		return strconv.FormatInt(value, 10)
+	}
+	if value < 10_000 {
+		return strings.TrimSuffix(strconv.FormatFloat(float64(value)/1_000, 'f', 1, 64), ".0") + "k"
+	}
+	return strconv.FormatInt((value+500)/1_000, 10) + "k"
+}
+
+func compactDuration(milliseconds int64) string {
+	if milliseconds < 1_000 {
+		return strconv.FormatInt(milliseconds, 10) + "ms"
+	}
+	if milliseconds < 60_000 {
+		return strings.TrimSuffix(strconv.FormatFloat(float64(milliseconds)/1_000, 'f', 1, 64), ".0") + "s"
+	}
+	duration := time.Duration(milliseconds) * time.Millisecond
+	minutes := int64(duration / time.Minute)
+	seconds := int64((duration % time.Minute) / time.Second)
+	if seconds == 0 {
+		return strconv.FormatInt(minutes, 10) + "m"
+	}
+	return fmt.Sprintf("%dm %ds", minutes, seconds)
 }
 
 func renderApprovalBlocks(approval *types.SlackApproval) ([]map[string]any, error) {
@@ -613,6 +881,83 @@ func splitMRKDWN(text string, limit int) ([]string, error) {
 	return chunks, nil
 }
 
+func renderCard(card types.SlackCard, blockID string) (map[string]any, string, error) {
+	if err := validateCard(card); err != nil {
+		return nil, "", err
+	}
+	block := map[string]any{
+		"type":  "card",
+		"title": map[string]any{"type": "mrkdwn", "text": card.Title},
+		"body":  map[string]any{"type": "mrkdwn", "text": card.Body},
+	}
+	if blockID != "" {
+		block["block_id"] = blockID
+	}
+	if card.Subtitle != "" {
+		block["subtitle"] = map[string]any{"type": "mrkdwn", "text": card.Subtitle}
+	}
+	if card.Subtext != "" {
+		block["subtext"] = map[string]any{"type": "mrkdwn", "text": card.Subtext}
+	}
+	if card.Icon != nil {
+		block["icon"] = renderCardImage(*card.Icon)
+	}
+	if card.HeroImage != nil {
+		block["hero_image"] = renderCardImage(*card.HeroImage)
+	}
+	parts := make([]string, 0, 4)
+	for _, text := range []string{card.Title, card.Subtitle, card.Body, card.Subtext} {
+		if text = strings.TrimSpace(stripFormatting(text)); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	fallback := strings.Join(parts, " — ")
+	return block, fallback, nil
+}
+
+func renderCardImage(image types.SlackCardImage) map[string]any {
+	return map[string]any{"type": "image", "image_url": image.URL, "alt_text": image.AltText}
+}
+
+func validateCard(card types.SlackCard) error {
+	if strings.TrimSpace(card.Title) == "" || utf8.RuneCountInString(card.Title) > maxCardTitleCharacters {
+		return fmt.Errorf("%w: card title is invalid", ErrInvalidResult)
+	}
+	if strings.TrimSpace(card.Body) == "" || utf8.RuneCountInString(card.Body) > maxCardTextCharacters {
+		return fmt.Errorf("%w: card body is invalid", ErrInvalidResult)
+	}
+	if utf8.RuneCountInString(card.Subtitle) > maxCardTitleCharacters {
+		return fmt.Errorf("%w: card subtitle is invalid", ErrInvalidResult)
+	}
+	if utf8.RuneCountInString(card.Subtext) > maxCardTextCharacters {
+		return fmt.Errorf("%w: card subtext is invalid", ErrInvalidResult)
+	}
+	for _, text := range []string{card.Title, card.Subtitle, card.Body, card.Subtext} {
+		if !utf8.ValidString(text) || strings.ContainsRune(text, '\x00') {
+			return fmt.Errorf("%w: card body is invalid", ErrInvalidResult)
+		}
+		if text == "" {
+			continue
+		}
+		if err := validateMRKDWN(text, types.SlackMentionAllowlist{}); err != nil {
+			return err
+		}
+	}
+	for _, image := range []*types.SlackCardImage{card.Icon, card.HeroImage} {
+		if image == nil {
+			continue
+		}
+		parsed, err := url.Parse(image.URL)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+			return fmt.Errorf("%w: card image URL must be HTTPS", ErrInvalidResult)
+		}
+		if strings.TrimSpace(image.AltText) == "" || !utf8.ValidString(image.AltText) || strings.ContainsRune(image.AltText, '\x00') || utf8.RuneCountInString(image.AltText) > maxImageCharacters {
+			return fmt.Errorf("%w: card image alt text is invalid", ErrInvalidResult)
+		}
+	}
+	return nil
+}
+
 func renderTables(table types.SlackTable) ([]map[string]any, error) {
 	if len(table.Columns) == 0 || len(table.Columns) > maxTableColumns {
 		return nil, fmt.Errorf("%w: table must have 1-%d columns", ErrInvalidResult, maxTableColumns)
@@ -621,6 +966,15 @@ func renderTables(table types.SlackTable) ([]map[string]any, error) {
 		if len(row) != len(table.Columns) {
 			return nil, fmt.Errorf("%w: row %d has %d cells for %d columns", ErrInvalidResult, rowIndex, len(row), len(table.Columns))
 		}
+	}
+	if table.Caption == "" && (table.PageSize != 0 || table.RowHeaderColumnIndex != 0) {
+		return nil, fmt.Errorf("%w: data table caption is invalid", ErrInvalidResult)
+	}
+	if table.Caption != "" && len(table.Rows) == 0 {
+		return nil, fmt.Errorf("%w: data table caption requires at least one data row", ErrInvalidResult)
+	}
+	if table.Caption != "" {
+		return renderDataTable(table)
 	}
 
 	var rendered []map[string]any
@@ -669,6 +1023,51 @@ func renderTables(table types.SlackTable) ([]map[string]any, error) {
 	return rendered, nil
 }
 
+func renderDataTable(table types.SlackTable) ([]map[string]any, error) {
+	if strings.TrimSpace(table.Caption) == "" || !utf8.ValidString(table.Caption) || strings.ContainsRune(table.Caption, '\x00') || utf8.RuneCountInString(table.Caption) > maxCardTextCharacters {
+		return nil, fmt.Errorf("%w: data table caption is invalid", ErrInvalidResult)
+	}
+	if table.PageSize < 0 || table.PageSize > 100 {
+		return nil, fmt.Errorf("%w: data table page size must be 1-100 when set", ErrInvalidResult)
+	}
+	if table.RowHeaderColumnIndex < 0 || table.RowHeaderColumnIndex >= len(table.Columns) {
+		return nil, fmt.Errorf("%w: data table row header column is invalid", ErrInvalidResult)
+	}
+	if tableHeaderCharacters(table.Columns) > maxTableCharacters {
+		return nil, fmt.Errorf("%w: table header and row exceed character limit", ErrInvalidResult)
+	}
+	rows := make([]any, 0, len(table.Rows)+1)
+	header := make([]any, len(table.Columns))
+	for index, column := range table.Columns {
+		header[index] = map[string]any{"type": "raw_text", "text": column.Header}
+	}
+	rows = append(rows, header)
+	characters := tableHeaderCharacters(table.Columns)
+	for rowIndex, source := range table.Rows {
+		rowChars := tableRowCharacters(source)
+		if rowChars > maxTableCharacters || characters+rowChars > maxTableCharacters {
+			return nil, fmt.Errorf("%w: row %d exceeds table character limit", ErrInvalidResult, rowIndex)
+		}
+		row, err := renderRow(source)
+		if err != nil {
+			return nil, fmt.Errorf("row %d: %w", rowIndex, err)
+		}
+		rows = append(rows, row)
+		characters += rowChars
+	}
+	block := map[string]any{
+		"type":                    "data_table",
+		"block_id":                "tos_tag_data_table",
+		"caption":                 table.Caption,
+		"row_header_column_index": table.RowHeaderColumnIndex,
+		"rows":                    rows,
+	}
+	if table.PageSize > 0 {
+		block["page_size"] = table.PageSize
+	}
+	return []map[string]any{block}, nil
+}
+
 func renderHeader(columns []types.SlackTableColumn) []any {
 	row := make([]any, len(columns))
 	for i, column := range columns {
@@ -688,7 +1087,16 @@ func renderRow(cells []types.SlackTableCell) ([]any, error) {
 	for i, cell := range cells {
 		switch cell.Type {
 		case "raw_text", "":
-			row[i] = map[string]any{"type": "raw_text", "text": cell.Text}
+			if cell.Text != "" {
+				if err := validateMRKDWN(cell.Text, types.SlackMentionAllowlist{}); err != nil {
+					return nil, err
+				}
+			}
+			if hasInlineSlackFormatting(cell.Text) {
+				row[i] = renderRichTextCell(cell.Text)
+			} else {
+				row[i] = map[string]any{"type": "raw_text", "text": cell.Text}
+			}
 		case "raw_number":
 			display := cell.Text
 			if display == "" {
@@ -699,13 +1107,7 @@ func renderRow(cells []types.SlackTableCell) ([]any, error) {
 			if err := validateMRKDWN(cell.Text, types.SlackMentionAllowlist{}); err != nil {
 				return nil, err
 			}
-			row[i] = map[string]any{
-				"type": "rich_text",
-				"elements": []any{map[string]any{
-					"type":     "rich_text_section",
-					"elements": []any{map[string]any{"type": "text", "text": cell.Text}},
-				}},
-			}
+			row[i] = renderRichTextCell(cell.Text)
 		default:
 			return nil, fmt.Errorf("%w: invalid table cell type %q", ErrInvalidResult, cell.Type)
 		}
@@ -713,9 +1115,89 @@ func renderRow(cells []types.SlackTableCell) ([]any, error) {
 	return row, nil
 }
 
+func hasInlineSlackFormatting(text string) bool {
+	if slackLinkPattern.MatchString(text) {
+		return true
+	}
+	for _, marker := range []string{"`", "*", "_", "~"} {
+		if first := strings.Index(text, marker); first >= 0 && strings.Contains(text[first+1:], marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func renderRichTextCell(text string) map[string]any {
+	return map[string]any{
+		"type": "rich_text",
+		"elements": []any{map[string]any{
+			"type":     "rich_text_section",
+			"elements": renderRichTextElements(text),
+		}},
+	}
+}
+
+func renderRichTextElements(text string) []any {
+	elements := make([]any, 0, 4)
+	styles := map[byte]string{'*': "bold", '_': "italic", '~': "strike", '`': "code"}
+	active := make(map[string]bool, len(styles))
+	var buffer strings.Builder
+	styleValue := func() map[string]any {
+		style := make(map[string]any, len(active))
+		for name, enabled := range active {
+			if enabled {
+				style[name] = true
+			}
+		}
+		return style
+	}
+	flush := func() {
+		if buffer.Len() == 0 {
+			return
+		}
+		element := map[string]any{"type": "text", "text": buffer.String()}
+		if style := styleValue(); len(style) > 0 {
+			element["style"] = style
+		}
+		elements = append(elements, element)
+		buffer.Reset()
+	}
+	for index := 0; index < len(text); {
+		if text[index] == '<' {
+			match := slackLinkPattern.FindStringSubmatchIndex(text[index:])
+			if len(match) == 6 && match[0] == 0 {
+				flush()
+				link := map[string]any{"type": "link", "url": text[index+match[2] : index+match[3]], "text": text[index+match[4] : index+match[5]]}
+				if style := styleValue(); len(style) > 0 {
+					link["style"] = style
+				}
+				elements = append(elements, link)
+				index += match[1]
+				continue
+			}
+		}
+		if styleName, marker := styles[text[index]]; marker {
+			if active[styleName] || strings.Contains(text[index+1:], string(text[index])) {
+				flush()
+				active[styleName] = !active[styleName]
+				index++
+				continue
+			}
+		}
+		runeValue, size := utf8.DecodeRuneInString(text[index:])
+		buffer.WriteRune(runeValue)
+		index += size
+	}
+	flush()
+	if len(elements) == 0 {
+		return []any{map[string]any{"type": "text", "text": text}}
+	}
+	return elements
+}
+
 func containsTable(blocks []map[string]any) bool {
 	for _, block := range blocks {
-		if block["type"] == "table" {
+		if block["type"] == "table" || block["type"] == "data_table" {
 			return true
 		}
 	}
@@ -744,6 +1226,9 @@ func tableRowCharacters(row []types.SlackTableCell) int {
 
 func tableFallback(table types.SlackTable, part, parts int) string {
 	label := "Table"
+	if table.Caption != "" {
+		label = table.Caption
+	}
 	if len(table.Columns) > 0 {
 		headers := make([]string, len(table.Columns))
 		for i, column := range table.Columns {

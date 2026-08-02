@@ -25,7 +25,8 @@ Only mark an item complete when source and verification evidence exist.
 
 - [x] Use a direct stateless OpenAI Responses API call.
 - [x] Keep the classifier tool-free and independent from full-agent state.
-- [x] Preserve `TAG__CLASSIFIER__OPENAI_API_KEY` as classifier-only.
+- [x] Preserve `TAG__CLASSIFIER__OPENAI_API_KEY` as control-plane-only; it may
+  serve stateless classifier and memory-curator calls but never Codex or tools.
 - [x] Choose silence, reaction, direct reply, channel/thread placement, model,
   strength, and effort with strict structured output.
 - [x] Permit short social acknowledgement/banter without full-agent startup.
@@ -43,6 +44,16 @@ Only mark an item complete when source and verification evidence exist.
   OpenAI provider, with expectations held only by the scorer (`26/26`
   including the two infrastructure invariants).
 - [x] Re-run the expanded 33-message live provider matrix (`35/35`).
+- [x] Re-run the 34-message live provider matrix (`36/36`) after adding the
+  standalone product-plan comparison.
+- [x] Expand the deterministic matrix to 37 natural messages (`39/39` with
+  infrastructure invariants), covering Premium Trial retrieval, source-write
+  redirection, and read-only code review.
+- [x] Re-run the expanded 37-message live provider matrix (`39/39` including
+  infrastructure invariants).
+- [x] Add the ambiguous Premium-to-Enterprise plan-transition regression and
+  pass the 38-message deterministic and live provider matrices (`40/40` with
+  infrastructure invariants), without leaking evaluator intent.
 - [x] Fall back conservatively on timeout or malformed output.
 
 ## 4. Durable jobs and concurrency
@@ -67,6 +78,8 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Create an ephemeral thread with resolved model and developer instructions.
 - [x] Start a turn with classifier-selected reasoning effort.
 - [x] Normalize final `item/completed` and `turn/completed` events.
+- [x] Capture `thread/tokenUsage/updated` and render trusted full-agent execution
+  metadata as a final context block without decorating classifier-only replies.
 - [x] Implement `turn/interrupt` cancellation.
 - [x] Bound protocol diagnostics without logging provider bodies.
 - [x] Authenticate from private `CODEX_HOME`, separately from classifier key.
@@ -78,8 +91,10 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Use a clean `HOME`, XDG roots, temp directory, and process environment.
 - [x] Materialize one read-only `AGENTS.md` worker policy.
 - [x] Materialize skill snapshots at `.agents/skills`.
-- [x] Disable shell, file mutation, web, MCP, plugins, and subagents.
-- [x] Use read-only, network-disabled Codex turns.
+- [x] Disable shell, file mutation, MCP, plugins, and subagents.
+- [x] Use read-only Codex turns with subprocess networking disabled.
+- [x] Expose configurable first-party web search and enable unrestricted live
+  search explicitly in the local Slack runtime.
 - [x] Keep the Aion source tree out of the worker and expose source only through
   a reviewed bounded read capability.
 - [x] Keep Slack, Mongo, classifier, and connector credentials out of workers.
@@ -87,7 +102,7 @@ Only mark an item complete when source and verification evidence exist.
 
 ## 7. Skills and dynamic tools
 
-- [x] Load complete `telemetryos-automation` and `base` plugins.
+- [x] Load the complete `base` plugin from `tag-agent-skills`.
 - [x] Reject missing manifests, hash drift, and flat-name collisions.
 - [x] Exclude behavioral helper scripts and executable plugin surfaces.
 - [x] Register `tos_tag_tool` and `tos_tag_trigger` as App Server dynamic tools.
@@ -101,6 +116,20 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Provide `telemetryos.code` list/search/read operations and reject
   traversal, symlinks, environment files, credential ledgers, and private tool
   state.
+- [x] Enforce the code tool's permanent read-only boundary at both bundle load
+  and execution, and redirect source mutation intent to Linear bug/feature
+  intake instead of an approval flow.
+- [x] Provide a credential-free `telemetryos.product-docs` read operation that
+  permits only the public docs index/pages and corporate full-content source.
+- [x] Inject `product-knowledge` so named product claims require retrieval and
+  route by source authority and audience.
+- [x] Inject `telemetryos-documentation` so customer documentation questions
+  discover an exact page through `llms.txt`, read it, and link its indexed URL.
+- [x] Reject classifier-marked product delivery unless the same attempt
+  successfully completes a full Primer Wiki page, docs page, or corporate
+  full-content read.
+- [x] Preserve safe classifier admission when invalid evidence IDs are pruned,
+  including an unmentioned standalone product-plan comparison.
 
 ## 8. Approvals, routines, and directives
 
@@ -118,19 +147,27 @@ Only mark an item complete when source and verification evidence exist.
 
 ## 9. Slack output and delivery
 
-- [x] Define and prompt `slack-output/v2`.
-- [x] Support header, mrkdwn, context, divider, native table, image, artifact.
+- [x] Define and prompt `slack-output/v3`.
+- [x] Support header, mrkdwn, context, divider, native table, sortable/paginated
+  Data Table, presentation-only Card/Carousel, image, and artifact.
+- [x] Keep model Card/Carousel output non-interactive; reserve actions for the
+  control plane and Alerts for modal surfaces.
 - [x] Keep short/medium answers in Slack and route genuinely document-sized
   expository results through a successful Agent Wiki `artifacts` write before
   returning a concise synopsis and exact tool-returned link.
 - [x] Reject model-created artifact segments unless the exact HTTPS URL was
   produced by a successful reviewed tool call in the same worker attempt.
+- [x] Require actual resolved HTTPS links for provided Wiki references and
+  reject bare Primer/artifact or Wiki-labeled namespace/slugs.
 - [x] Reject model-generated approvals, notices, actions, destinations, and
   special mentions.
 - [x] Validate Block Kit before posting.
 - [x] Persist, lease, retry, reconcile, and deduplicate deliveries.
 - [x] Distinguish channel replies from thread replies according to classifier
   placement.
+- [x] Use Slack-native Thinking Steps for admitted full-agent thread work, persist and
+  reconcile the stream timestamp, expose only safe operational milestones, and
+  finalize the same message with a durable validated result.
 
 ## 10. Persistence, audit, and operations
 
@@ -140,7 +177,18 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Encrypt organization-scoped keystore values.
 - [x] Record append-only content-committed audit receipts.
 - [x] Apply TTL and source-linked expiry to derived state.
+- [x] Curate changed channel/thread memory asynchronously with
+  `gpt-5.6-luna` medium effort and strict stateless structured output.
+- [x] Persist source hashes, confidence, source-bound facts, model/effort,
+  privacy scope, revision, and source-limited expiry for durable memory.
+- [x] Recall public, private, and thread memory through destination-safe query
+  and post-query filters; recall only destination-safe incident projections.
+- [x] Provide audited management controls to review, correct, pin/unpin, and
+  forget memory, erasing content while retaining a relearning tombstone.
 - [x] Emit correlated structured logs without message text or secrets.
+- [x] Make the management home page an organization-scoped live activity feed
+  with bounded SSE replay, explicit public classifier message/result records,
+  restricted-content redaction, and payload-free Codex protocol lifecycle.
 - [x] Persist workspace, code, skills, Codex login, logs, and Mongo in Compose.
 - [x] Keep per-job workers disposable and omit the host Docker socket.
 - [x] Override a host `TAG_AION_DEVELOPER_PATH` after loading `runtime.env` so
@@ -161,6 +209,10 @@ Only mark an item complete when source and verification evidence exist.
   reactions, channel/thread placement, model/effort routing, native tables,
   reviewed source reads, exact-action approval/resume, and independent
   concurrent workers.
-- [x] Broad user-authorized context sync with observe-only enrollment and
-  destination-local private/DM disclosure checks.
+- [x] Broad user-authorized context sync with observe-only enrollment,
+  independent bot-membership reconciliation, optional joined-channel assist,
+  and destination-local private/DM disclosure checks.
+- [x] Persist per-conversation Slack bootstrap completion and live watermarks,
+  skip completed history on restart, resume only new/interrupted conversations,
+  and proactively pace exceptional Web API reads.
 - [x] Final exhaustive tracked-tree search confirms no stale runtime surface.

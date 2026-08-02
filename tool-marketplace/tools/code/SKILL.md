@@ -22,6 +22,12 @@ Use `search` first to locate symbols and then `read` the narrow relevant ranges.
 File references in an answer should use the relative path and returned line
 numbers. Do not repeatedly probe a path the tool reports as restricted.
 
+If a requester asks to edit, implement, patch, commit, push, merge, deploy, or
+otherwise change TelemetryOS source, do not attempt the change. Follow the
+injected `code-change-intake` skill: explain that source access is read-only and
+direct the requester to a Linear bug for broken existing behavior or a Linear
+feature for new or changed behavior.
+
 Example:
 
 ```json

@@ -17,7 +17,7 @@ func TestLoadBehavioralMarketplaceAndResolveTools(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(skillRoot, "SKILL.md"), []byte("---\nname: linear\n---\nUse the tool."), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	catalog := `{"id":"telemetryos-agent-skills","version":"1.0.0","skills":[{"name":"linear","path":"skills/linear","requires_tools":["linear"]}]}`
+	catalog := `{"id":"example-agent-skills","version":"1.0.0","skills":[{"name":"linear","path":"skills/linear","requires_tools":["linear"]}]}`
 	if err := os.WriteFile(filepath.Join(root, "marketplace.json"), []byte(catalog), 0o600); err != nil {
 		t.Fatal(err)
 	}

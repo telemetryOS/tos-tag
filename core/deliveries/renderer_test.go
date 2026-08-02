@@ -1,6 +1,7 @@
 package deliveries
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +13,7 @@ import (
 )
 
 func TestSlackOutputPromptContainsRequiredContract(t *testing.T) {
-	required := []string{"header, mrkdwn_text", "context, divider, table, image, or artifact", "published durable document or download", "Keep short and medium answers in Slack", "Agent Wiki artifacts namespace", "20,000 visible characters", "soft planning signal, not a hard cutoff", "exact HTTPS URL returned by the tool", "Never fabricate, predict, or reconstruct a Wiki URL", "no Wiki artifact was created", "<https://example.com|descriptive label>", "*bold*", "_italic_", "single backticks", "literal identifier containing an underscore", "byte-for-byte", "reply_in_channel to replyinchannel", "triple-backtick", "complete table", "Do not preface or follow", "Never emit actions", "Do not choose or alter"}
+	required := []string{"header, mrkdwn_text", "context, divider, table, card, carousel, image, or artifact", "Never add model, reasoning effort, token usage, or latency metadata", "trusted runtime measurements", "sortable, paginated Data Table", "Never put actions", "published durable document or download", "Keep short and medium answers in Slack", "Agent Wiki artifacts namespace", "20,000 visible characters", "soft planning signal, not a hard cutoff", "exact HTTPS URL returned by the tool", "Never fabricate, predict, or reconstruct a Wiki URL", "no Wiki artifact was created", "<https://example.com|descriptive label>", "Wiki get or url", "Never expose a namespace/slug", "*bold*", "_italic_", "single backticks", "literal identifier containing an underscore", "byte-for-byte", "reply_in_channel to replyinchannel", "triple-backtick", "complete table", "Do not preface or follow", "Never emit actions", "Do not choose or alter"}
 	for _, value := range required {
 		if !strings.Contains(SlackOutputPrompt, value) {
 			t.Errorf("prompt missing %q", value)
@@ -48,6 +49,48 @@ func TestRendererRendersSafePresentationPalette(t *testing.T) {
 	}
 	if !strings.Contains(payloads[0].Text, "Latency by hour") {
 		t.Fatalf("fallback text does not describe image: %q", payloads[0].Text)
+	}
+}
+
+func TestRendererAppendsFullAgentExecutionFooter(t *testing.T) {
+	result := types.SlackResult{
+		Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: "The investigation is complete."}},
+		AgentFooter: &types.SlackAgentFooter{
+			ModelID: "gpt-5.6-luna", ReasoningEffort: "max", InputTokens: 21_000,
+			OutputTokens: 1_200, TotalTokens: 22_200, DurationMS: 12_450,
+		},
+	}
+	payloads, err := NewRenderer().Render(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payloads) != 1 || len(payloads[0].Blocks) != 2 {
+		t.Fatalf("footer payloads = %#v", payloads)
+	}
+	footer := payloads[0].Blocks[1]
+	if footer["type"] != "context" || footer["block_id"] != "tos_tag_agent_footer" {
+		t.Fatalf("footer block = %#v", footer)
+	}
+	encoded, _ := json.Marshal(footer)
+	for _, expected := range []string{"ChatGPT 5.6 Luna", "max effort", "22k tokens", "12.4s"} {
+		if !strings.Contains(string(encoded), expected) {
+			t.Fatalf("footer %s missing %q", encoded, expected)
+		}
+	}
+}
+
+func TestRendererOmitsExecutionFooterFromUnattributedReplies(t *testing.T) {
+	result := types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: "You're welcome!"}}}
+	payloads, err := NewRenderer().Render(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payloads) != 1 || len(payloads[0].Blocks) != 1 || strings.Contains(payloads[0].Text, "tokens") {
+		t.Fatalf("classifier-only reply gained an execution footer: %#v", payloads)
+	}
+	encoded, err := json.Marshal(types.SlackResult{Segments: result.Segments, AgentFooter: &types.SlackAgentFooter{ModelID: "private-model", TotalTokens: 1}})
+	if err != nil || strings.Contains(string(encoded), "private-model") || strings.Contains(string(encoded), "agent_footer") {
+		t.Fatalf("control-plane footer leaked into model JSON: %s err=%v", encoded, err)
 	}
 }
 
@@ -102,10 +145,110 @@ func TestRendererRendersMRKDWNAndNativeTable(t *testing.T) {
 	if payloads[0].Blocks[1]["type"] != "table" {
 		t.Fatalf("expected native table block, got %#v", payloads[0].Blocks[1])
 	}
+	if payloads[0].Blocks[0]["expand"] != true {
+		t.Fatalf("AI section should be expanded: %#v", payloads[0].Blocks[0])
+	}
 	rows := payloads[0].Blocks[1]["rows"].([]any)
 	number := rows[1].([]any)[1].(map[string]any)
 	if number["value"] != float64(2) || number["text"] != "2" {
 		t.Fatalf("raw number cell = %#v, want Slack value and display text", number)
+	}
+}
+
+func TestRendererRendersModelSafeCardAndCarousel(t *testing.T) {
+	result := types.SlackResult{Segments: []types.SlackSegment{
+		{Kind: types.SlackSegmentCard, Card: &types.SlackCard{Title: "Deployment", Subtitle: "QA", Body: "*Healthy* across all checks.", Subtext: "Updated now", Icon: &types.SlackCardImage{URL: "https://example.com/icon.png", AltText: "Deployment icon"}}},
+		{Kind: types.SlackSegmentCarousel, Carousel: &types.SlackCarousel{Cards: []types.SlackCard{
+			{Title: "Node Mini", Body: "Best for compact single-screen deployments."},
+			{Title: "Node Pro", Body: "Best for demanding multi-output workloads.", HeroImage: &types.SlackCardImage{URL: "https://example.com/pro.png", AltText: "Node Pro"}},
+		}}},
+	}}
+	payloads, err := NewRenderer().Render(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payloads) != 1 || len(payloads[0].Blocks) != 2 || payloads[0].Blocks[0]["type"] != "card" || payloads[0].Blocks[1]["type"] != "carousel" {
+		t.Fatalf("native card rendering = %#v", payloads)
+	}
+	if _, present := payloads[0].Blocks[0]["actions"]; present {
+		t.Fatalf("model-safe card unexpectedly has actions: %#v", payloads[0].Blocks[0])
+	}
+	if !strings.Contains(payloads[0].Text, "Node Mini") || !strings.Contains(payloads[0].Text, "Healthy") {
+		t.Fatalf("card fallback text = %q", payloads[0].Text)
+	}
+}
+
+func TestRendererRejectsUnsafeCardAndCarousel(t *testing.T) {
+	cases := []types.SlackSegment{
+		{Kind: types.SlackSegmentCard, Card: &types.SlackCard{Title: "Card", Body: strings.Repeat("x", maxCardTextCharacters+1)}},
+		{Kind: types.SlackSegmentCard, Card: &types.SlackCard{Title: "Card", Body: "Body", Icon: &types.SlackCardImage{URL: "http://example.com/icon.png", AltText: "Icon"}}},
+		{Kind: types.SlackSegmentCarousel, Carousel: &types.SlackCarousel{Cards: make([]types.SlackCard, maxCarouselCards+1)}},
+	}
+	for _, segment := range cases {
+		if _, err := NewRenderer().Render(types.SlackResult{Segments: []types.SlackSegment{segment}}); !errors.Is(err, ErrInvalidResult) {
+			t.Fatalf("unsafe segment %#v rendered with error %v", segment, err)
+		}
+	}
+}
+
+func TestRendererUsesDataTableForCaptionedDataset(t *testing.T) {
+	result := types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentTable, Table: &types.SlackTable{
+		Caption: "Service latency", PageSize: 5, RowHeaderColumnIndex: 0,
+		Columns: []types.SlackTableColumn{{Header: "Service"}, {Header: "P95 ms"}},
+		Rows:    [][]types.SlackTableCell{{{Type: "raw_text", Text: "gateway"}, {Type: "raw_number", Number: 42}}},
+	}}}}
+	payloads, err := NewRenderer().Render(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := payloads[0].Blocks[0]
+	if block["type"] != "data_table" || block["caption"] != "Service latency" || block["page_size"] != 5 {
+		t.Fatalf("data table block = %#v", block)
+	}
+	rows := block["rows"].([]any)
+	if len(rows) != 2 || rows[0].([]any)[0].(map[string]any)["type"] != "raw_text" || rows[1].([]any)[1].(map[string]any)["value"] != float64(42) {
+		t.Fatalf("data table rows = %#v", rows)
+	}
+}
+
+func TestRendererPromotesFormattedTableCellsToRichText(t *testing.T) {
+	result := types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentTable, Table: &types.SlackTable{
+		Columns: []types.SlackTableColumn{{Header: "Option"}, {Header: "Recommendation"}},
+		Rows: [][]types.SlackTableCell{{
+			{Type: "raw_text", Text: "Node Mini"},
+			{Type: "raw_text", Text: "*Recommended* for `4K`. <https://example.com/mini|Details>"},
+		}},
+	}}}}
+	payloads, err := NewRenderer().Render(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := payloads[0].Blocks[0]["rows"].([]any)
+	cell := rows[1].([]any)[1].(map[string]any)
+	if cell["type"] != "rich_text" {
+		t.Fatalf("formatted raw cell was not promoted: %#v", cell)
+	}
+	encoded, err := json.Marshal(cell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"bold":true`, `"code":true`, `"type":"link"`, `"url":"https://example.com/mini"`} {
+		if !strings.Contains(string(encoded), expected) {
+			t.Fatalf("rich cell missing %s: %s", expected, encoded)
+		}
+	}
+	if strings.Contains(string(encoded), "<https://") || strings.Contains(string(encoded), "*Recommended*") {
+		t.Fatalf("rich cell retained literal markup: %s", encoded)
+	}
+}
+
+func TestRendererRejectsMentionsInsideRawTableCells(t *testing.T) {
+	_, err := NewRenderer().Render(types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentTable, Table: &types.SlackTable{
+		Columns: []types.SlackTableColumn{{Header: "Unsafe"}},
+		Rows:    [][]types.SlackTableCell{{{Type: "raw_text", Text: "<!channel>"}}},
+	}}}})
+	if !errors.Is(err, ErrInvalidResult) || ValidationCode(err) != "mrkdwn_forbidden_mention" {
+		t.Fatalf("raw table mention error=%v code=%q", err, ValidationCode(err))
 	}
 }
 
@@ -127,6 +270,64 @@ func TestRendererRejectsNonSlackFormattingAndBroadcasts(t *testing.T) {
 				t.Fatalf("got %v, want invalid result", err)
 			}
 		})
+	}
+}
+
+func TestRendererRequiresLinksForWikiReferences(t *testing.T) {
+	for name, text := range map[string]string{
+		"primer slug":       "Source: Agent Wiki Primer, `primer/02-hardware/node-mini/io-capabilities`.",
+		"artifact slug":     "See `artifacts/tos-tag-architecture` for the full report.",
+		"named Wiki source": "Agent Wiki source: `finance/premium-trial`.",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := NewRenderer().Render(types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: text}}})
+			if !errors.Is(err, ErrInvalidResult) || ValidationCode(err) != "wiki_reference_slug" {
+				t.Fatalf("error = %v, code = %q", err, ValidationCode(err))
+			}
+		})
+	}
+	cardResult := types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentCard, Card: &types.SlackCard{Title: "Node Mini", Body: "Agent Wiki source: `primer/node-mini`."}}}}
+	if _, err := NewRenderer().Render(cardResult); !errors.Is(err, ErrInvalidResult) || ValidationCode(err) != "wiki_reference_slug" {
+		t.Fatalf("card Wiki slug error=%v code=%q", err, ValidationCode(err))
+	}
+
+	for name, text := range map[string]string{
+		"Slack link": "Source: <https://wiki.example/pages/opaque-id|Agent Wiki Primer: Node Mini I/O>.",
+		"raw URL":    "Source: https://wiki.example/pages/opaque-id",
+		"code path":  "The implementation is in `core/pipeline/pipeline.go`.",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewRenderer().Render(types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: text}}}); err != nil {
+				t.Fatalf("linked or non-Wiki reference rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestResolveWikiReferenceLinksUsesOnlySameAttemptResolvedURL(t *testing.T) {
+	const reference = "primer/02-hardware/node-mini/io-capabilities"
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(reference)))
+	result := types.SlackResult{Segments: []types.SlackSegment{{
+		Kind: types.SlackSegmentMRKDWN,
+		Text: "Source: Agent Wiki Primer, `" + reference + "`.",
+	}}}
+
+	resolved := ResolveWikiReferenceLinks(result, map[string]string{fingerprint: "https://wiki.example/pages/opaque-id"})
+	if got := resolved.Segments[0].Text; got != "Source: Agent Wiki Primer, <https://wiki.example/pages/opaque-id|Agent Wiki source>." {
+		t.Fatalf("resolved text = %q", got)
+	}
+	if _, err := NewRenderer().Render(resolved); err != nil {
+		t.Fatalf("resolved Wiki reference rejected: %v", err)
+	}
+
+	unresolved := ResolveWikiReferenceLinks(result, map[string]string{"different": "https://wiki.example/pages/other"})
+	if _, err := NewRenderer().Render(unresolved); !errors.Is(err, ErrInvalidResult) || ValidationCode(err) != "wiki_reference_slug" {
+		t.Fatalf("unresolved reference error = %v, code = %q", err, ValidationCode(err))
+	}
+
+	alreadyLinked := types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: "<https://wiki.example/pages/opaque-id|" + reference + ">"}}}
+	if got := ResolveWikiReferenceLinks(alreadyLinked, map[string]string{fingerprint: "https://wiki.example/pages/opaque-id"}).Segments[0].Text; got != alreadyLinked.Segments[0].Text {
+		t.Fatalf("existing Slack link changed to %q", got)
 	}
 }
 

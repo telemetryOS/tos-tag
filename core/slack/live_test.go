@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -46,6 +48,24 @@ func TestNormalizeSlackMessageEditDeleteAndMention(t *testing.T) {
 	envelope, eligible, err = NormalizeEventsAPI("org", "bot", "envelope-4", event)
 	if err != nil || !eligible || !envelope.Restricted {
 		t.Fatalf("private message was not marked restricted: %#v, eligible=%v err=%v", envelope, eligible, err)
+	}
+}
+
+func TestNormalizeBotMembershipChangeOnlyAcceptsConfiguredBot(t *testing.T) {
+	callback := slackevents.EventsAPICallbackEvent{TeamID: "team", EventID: "membership-event", EventTime: 100}
+	event := slackevents.EventsAPIEvent{Type: slackevents.CallbackEvent, Data: callback, InnerEvent: slackevents.EventsAPIInnerEvent{Data: &slackevents.MemberJoinedChannelEvent{User: "bot", Channel: "channel", Team: "team"}}}
+	change, eligible, err := NormalizeBotMembershipChange("org", "bot", event)
+	if err != nil || !eligible || !change.Joined || change.OrganizationID != "org" || change.WorkspaceID != "team" || change.ChannelID != "channel" {
+		t.Fatalf("joined membership change = %#v eligible=%v err=%v", change, eligible, err)
+	}
+	event.InnerEvent.Data = &slackevents.MemberLeftChannelEvent{User: "bot", Channel: "channel", Team: "team"}
+	change, eligible, err = NormalizeBotMembershipChange("org", "bot", event)
+	if err != nil || !eligible || change.Joined {
+		t.Fatalf("left membership change = %#v eligible=%v err=%v", change, eligible, err)
+	}
+	event.InnerEvent.Data = &slackevents.MemberJoinedChannelEvent{User: "someone-else", Channel: "channel", Team: "team"}
+	if _, eligible, err = NormalizeBotMembershipChange("org", "bot", event); err != nil || eligible {
+		t.Fatalf("non-bot membership event eligible=%v err=%v", eligible, err)
 	}
 }
 
@@ -312,6 +332,66 @@ func TestSlackBlocksFromRenderedPreservesOptionalTableFields(t *testing.T) {
 	}
 }
 
+func TestSlackBlocksFromRenderedPreservesAgentPresentationBlocks(t *testing.T) {
+	payloads, err := deliveries.NewRenderer().Render(types.SlackResult{Segments: []types.SlackSegment{
+		{Kind: types.SlackSegmentCard, Card: &types.SlackCard{Title: "Deployment", Body: "Healthy"}},
+		{Kind: types.SlackSegmentCarousel, Carousel: &types.SlackCarousel{Cards: []types.SlackCard{{Title: "A", Body: "First"}, {Title: "B", Body: "Second"}}}},
+		{Kind: types.SlackSegmentTable, Table: &types.SlackTable{Caption: "Latency", PageSize: 5, Columns: []types.SlackTableColumn{{Header: "Service"}, {Header: "P95"}}, Rows: [][]types.SlackTableCell{{{Type: "raw_text", Text: "gateway"}, {Type: "raw_number", Number: 42}}}}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payloads) != 1 {
+		t.Fatalf("presentation payload count=%d", len(payloads))
+	}
+	var encoded []byte
+	for _, payload := range payloads {
+		blocks, conversionErr := slackBlocksFromRendered(payload.Blocks)
+		if conversionErr != nil {
+			t.Fatal(conversionErr)
+		}
+		part, marshalErr := json.Marshal(blocks)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		encoded = append(encoded, part...)
+	}
+	for _, expected := range []string{`"type":"card"`, `"type":"carousel"`, `"type":"data_table"`, `"caption":"Latency"`} {
+		if !strings.Contains(string(encoded), expected) {
+			t.Fatalf("Slack block conversion dropped %q: %s", expected, encoded)
+		}
+	}
+}
+
+func TestAgentPresentationBlocksDowngradeForOrdinaryMessages(t *testing.T) {
+	payloads, err := deliveries.NewRenderer().Render(types.SlackResult{Segments: []types.SlackSegment{
+		{Kind: types.SlackSegmentCard, Card: &types.SlackCard{Title: "Deployment", Body: "Healthy"}},
+		{Kind: types.SlackSegmentCarousel, Carousel: &types.SlackCarousel{Cards: []types.SlackCard{{Title: "A", Body: "First"}, {Title: "B", Body: "Second"}}}},
+		{Kind: types.SlackSegmentTable, Table: &types.SlackTable{Caption: "Latency", PageSize: 5, Columns: []types.SlackTableColumn{{Header: "Service"}, {Header: "P95"}}, Rows: [][]types.SlackTableCell{{{Type: "raw_text", Text: "gateway"}, {Type: "raw_number", Number: 42}}}}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := downgradeAgentUIBlocks(payloads[0].Blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{`"type":"card"`, `"type":"carousel"`, `"type":"data_table"`} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("ordinary-message blocks retain unsupported %s: %s", forbidden, encoded)
+		}
+	}
+	for _, expected := range []string{`"type":"section"`, `"type":"table"`, `*Deployment*`, `*A*`} {
+		if !strings.Contains(string(encoded), expected) {
+			t.Fatalf("ordinary-message downgrade dropped %q: %s", expected, encoded)
+		}
+	}
+}
+
 func TestSlackBlocksFromRenderedPreservesApprovalBlocks(t *testing.T) {
 	payloads, err := deliveries.NewRenderer().Render(types.SlackResult{Segments: []types.SlackSegment{{
 		Kind: types.SlackSegmentApproval,
@@ -348,9 +428,21 @@ type fakePostMessage struct {
 	channel   string
 	calls     int
 	updates   int
+	starts    int
+	appends   int
+	stops     int
+	stopErr   error
 	updateTS  string
 	messages  []slackapi.Message
 	reactions []slackapi.ItemRef
+}
+
+type fakeSlackHTTPClient struct {
+	do func(*http.Request) (*http.Response, error)
+}
+
+func (f fakeSlackHTTPClient) Do(request *http.Request) (*http.Response, error) {
+	return f.do(request)
 }
 
 func (f *fakePostMessage) AddReactionContext(_ context.Context, _ string, item slackapi.ItemRef) error {
@@ -366,6 +458,21 @@ func (f *fakePostMessage) PostMessageContext(_ context.Context, channel string, 
 func (f *fakePostMessage) UpdateMessageContext(_ context.Context, channel, timestamp string, _ ...slackapi.MsgOption) (string, string, string, error) {
 	f.channel, f.updateTS, f.updates = channel, timestamp, f.updates+1
 	return channel, timestamp, "", nil
+}
+
+func (f *fakePostMessage) StartStreamContext(_ context.Context, channel string, _ ...slackapi.MsgOption) (string, string, error) {
+	f.channel, f.starts = channel, f.starts+1
+	return channel, "stream.1", nil
+}
+
+func (f *fakePostMessage) AppendStreamContext(_ context.Context, channel, timestamp string, _ ...slackapi.MsgOption) (string, string, error) {
+	f.channel, f.appends = channel, f.appends+1
+	return channel, timestamp, nil
+}
+
+func (f *fakePostMessage) StopStreamContext(_ context.Context, channel, timestamp string, _ ...slackapi.MsgOption) (string, string, error) {
+	f.channel, f.stops = channel, f.stops+1
+	return channel, timestamp, f.stopErr
 }
 
 func (f *fakePostMessage) GetConversationHistoryContext(_ context.Context, _ *slackapi.GetConversationHistoryParameters) (*slackapi.GetConversationHistoryResponse, error) {
@@ -402,6 +509,106 @@ func TestLiveDeliveryUpdatesExistingMessageInsteadOfPosting(t *testing.T) {
 	}
 }
 
+func TestLiveDeliveryStartsUpdatesAndFinalizesThinkingSteps(t *testing.T) {
+	fake := &fakePostMessage{}
+	delivery := &LiveDelivery{teamID: "team", api: fake, renderer: deliveries.NewRenderer()}
+	started, err := delivery.StartProgress(context.Background(), types.SlackProgressStartRequest{
+		IdempotencyKey: "job-1/progress", TeamID: "team", ChannelID: "channel", ThreadTS: "100.1", JobID: "job-1", RecipientUserID: "user-1", Title: "Tag is working",
+		Step: types.SlackProgressStep{ID: "agent-work", Title: "Working on the request", Status: types.SlackProgressInProgress},
+	})
+	if err != nil || started.MessageTS != "stream.1" || fake.starts != 1 {
+		t.Fatalf("start=%#v starts=%d err=%v", started, fake.starts, err)
+	}
+	updated, err := delivery.UpdateProgress(context.Background(), types.SlackProgressUpdateRequest{TeamID: "team", ChannelID: "channel", MessageTS: started.MessageTS, JobID: "job-1", Step: types.SlackProgressStep{ID: "tool-wiki", Title: "Read Agent Wiki", Status: types.SlackProgressComplete, Sources: []types.SlackProgressSource{{URL: "https://wiki.example/page", Text: "Wiki page"}}}})
+	if err != nil || updated.MessageTS != started.MessageTS || fake.appends != 1 {
+		t.Fatalf("update=%#v appends=%d err=%v", updated, fake.appends, err)
+	}
+	result, err := delivery.Send(context.Background(), types.SlackDeliveryRequest{ID: "delivery-1", IdempotencyKey: "job-1/final", Destination: types.SlackDestination{TeamID: "team", ChannelID: "channel", ThreadTS: "100.1", StreamTS: started.MessageTS}, Result: types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: "Done."}}}})
+	if err != nil || result.MessageTS != started.MessageTS || fake.stops != 1 || fake.calls != 0 {
+		t.Fatalf("result=%#v stops=%d posts=%d err=%v", result, fake.stops, fake.calls, err)
+	}
+}
+
+func TestLiveDeliverySendsRequiredRecipientTeamForThinkingSteps(t *testing.T) {
+	recipientTeam := ""
+	recipientUser := ""
+	httpClient := fakeSlackHTTPClient{do: func(request *http.Request) (*http.Response, error) {
+		body := `{"ok":false,"error":"unexpected_endpoint"}`
+		switch request.URL.Path {
+		case "/conversations.replies":
+			body = `{"ok":true,"messages":[],"has_more":false,"response_metadata":{"next_cursor":""}}`
+		case "/chat.startStream":
+			if err := request.ParseForm(); err != nil {
+				t.Errorf("parse stream form: %v", err)
+			}
+			recipientTeam = request.Form.Get("recipient_team_id")
+			recipientUser = request.Form.Get("recipient_user_id")
+			body = `{"ok":true,"channel":"channel","ts":"stream.1"}`
+		default:
+			t.Errorf("unexpected Slack endpoint %s", request.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	}}
+	client := slackapi.New("xoxb-test", slackapi.OptionAPIURL("https://slack.test/"), slackapi.OptionHTTPClient(httpClient))
+	delivery := &LiveDelivery{teamID: "team", api: client, renderer: deliveries.NewRenderer()}
+	if _, err := delivery.StartProgress(context.Background(), types.SlackProgressStartRequest{IdempotencyKey: "job-1/progress", TeamID: "team", ChannelID: "channel", ThreadTS: "100.1", JobID: "job-1", RecipientUserID: "user-1", Title: "Tag is working", Step: types.SlackProgressStep{ID: "agent-work", Title: "Working", Status: types.SlackProgressInProgress}}); err != nil {
+		t.Fatal(err)
+	}
+	if recipientTeam != "team" {
+		t.Fatalf("recipient_team_id=%q", recipientTeam)
+	}
+	if recipientUser != "user-1" {
+		t.Fatalf("recipient_user_id=%q", recipientUser)
+	}
+}
+
+func TestLiveDeliveryStopsChunkStreamWithFinalBlockKitChunk(t *testing.T) {
+	markdownText, blocks, chunks := "", "", ""
+	httpClient := fakeSlackHTTPClient{do: func(request *http.Request) (*http.Response, error) {
+		body := `{"ok":false,"error":"unexpected_endpoint"}`
+		switch request.URL.Path {
+		case "/conversations.history":
+			body = `{"ok":true,"messages":[],"has_more":false,"response_metadata":{"next_cursor":""}}`
+		case "/chat.stopStream":
+			if err := request.ParseForm(); err != nil {
+				t.Errorf("parse stop-stream form: %v", err)
+			}
+			markdownText, blocks, chunks = request.Form.Get("markdown_text"), request.Form.Get("blocks"), request.Form.Get("chunks")
+			body = `{"ok":true,"channel":"channel","ts":"stream.1"}`
+		default:
+			t.Errorf("unexpected Slack endpoint %s", request.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	}}
+	client := slackapi.New("xoxb-test", slackapi.OptionAPIURL("https://slack.test/"), slackapi.OptionHTTPClient(httpClient))
+	delivery := &LiveDelivery{teamID: "team", api: client, renderer: deliveries.NewRenderer()}
+	result, err := delivery.Send(context.Background(), types.SlackDeliveryRequest{ID: "delivery-1", Destination: types.SlackDestination{TeamID: "team", ChannelID: "channel", StreamTS: "stream.1"}, Result: types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: "Done."}}, AgentFooter: &types.SlackAgentFooter{ModelID: "gpt-5.6-luna", ReasoningEffort: "max", TotalTokens: 22_200, DurationMS: 12_400}}})
+	if err != nil || result.MessageTS != "stream.1" {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if markdownText != "" || blocks != "" || !strings.Contains(chunks, `"type":"blocks"`) || !strings.Contains(chunks, `"type":"context"`) || !strings.Contains(chunks, "Done.") || !strings.Contains(chunks, "ChatGPT 5.6 Luna") || !strings.Contains(chunks, "22k tokens") {
+		t.Fatalf("markdown_text=%q blocks=%q chunks=%q", markdownText, blocks, chunks)
+	}
+}
+
+func TestLiveDeliveryFallsBackWhenStreamFinalizationFails(t *testing.T) {
+	fake := &fakePostMessage{stopErr: errors.New("stream unsupported")}
+	delivery := &LiveDelivery{teamID: "team", api: fake, renderer: deliveries.NewRenderer()}
+	result, err := delivery.Send(context.Background(), types.SlackDeliveryRequest{ID: "delivery-fallback", Destination: types.SlackDestination{TeamID: "team", ChannelID: "channel", StreamTS: "stream.1"}, Result: types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: "Done."}}}})
+	if err != nil || result.MessageTS != "200.1" || fake.stops != 1 || fake.calls != 1 || fake.updates != 1 || fake.updateTS != "stream.1" {
+		t.Fatalf("result=%#v stops=%d posts=%d updates=%d update_ts=%q err=%v", result, fake.stops, fake.calls, fake.updates, fake.updateTS, err)
+	}
+}
+
+func TestLiveDeliveryReconcilesExistingThinkingSteps(t *testing.T) {
+	fake := &fakePostMessage{messages: []slackapi.Message{{Msg: slackapi.Msg{Timestamp: "stream.existing", Metadata: slackapi.SlackMetadata{EventType: "tos_tag_progress", EventPayload: map[string]any{"idempotency_key": "job-1/progress"}}}}}}
+	delivery := &LiveDelivery{teamID: "team", api: fake, renderer: deliveries.NewRenderer()}
+	result, err := delivery.StartProgress(context.Background(), types.SlackProgressStartRequest{IdempotencyKey: "job-1/progress", TeamID: "team", ChannelID: "channel", ThreadTS: "100.1", JobID: "job-1", RecipientUserID: "user-1", Title: "Tag is working", Step: types.SlackProgressStep{ID: "agent-work", Title: "Working", Status: types.SlackProgressInProgress}})
+	if err != nil || !result.Duplicate || result.MessageTS != "stream.existing" || fake.starts != 0 {
+		t.Fatalf("result=%#v starts=%d err=%v", result, fake.starts, err)
+	}
+}
+
 func TestNormalizeApprovalInteractionBindsAppWorkspaceChannelAndAction(t *testing.T) {
 	callback := slackapi.InteractionCallback{
 		Type: slackapi.InteractionTypeBlockActions, APIAppID: "A123", Team: slackapi.Team{ID: "T123"},
@@ -425,8 +632,12 @@ func TestDirectiveCommandAndModalSubmissionRemainChannelBound(t *testing.T) {
 		t.Fatalf("command=%#v eligible=%v err=%v", command, eligible, err)
 	}
 	modal := directiveModal(command.Request, DirectiveConfiguration{Prompt: "Investigate each alert.", Revision: 2})
-	if modal.CallbackID != directiveCallbackID || modal.PrivateMetadata == "" || len(modal.Blocks.BlockSet) != 2 {
+	if modal.CallbackID != directiveCallbackID || modal.PrivateMetadata == "" || len(modal.Blocks.BlockSet) != 3 {
 		t.Fatalf("modal=%#v", modal)
+	}
+	alert, ok := modal.Blocks.BlockSet[0].(*slackapi.AlertBlock)
+	if !ok || alert.Level != slackapi.AlertLevelInfo || !strings.Contains(alert.Text.Text, "only this channel") {
+		t.Fatalf("directive scope alert=%#v", modal.Blocks.BlockSet[0])
 	}
 	callback := slackapi.InteractionCallback{
 		Type: slackapi.InteractionTypeViewSubmission, APIAppID: "A123", Team: slackapi.Team{ID: "T123"}, User: slackapi.User{ID: "U_ADMIN"},

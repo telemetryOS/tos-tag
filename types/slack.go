@@ -48,10 +48,13 @@ type SlackAck struct {
 // establish a context-only channel policy before importing retained history.
 // Restricted covers private channels, DMs, and MPIMs.
 type SlackContextChannel struct {
-	OrganizationID   string `json:"organization_id"`
-	TeamID           string `json:"team_id"`
-	ChannelID        string `json:"channel_id"`
-	Name             string `json:"name,omitempty"`
-	Restricted       bool   `json:"restricted"`
-	RestrictionKnown bool   `json:"restriction_known,omitempty"`
+	OrganizationID     string `json:"organization_id"`
+	TeamID             string `json:"team_id"`
+	ChannelID          string `json:"channel_id"`
+	Name               string `json:"name,omitempty"`
+	Restricted         bool   `json:"restricted"`
+	RestrictionKnown   bool   `json:"restriction_known,omitempty"`
+	IsChannel          bool   `json:"is_channel"`
+	BotIsMember        bool   `json:"bot_is_member"`
+	BotMembershipKnown bool   `json:"bot_membership_known"`
 }

@@ -3,8 +3,10 @@ package harness
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -12,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/telemetryos/tos-tag/core/activity"
 	"github.com/telemetryos/tos-tag/core/marketplace"
 	"github.com/telemetryos/tos-tag/core/tools"
 	"github.com/telemetryos/tos-tag/core/workers"
@@ -19,13 +22,15 @@ import (
 )
 
 type WorkerCodexOptions struct {
-	Manager    workers.ConnectedManager
-	Command    string
-	CodexHome  string
-	Skills     []marketplace.SkillSnapshot
-	Timeout    time.Duration
-	ToolBridge *tools.Bridge
-	ToolIDs    []string
+	Manager       workers.ConnectedManager
+	Command       string
+	CodexHome     string
+	Skills        []marketplace.SkillSnapshot
+	Timeout       time.Duration
+	WebSearchMode string
+	ToolBridge    *tools.Bridge
+	ToolIDs       []string
+	Activity      activity.Publisher
 }
 
 type WorkerStageError struct {
@@ -45,9 +50,13 @@ func workerStageError(code string, err error) error {
 }
 
 type codexWorkerSession struct {
-	client    *codexAppServer
-	workspace workers.Workspace
-	access    tools.Access
+	client         *codexAppServer
+	workspace      workers.Workspace
+	access         tools.Access
+	activity       activity.Publisher
+	organizationID string
+	jobID          string
+	attemptID      string
 
 	mu       sync.Mutex
 	threadID string
@@ -93,14 +102,16 @@ func (s *codexWorkerSession) complete() {
 }
 
 type WorkerCodex struct {
-	manager    workers.ConnectedManager
-	command    string
-	codexHome  string
-	skills     []marketplace.SkillSnapshot
-	timeout    time.Duration
-	toolBridge *tools.Bridge
-	toolIDs    []string
-	httpClient *http.Client
+	manager       workers.ConnectedManager
+	command       string
+	codexHome     string
+	skills        []marketplace.SkillSnapshot
+	timeout       time.Duration
+	webSearchMode string
+	toolBridge    *tools.Bridge
+	toolIDs       []string
+	activity      activity.Publisher
+	httpClient    *http.Client
 
 	mu       sync.Mutex
 	sessions map[string]*codexWorkerSession
@@ -110,7 +121,16 @@ func NewWorkerCodex(options WorkerCodexOptions) (*WorkerCodex, error) {
 	if options.Manager == nil || strings.TrimSpace(options.Command) == "" || strings.TrimSpace(options.CodexHome) == "" || options.Timeout <= 0 {
 		return nil, errors.New("Codex worker manager, command, home, and timeout are required")
 	}
-	return &WorkerCodex{manager: options.Manager, command: options.Command, codexHome: options.CodexHome, skills: append([]marketplace.SkillSnapshot(nil), options.Skills...), timeout: options.Timeout, toolBridge: options.ToolBridge, toolIDs: append([]string(nil), options.ToolIDs...), httpClient: &http.Client{Timeout: minDuration(options.Timeout, 5*time.Minute)}, sessions: make(map[string]*codexWorkerSession)}, nil
+	webSearchMode := strings.ToLower(strings.TrimSpace(options.WebSearchMode))
+	if webSearchMode == "" {
+		webSearchMode = "disabled"
+	}
+	switch webSearchMode {
+	case "disabled", "cached", "indexed", "live":
+	default:
+		return nil, errors.New("Codex worker web search mode must be disabled, cached, indexed, or live")
+	}
+	return &WorkerCodex{manager: options.Manager, command: options.Command, codexHome: options.CodexHome, skills: append([]marketplace.SkillSnapshot(nil), options.Skills...), timeout: options.Timeout, webSearchMode: webSearchMode, toolBridge: options.ToolBridge, toolIDs: append([]string(nil), options.ToolIDs...), activity: options.Activity, httpClient: &http.Client{Timeout: minDuration(options.Timeout, 5*time.Minute)}, sessions: make(map[string]*codexWorkerSession)}, nil
 }
 
 func (*WorkerCodex) Health(context.Context) error { return nil }
@@ -132,6 +152,7 @@ func (w *WorkerCodex) createSession(ctx context.Context, spec JobSessionSpec) (S
 	if jobID == "" {
 		jobID = spec.Title
 	}
+	w.publish(spec.OrganizationID, jobID, attemptID, "worker.provision", "outbound", "started", "Provisioning disposable Codex worker")
 	connection, err := w.manager.ProvisionConnected(ctx, workers.Spec{
 		OrganizationID: spec.OrganizationID,
 		JobID:          jobID,
@@ -142,10 +163,12 @@ func (w *WorkerCodex) createSession(ctx context.Context, spec JobSessionSpec) (S
 		WallTime:       w.timeout,
 	})
 	if err != nil {
+		w.publish(spec.OrganizationID, jobID, attemptID, "worker.provision", "inbound", "failed", "Codex worker provisioning failed")
 		return Session{}, workerStageError("worker.provision", err)
 	}
+	w.publish(spec.OrganizationID, jobID, attemptID, "worker.provision", "inbound", "completed", "Disposable Codex worker ready")
 	sessionID := types.NewID("codex")
-	session := &codexWorkerSession{workspace: connection.Workspace, events: make(chan Event, 128), errs: make(chan error, 4)}
+	session := &codexWorkerSession{workspace: connection.Workspace, events: make(chan Event, 128), errs: make(chan error, 4), activity: w.activity, organizationID: spec.OrganizationID, jobID: jobID, attemptID: attemptID}
 	client, err := newCodexAppServer(connection.Stdin, connection.Stdout, session.notification, func(callCtx context.Context, method string, params json.RawMessage) (any, error) {
 		return w.serverRequest(callCtx, session, method, params)
 	}, session.fail)
@@ -156,11 +179,14 @@ func (w *WorkerCodex) createSession(ctx context.Context, spec JobSessionSpec) (S
 	session.client = client
 	readyCtx, cancel := context.WithTimeout(ctx, minDuration(w.timeout, 30*time.Second))
 	defer cancel()
+	session.publish("initialize", "outbound", "started", "Sent initialize to Codex App Server")
 	if err := client.initialize(readyCtx); err != nil {
+		session.publish("initialize", "inbound", "failed", "Codex App Server initialization failed")
 		client.close()
 		_ = w.manager.Terminate(context.Background(), connection.Workspace)
 		return Session{}, workerStageError("worker.initialize", err)
 	}
+	session.publish("initialize", "inbound", "completed", "Codex App Server initialized")
 	if w.toolBridge != nil && spec.JobID != "" {
 		access, accessErr := w.toolBridge.Register(tools.JobScope{OrganizationID: spec.OrganizationID, WorkspaceID: spec.WorkspaceID, ChannelID: spec.ChannelID, ThreadTS: spec.ThreadTS, JobID: spec.JobID, AttemptID: attemptID, LeaseToken: spec.LeaseToken, SteeringEpoch: spec.SteeringEpoch, ExpiresAt: spec.ExpiresAt, AllowedTools: w.toolIDs})
 		if accessErr != nil {
@@ -199,6 +225,7 @@ func (w *WorkerCodex) Prompt(ctx context.Context, sessionID string, prompt Promp
 			ID string `json:"id"`
 		} `json:"thread"`
 	}
+	session.publish("thread/start", "outbound", "started", "Sent thread/start to Codex App Server")
 	threadParams := map[string]any{
 		"model":                 model,
 		"cwd":                   session.workspace.WorkDir,
@@ -211,22 +238,26 @@ func (w *WorkerCodex) Prompt(ctx context.Context, sessionID string, prompt Promp
 		"config": map[string]any{
 			"features":                 map[string]any{"shell_tool": false, "plugins": false},
 			"agents":                   map[string]any{"enabled": false},
-			"tools":                    map[string]any{"web_search": false},
+			"tools":                    map[string]any{"web_search": w.webSearchMode != "disabled"},
+			"web_search":               w.webSearchMode,
 			"mcp_servers":              map[string]any{},
 			"shell_environment_policy": map[string]any{"inherit": "none"},
 		},
 	}
 	if err := session.client.call(ctx, "thread/start", threadParams, &threadResponse); err != nil {
+		session.publish("thread/start", "inbound", "failed", "Codex thread/start failed")
 		w.terminate(sessionID)
 		return workerStageError("worker.thread_start", err)
 	}
 	if threadResponse.Thread.ID == "" {
+		session.publish("thread/start", "inbound", "failed", "Codex thread/start returned no thread")
 		w.terminate(sessionID)
 		return workerStageError("worker.thread_start", &CodexProtocolError{Code: "empty_thread"})
 	}
 	session.mu.Lock()
 	session.threadID = threadResponse.Thread.ID
 	session.mu.Unlock()
+	session.publish("thread/start", "inbound", "completed", "Codex thread started")
 	turnParams := map[string]any{
 		"threadId":            threadResponse.Thread.ID,
 		"input":               []map[string]any{{"type": "text", "text": prompt.Text}},
@@ -245,17 +276,21 @@ func (w *WorkerCodex) Prompt(ctx context.Context, sessionID string, prompt Promp
 			ID string `json:"id"`
 		} `json:"turn"`
 	}
+	session.publish("turn/start", "outbound", "started", "Sent turn/start to Codex App Server")
 	if err := session.client.call(ctx, "turn/start", turnParams, &turnResponse); err != nil {
+		session.publish("turn/start", "inbound", "failed", "Codex turn/start failed")
 		w.terminate(sessionID)
 		return workerStageError("worker.turn_start", err)
 	}
 	if turnResponse.Turn.ID == "" {
+		session.publish("turn/start", "inbound", "failed", "Codex turn/start returned no turn")
 		w.terminate(sessionID)
 		return workerStageError("worker.turn_start", &CodexProtocolError{Code: "empty_turn"})
 	}
 	session.mu.Lock()
 	session.turnID = turnResponse.Turn.ID
 	session.mu.Unlock()
+	session.publish("turn/start", "inbound", "completed", "Codex turn started")
 	return nil
 }
 
@@ -323,6 +358,7 @@ func (w *WorkerCodex) Abort(ctx context.Context, sessionID string) error {
 	threadID, turnID := session.threadID, session.turnID
 	session.mu.Unlock()
 	if threadID != "" && turnID != "" {
+		session.publish("turn/interrupt", "outbound", "started", "Sent turn/interrupt to Codex App Server")
 		var ignored map[string]any
 		_ = session.client.call(ctx, "turn/interrupt", map[string]any{"threadId": threadID, "turnId": turnID}, &ignored)
 	}
@@ -361,16 +397,19 @@ func (w *WorkerCodex) terminate(id string) {
 	if !ok {
 		return
 	}
+	session.publish("worker.terminate", "outbound", "started", "Terminating disposable Codex worker")
 	session.client.close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_ = w.manager.Terminate(ctx, session.workspace)
+	session.publish("worker.terminate", "inbound", "completed", "Disposable Codex worker terminated")
 }
 
 func (s *codexWorkerSession) notification(method string, raw json.RawMessage) {
 	s.mu.Lock()
 	threadID := s.threadID
 	s.mu.Unlock()
+	s.publish(method, "inbound", "received", "Received "+method+" from Codex App Server")
 	switch method {
 	case "item/completed":
 		var params struct {
@@ -385,7 +424,41 @@ func (s *codexWorkerSession) notification(method string, raw json.RawMessage) {
 		text, _ := params.Item["text"].(string)
 		if kind == "agentMessage" && text != "" && (phase == "" || phase == "final_answer") {
 			s.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "message.delta", Data: map[string]any{"text": text, "upstream_type": method}, CreatedAt: time.Now().UTC()})
+		} else if kind == "webSearch" {
+			data := map[string]any{"upstream_type": method}
+			if query, ok := params.Item["query"].(string); ok && query != "" {
+				data["query"] = query
+			}
+			if action, ok := params.Item["action"].(map[string]any); ok {
+				data["action"] = action
+			}
+			s.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "web.search.completed", Data: data, CreatedAt: time.Now().UTC()})
 		}
+	case "thread/tokenUsage/updated":
+		var params struct {
+			ThreadID   string `json:"threadId"`
+			TurnID     string `json:"turnId"`
+			TokenUsage struct {
+				Last struct {
+					InputTokens           int64 `json:"inputTokens"`
+					OutputTokens          int64 `json:"outputTokens"`
+					CachedInputTokens     int64 `json:"cachedInputTokens"`
+					ReasoningOutputTokens int64 `json:"reasoningOutputTokens"`
+					TotalTokens           int64 `json:"totalTokens"`
+				} `json:"last"`
+			} `json:"tokenUsage"`
+		}
+		if json.Unmarshal(raw, &params) != nil || params.ThreadID != threadID {
+			return
+		}
+		s.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "usage.updated", Data: map[string]any{
+			"turn_id":                 params.TurnID,
+			"input_tokens":            params.TokenUsage.Last.InputTokens,
+			"output_tokens":           params.TokenUsage.Last.OutputTokens,
+			"cached_input_tokens":     params.TokenUsage.Last.CachedInputTokens,
+			"reasoning_output_tokens": params.TokenUsage.Last.ReasoningOutputTokens,
+			"total_tokens":            params.TokenUsage.Last.TotalTokens,
+		}, CreatedAt: time.Now().UTC()})
 	case "turn/completed":
 		var params struct {
 			ThreadID string `json:"threadId"`
@@ -435,6 +508,7 @@ func (w *WorkerCodex) serverRequest(ctx context.Context, session *codexWorkerSes
 	session.mu.Lock()
 	threadID := session.threadID
 	session.mu.Unlock()
+	session.publish(method, "inbound", "received", "Codex App Server requested "+method)
 	switch method {
 	case "item/tool/call":
 		var request struct {
@@ -455,9 +529,24 @@ func (w *WorkerCodex) serverRequest(ctx context.Context, session *codexWorkerSes
 			return nil, errors.New("dynamic tool is not admitted")
 		}
 		output, success := w.callBridge(ctx, session.access.Capability, endpoint, request.Arguments)
+		status := "failed"
 		if success {
+			status = "completed"
+		}
+		session.publish(method, "outbound", status, "Returned reviewed tool result to Codex App Server")
+		if success {
+			if toolID, operationID, resourceAction := completedToolOperation(request.Tool, request.Arguments); toolID != "" {
+				data := map[string]any{"tool_id": toolID, "operation_id": operationID}
+				if resourceAction != "" {
+					data["resource_action"] = resourceAction
+				}
+				session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "tool.execution.completed", Data: data, CreatedAt: time.Now().UTC()})
+			}
 			if artifactURL := producedWikiArtifactURL(request.Tool, request.Arguments, output); artifactURL != "" {
 				session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "artifact.produced", Data: map[string]any{"url": artifactURL}, CreatedAt: time.Now().UTC()})
+			}
+			if referenceFingerprint, referenceURL := resolvedWikiReference(request.Tool, request.Arguments, output); referenceFingerprint != "" {
+				session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "wiki.reference.resolved", Data: map[string]any{"reference_sha256": referenceFingerprint, "url": referenceURL}, CreatedAt: time.Now().UTC()})
 			}
 		}
 		return map[string]any{"success": success, "contentItems": []map[string]any{{"type": "inputText", "text": output}}}, nil
@@ -466,6 +555,34 @@ func (w *WorkerCodex) serverRequest(ctx context.Context, session *codexWorkerSes
 	default:
 		return nil, errors.New("unsupported Codex server request")
 	}
+}
+
+func (w *WorkerCodex) publish(organizationID, jobID, attemptID, method, direction, status, title string) {
+	if w.activity == nil {
+		return
+	}
+	w.activity.Publish(activity.Record{OrganizationID: organizationID, Category: "codex", Kind: "codex.rpc", Level: codexActivityLevel(status), Title: title, Summary: direction + " · " + method + " · " + status, Details: map[string]any{"job_id": jobID, "attempt_id": attemptID, "method": method, "direction": direction, "status": status}, OccurredAt: time.Now().UTC()})
+}
+
+func (s *codexWorkerSession) publish(method, direction, status, title string) {
+	if s.activity == nil {
+		return
+	}
+	s.mu.Lock()
+	sessionID := s.threadID
+	s.mu.Unlock()
+	details := map[string]any{"job_id": s.jobID, "attempt_id": s.attemptID, "method": method, "direction": direction, "status": status}
+	if sessionID != "" {
+		details["session_id"] = sessionID
+	}
+	s.activity.Publish(activity.Record{OrganizationID: s.organizationID, Category: "codex", Kind: "codex.rpc", Level: codexActivityLevel(status), Title: title, Summary: direction + " · " + method + " · " + status, Details: details, OccurredAt: time.Now().UTC()})
+}
+
+func codexActivityLevel(status string) string {
+	if status == "failed" {
+		return "error"
+	}
+	return "info"
 }
 
 func (w *WorkerCodex) callBridge(ctx context.Context, capability, endpoint string, arguments json.RawMessage) (string, bool) {
@@ -488,6 +605,28 @@ func (w *WorkerCodex) callBridge(ctx context.Context, capability, endpoint strin
 		return `{"error":"gateway_response_invalid"}`, false
 	}
 	return string(data), response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices
+}
+
+func completedToolOperation(tool string, arguments json.RawMessage) (string, string, string) {
+	if tool != "tos_tag_tool" {
+		return "", "", ""
+	}
+	var request struct {
+		ToolID      string   `json:"tool_id"`
+		OperationID string   `json:"operation_id"`
+		Arguments   []string `json:"arguments"`
+	}
+	if json.Unmarshal(arguments, &request) != nil || request.ToolID == "" || request.OperationID == "" {
+		return "", "", ""
+	}
+	resourceAction := ""
+	if len(request.Arguments) > 0 {
+		switch request.ToolID + "/" + request.OperationID + "/" + request.Arguments[0] {
+		case "telemetryos.wiki/read/get", "telemetryos.wiki/read/search", "telemetryos.product-docs/read/docs-index", "telemetryos.product-docs/read/docs-page", "telemetryos.product-docs/read/corporate-full":
+			resourceAction = request.Arguments[0]
+		}
+	}
+	return request.ToolID, request.OperationID, resourceAction
 }
 
 func producedWikiArtifactURL(tool string, arguments json.RawMessage, bridgeOutput string) string {
@@ -519,6 +658,65 @@ func producedWikiArtifactURL(tool string, arguments json.RawMessage, bridgeOutpu
 		return ""
 	}
 	return page.URL
+}
+
+func resolvedWikiReference(tool string, arguments json.RawMessage, bridgeOutput string) (string, string) {
+	if tool != "tos_tag_tool" {
+		return "", ""
+	}
+	var request struct {
+		ToolID      string   `json:"tool_id"`
+		OperationID string   `json:"operation_id"`
+		Arguments   []string `json:"arguments"`
+	}
+	if json.Unmarshal(arguments, &request) != nil || request.ToolID != "telemetryos.wiki" || request.OperationID != "read" || len(request.Arguments) < 2 {
+		return "", ""
+	}
+	var result struct {
+		Output   string `json:"output"`
+		ExitCode int    `json:"exit_code"`
+	}
+	if json.Unmarshal([]byte(bridgeOutput), &result) != nil || result.ExitCode != 0 {
+		return "", ""
+	}
+	pageURL := ""
+	reference := strings.ToLower(strings.TrimSpace(request.Arguments[1]))
+	switch request.Arguments[0] {
+	case "url":
+		pageURL = strings.TrimSpace(result.Output)
+	case "get":
+		var page struct {
+			URL       string `json:"url"`
+			Namespace string `json:"namespace"`
+			NS        string `json:"ns"`
+			Slug      string `json:"slug"`
+		}
+		if json.Unmarshal([]byte(result.Output), &page) != nil {
+			return "", ""
+		}
+		pageURL = page.URL
+		namespace := page.Namespace
+		if namespace == "" {
+			namespace = page.NS
+		}
+		// Prefer the server-returned canonical namespace/slug. A worker may
+		// retrieve through an opaque page URL or another accepted ref shape but
+		// cite the page's lookup identifier from the response. Both values came
+		// from this same reviewed successful read; no URL is reconstructed.
+		if namespace != "" && page.Slug != "" {
+			reference = strings.ToLower(strings.TrimSpace(namespace + "/" + page.Slug))
+		}
+	default:
+		return "", ""
+	}
+	parsed, err := url.Parse(pageURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return "", ""
+	}
+	if reference == "" {
+		return "", ""
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(reference))), pageURL
 }
 
 func codexDynamicTools() []map[string]any {
@@ -571,8 +769,11 @@ func codexSlackOutputSchema() map[string]any {
 	tableSchema := map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
-		"required":             []string{"columns", "rows"},
+		"required":             []string{"columns", "rows", "caption", "page_size", "row_header_column_index"},
 		"properties": map[string]any{
+			"caption":                 map[string]any{"type": []string{"string", "null"}},
+			"page_size":               map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 100},
+			"row_header_column_index": map[string]any{"type": []string{"integer", "null"}, "minimum": 0, "maximum": 19},
 			"columns": map[string]any{
 				"type": "array", "minItems": 1, "maxItems": 20,
 				"items": map[string]any{
@@ -586,6 +787,19 @@ func codexSlackOutputSchema() map[string]any {
 			},
 		},
 	}
+	cardImageSchema := map[string]any{
+		"type": "object", "additionalProperties": false, "required": []string{"url", "alt_text"},
+		"properties": map[string]any{"url": map[string]any{"type": "string"}, "alt_text": map[string]any{"type": "string"}},
+	}
+	cardSchema := map[string]any{
+		"type": "object", "additionalProperties": false, "required": []string{"title", "subtitle", "body", "subtext", "icon", "hero_image"},
+		"properties": map[string]any{
+			"title": map[string]any{"type": "string"}, "subtitle": map[string]any{"type": []string{"string", "null"}},
+			"body": map[string]any{"type": "string"}, "subtext": map[string]any{"type": []string{"string", "null"}},
+			"icon":       map[string]any{"anyOf": []any{cardImageSchema, map[string]any{"type": "null"}}},
+			"hero_image": map[string]any{"anyOf": []any{cardImageSchema, map[string]any{"type": "null"}}},
+		},
+	}
 	segments := []any{
 		textSegment("header"),
 		textSegment("mrkdwn_text"),
@@ -597,6 +811,20 @@ func codexSlackOutputSchema() map[string]any {
 		map[string]any{
 			"type": "object", "additionalProperties": false, "required": []string{"kind", "table"},
 			"properties": map[string]any{"kind": map[string]any{"type": "string", "const": "table"}, "table": tableSchema},
+		},
+		map[string]any{
+			"type": "object", "additionalProperties": false, "required": []string{"kind", "card"},
+			"properties": map[string]any{"kind": map[string]any{"type": "string", "const": "card"}, "card": cardSchema},
+		},
+		map[string]any{
+			"type": "object", "additionalProperties": false, "required": []string{"kind", "carousel"},
+			"properties": map[string]any{
+				"kind": map[string]any{"type": "string", "const": "carousel"},
+				"carousel": map[string]any{
+					"type": "object", "additionalProperties": false, "required": []string{"cards"},
+					"properties": map[string]any{"cards": map[string]any{"type": "array", "minItems": 1, "maxItems": 10, "items": cardSchema}},
+				},
+			},
 		},
 		map[string]any{
 			"type": "object", "additionalProperties": false, "required": []string{"kind", "image"},

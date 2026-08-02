@@ -1,0 +1,10 @@
+{
+  "apps": {
+    "T025SE97A": {
+      "app_id": "A0BLSL73547",
+      "team_domain": "telemetry",
+      "team_id": "T025SE97A"
+    }
+  },
+  "default": "telemetry"
+}

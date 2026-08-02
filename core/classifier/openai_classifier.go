@@ -128,17 +128,21 @@ func (c *OpenAIClassifier) Decide(ctx context.Context, target Target, pack types
 	if len(profiles) == 0 {
 		return types.ClassificationDecision{}, classifierError("profiles", "no_agent_profiles", errors.New("no enabled agent model profiles"))
 	}
+	recentParticipantIDs := destinationRecentParticipantIDs(target.Envelope.ChannelID, pack.Sources)
 	payload := classifierInput{
-		Message:                         target.Envelope.Text,
-		MessageAuthorID:                 target.Envelope.UserID,
-		DestinationChannelID:            target.Envelope.ChannelID,
-		Mode:                            target.Mode,
-		DirectMention:                   target.Envelope.IsMention,
-		ActiveThread:                    target.ActiveThread,
-		Sources:                         pack.Sources,
-		DestinationRecentParticipantIDs: destinationRecentParticipantIDs(target.Envelope.ChannelID, pack.Sources),
-		AgentProfiles:                   profiles,
-		ReactionEmojis:                  c.reactionEmojis,
+		Message:                             target.Envelope.Text,
+		MessageAuthorID:                     target.Envelope.UserID,
+		DestinationChannelID:                target.Envelope.ChannelID,
+		Mode:                                target.Mode,
+		DirectMention:                       target.Envelope.IsMention,
+		ActiveThread:                        target.ActiveThread,
+		Sources:                             pack.Sources,
+		DestinationRecentParticipantIDs:     recentParticipantIDs,
+		DestinationRecentHumanCount:         len(recentParticipantIDs),
+		PreviousDestinationMessageFromAgent: previousDestinationMessageFromAgent(target, pack),
+		LikelyAddressedToAgent:              likelyConversationallyAddressedToAgent(target, pack),
+		AgentProfiles:                       profiles,
+		ReactionEmojis:                      c.reactionEmojis,
 	}
 	encodedInput, err := json.Marshal(payload)
 	if err != nil {
@@ -210,6 +214,11 @@ func (c *OpenAIClassifier) Decide(ctx context.Context, target Target, pack types
 	}
 	decision = withDirectMentionPolicyCorrections(decision, target, profiles)
 	decision = withAddressedSocialPolicyCorrections(decision, target)
+	decision = withConversationalAddressPolicyCorrections(decision, target, pack)
+	decision = withProductKnowledgePolicyCorrections(decision, target, profiles)
+	decision = withSourceWritePolicyCorrections(decision, target)
+	decision = withReadOnlyCodeAnalysisPolicyCorrections(decision, target, profiles)
+	decision = withBriefMentionPolicyCorrections(decision, target, profiles)
 	decision = withAmbientPolicyCorrections(decision, target, pack, profiles)
 	decision = withCanonicalAgentProfile(decision, profiles)
 	decision = withBackgroundProfileFloor(decision, target, profiles)
@@ -263,16 +272,19 @@ func modelStrength(profile types.ModelProfile) string {
 }
 
 type classifierInput struct {
-	Message                         string                   `json:"message"`
-	MessageAuthorID                 string                   `json:"message_author_id,omitempty"`
-	DestinationChannelID            string                   `json:"destination_channel_id,omitempty"`
-	Mode                            types.ParticipationMode  `json:"mode"`
-	DirectMention                   bool                     `json:"direct_mention"`
-	ActiveThread                    bool                     `json:"active_thread"`
-	Sources                         []types.ContextSource    `json:"sources"`
-	DestinationRecentParticipantIDs []string                 `json:"destination_recent_participant_ids,omitempty"`
-	AgentProfiles                   []advertisedAgentProfile `json:"available_agent_profiles"`
-	ReactionEmojis                  []string                 `json:"allowed_reaction_emojis"`
+	Message                             string                   `json:"message"`
+	MessageAuthorID                     string                   `json:"message_author_id,omitempty"`
+	DestinationChannelID                string                   `json:"destination_channel_id,omitempty"`
+	Mode                                types.ParticipationMode  `json:"mode"`
+	DirectMention                       bool                     `json:"direct_mention"`
+	ActiveThread                        bool                     `json:"active_thread"`
+	Sources                             []types.ContextSource    `json:"sources"`
+	DestinationRecentParticipantIDs     []string                 `json:"destination_recent_participant_ids,omitempty"`
+	DestinationRecentHumanCount         int                      `json:"destination_recent_human_count"`
+	PreviousDestinationMessageFromAgent bool                     `json:"previous_destination_message_from_agent"`
+	LikelyAddressedToAgent              bool                     `json:"likely_addressed_to_agent"`
+	AgentProfiles                       []advertisedAgentProfile `json:"available_agent_profiles"`
+	ReactionEmojis                      []string                 `json:"allowed_reaction_emojis"`
 }
 
 func destinationRecentParticipantIDs(channelID string, sources []types.ContextSource) []string {
@@ -291,13 +303,103 @@ func destinationRecentParticipantIDs(channelID string, sources []types.ContextSo
 	return participants
 }
 
-const classifierInstructions = `You are tos-tag's stateless, tool-free Slack classifier. Using only the immutable input, decide whether to remain silent, react only, answer in the current thread, answer in the channel, start background agent work, or request approval. Choose the least disruptive placement. A direct mention is a hard participation trigger but not automatically a thread: choose reply_in_channel when the expected answer is brief, self-contained, useful to the channel, and unlikely to invite follow-up; choose reply_in_thread when the answer is likely to become a deeper dive, needs multiple steps, code, a table, an artifact, research or tools, concerns a narrow side topic, or is likely to continue as a conversation. A requested table, structured report, code sample, artifact, research result, or multi-part comparison is not a brief answer and must use reply_in_thread even when it can be self-contained. Honor an explicit request to reply in the channel or in a thread. When active_thread is true, keep any substantive response in that thread. For ambient messages, default to silent on ambiguity, repetition, or an already-answered question.
+const weatherLocationClarificationReply = "I can check—what location should I use?"
 
-Use destination-safe sources when they materially resolve the current message, and list every source used in releasable_evidence_ids. A clear operational-status question with current destination-safe incident evidence requires an answer rather than react-only; prefer a thread when the status is likely to need supporting detail or follow-up. Never answer from restricted-awareness-only material. Participation mode controls initiative: assist may answer a clear unresolved ambient question when useful; proactive may react to or answer a clear actionable failure, risk, or incident signal; mention and observe restrictions are enforced independently by the admission service. Prefer react-only for a top-level ambient, non-urgent metric or risk observation that asks for no work and needs no explanation. In particular, an elevated metric explicitly described as stable or steady with no errors or failures should normally receive only warning, not a reply or worker job, unless it is marked urgent, critical, paging, failing, or needing attention.
+func withConversationalAddressPolicyCorrections(decision types.ClassificationDecision, target Target, pack types.ContextPackRevision) types.ClassificationDecision {
+	if target.ActiveThread || target.Envelope.IsMention || !likelyConversationallyAddressedToAgent(target, pack) || !isMissingLocationWeatherQuestion(target.Envelope.Text) {
+		return decision
+	}
+	return types.ClassificationDecision{
+		Outcome:            types.OutcomeReplyInChannel,
+		Confidence:         max(decision.Confidence, 0.99),
+		ReasonCodes:        append(decision.ReasonCodes, "policy.conversational_address", "policy.weather_location_clarification"),
+		ResponseIntent:     "ask one brief location clarification before checking current weather",
+		DirectReply:        weatherLocationClarificationReply,
+		DisclosureClass:    types.DisclosureDestinationSafe,
+		Reaction:           "speech_balloon",
+		AgentModelStrength: "none",
+	}
+}
+
+func likelyConversationallyAddressedToAgent(target Target, pack types.ContextPackRevision) bool {
+	if target.Envelope.UserID == "" || target.Envelope.ChannelID == "" {
+		return false
+	}
+	participants := destinationRecentParticipantIDs(target.Envelope.ChannelID, pack.Sources)
+	return len(participants) == 1 && participants[0] == target.Envelope.UserID && previousDestinationMessageFromAgent(target, pack)
+}
+
+func previousDestinationMessageFromAgent(target Target, pack types.ContextPackRevision) bool {
+	targetSourceID := ""
+	if target.Envelope.ChannelID != "" && target.Envelope.MessageTS != "" {
+		targetSourceID = target.Envelope.ChannelID + "/" + target.Envelope.MessageTS
+	}
+	// Some test and imported source IDs do not use channel/timestamp. Locate the
+	// newest exact human-message match as a defensive fallback so it is not
+	// mistaken for the preceding conversational turn.
+	fallbackTargetID := ""
+	var fallbackTargetAt time.Time
+	for _, source := range pack.Sources {
+		if source.ChannelID == target.Envelope.ChannelID && source.Provenance == "human_message" && source.AuthorID == target.Envelope.UserID && strings.TrimSpace(source.Text) == strings.TrimSpace(target.Envelope.Text) && (fallbackTargetID == "" || source.ObservedAt.After(fallbackTargetAt)) {
+			fallbackTargetID, fallbackTargetAt = source.ID, source.ObservedAt
+		}
+	}
+	var previous *types.ContextSource
+	for index := range pack.Sources {
+		source := &pack.Sources[index]
+		if source.ChannelID != target.Envelope.ChannelID || (source.Provenance != "human_message" && source.Provenance != "agent_output_unverified") || source.ID == targetSourceID || source.ID == fallbackTargetID {
+			continue
+		}
+		if previous == nil || source.ObservedAt.After(previous.ObservedAt) {
+			previous = source
+		}
+	}
+	if previous == nil || previous.Provenance != "agent_output_unverified" {
+		return false
+	}
+	targetAt := target.Envelope.EventTime
+	if targetAt.IsZero() {
+		targetAt = target.Envelope.ReceivedAt
+	}
+	if !targetAt.IsZero() && !previous.ObservedAt.IsZero() {
+		age := targetAt.Sub(previous.ObservedAt)
+		if age < 0 || age > 15*time.Minute {
+			return false
+		}
+	}
+	return true
+}
+
+func isMissingLocationWeatherQuestion(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	if !strings.Contains(normalized, "?") || !containsAny(normalized, "weather", "forecast", "temperature") {
+		return false
+	}
+	if containsAny(normalized, " in ", " at ", " near ", " around ") {
+		return false
+	}
+	if index := strings.Index(normalized, " for "); index >= 0 {
+		tail := strings.Trim(normalized[index+5:], " .?!")
+		if tail != "" && !containsAny(tail, "today", "tomorrow", "tonight", "this morning", "this afternoon", "this evening", "this week", "now", "currently") {
+			return false
+		}
+	}
+	return true
+}
+
+const classifierInstructions = `You are tos-tag's stateless, tool-free Slack classifier. Using only the immutable input, decide whether to remain silent, react only, answer in the current thread, answer in the channel, start background agent work, or request approval. Choose the least disruptive placement. A direct mention is a hard participation trigger but not automatically a thread: choose reply_in_channel when the expected answer is brief, self-contained, useful to the channel, and unlikely to invite follow-up; choose reply_in_thread when the answer itself is likely to become a deeper dive, needs multiple explanatory steps, code, a table, an artifact, concerns a narrow side topic, or is likely to continue as a conversation. Internal retrieval or tool use alone does not force a thread: judge placement by the expected final Slack message. A requested table, structured report, code sample, artifact, research result, or multi-part comparison is not a brief answer and must use reply_in_thread even when it can be self-contained. Honor an explicit request to reply in the channel or in a thread. When active_thread is true, keep any substantive response in that thread. For ambient messages, default to silent on ambiguity, repetition, or an already-answered question.
+
+likely_addressed_to_agent is a deterministic conversational signal, not a direct mention: it is true only when the current author is the sole recent human participant represented in destination context and the immediately preceding destination message came from Tag. Treat a clear question with this signal as likely directed to Tag even when it omits a mention. Do not claim the channel has only one human member; recent context is not a complete membership roster. If such a weather or forecast question omits the location needed to answer, reply directly in the channel with one short location clarification rather than staying silent or starting a worker.
+
+Set source_write_requested true when the message asks tos-tag to edit, implement, fix, patch, refactor, commit, push, merge, deploy, or otherwise mutate TelemetryOS source code or a TelemetryOS repository. Set it false for read-only investigation, code explanation or review, code samples or pseudocode, Linear issue CRUD, Wiki page CRUD, Slack configuration, and non-source actions. Source access is permanently read-only: a source-write request must receive only the control-plane redirect to create a Linear bug for broken existing behavior or a Linear feature for new or changed behavior. Do not propose or recommend a source mutation workflow.
+
+Set authoritative_product_retrieval_required true for any question or requested claim about a named TelemetryOS product, hardware model, plan, trial, pricing tier, feature, limit, compatibility rule, setup procedure, API, security/compliance property, or positioning. Also set it true for every request to create or revise TelemetryOS marketing copy, including campaigns, landing pages, sales collateral, customer announcements, social posts, headlines, taglines, and CTAs; the worker must use the marketing-messaging skill and retrieve the full corporate source before drafting. This includes apparently simple questions such as what the Premium Trial is about. Set it false for generic technology questions, social messages, source-write redirects, and questions whose complete authoritative excerpt is already supplied in the current message. When true, admit a full agent and require it to retrieve the Agent Wiki Primer and/or official TelemetryOS product documentation before answering; Slack context and generic model memory are not authoritative product evidence. Authoritative retrieval alone does not force a thread: a short definitional what-is product, plan, or trial question and another simple factual product answer that should fit in one short message belong in the channel, while a comparison, table, caveated explanation, or likely follow-up belongs in a thread. Product retrieval requires at least standard/medium routing in either placement because the worker must reliably use the knowledge tools and fetch full authoritative content.
+
+Use destination-safe sources when they materially resolve the current message, and list every source used in releasable_evidence_ids. Leave releasable_evidence_ids empty when the full agent must retrieve the answer from product knowledge, the Wiki, public documentation, or the web; source IDs are only for exact immutable context sources supplied in the input. A clear unresolved comparison about the organization's products, billing plans, pricing tiers, or device tiers in assist mode is useful ambient work even without a direct mention: admit a full agent so it can retrieve authoritative knowledge, using a thread and standard/medium routing. Do not generalize this rule to every ambient factual question. A clear operational-status question with current destination-safe incident evidence requires an answer rather than react-only; prefer a thread when the status is likely to need supporting detail or follow-up. Never answer from restricted-awareness-only material. Participation mode controls initiative: assist may answer a clear unresolved ambient question when useful; proactive may react to or answer a clear actionable failure, risk, or incident signal; mention and observe restrictions are enforced independently by the admission service. Prefer react-only for a top-level ambient, non-urgent metric or risk observation that asks for no work and needs no explanation. In particular, an elevated metric explicitly described as stable or steady with no errors or failures should normally receive only warning, not a reply or worker job, unless it is marked urgent, critical, paging, failing, or needing attention.
 
 An ambient alignment intervention is appropriate when a current human statement materially conflicts with a recent, destination-safe factual report from a different human in another public channel, or with a clear destination-safe fact, and surfacing that conflict would prevent confusion, duplicated work, a bad operational decision, or a missed incident. Default to silent for opinions, preferences, predictions, minor wording differences, stale reports, ambiguous entities, weak inferences, or facts that do not change what this channel should know or do. A source author absent from destination_recent_participant_ids is a stronger reason to help, but that list means recent visible participation only: never claim the person is not a channel member. Attribute human reports without blame and without converting them into verified truth—for example, response_intent may say to note that <@AUTHOR_ID> reported the server down in <#CHANNEL_ID> and ask the worker to reconcile or verify the current state. Use only author_id, channel_id, channel_name, observed_at, and text supplied by a cited source; never invent a person, channel, time, or fact. A single clear conflict needing only a brief attributed status note must use reply_in_channel even though someone might follow up; use a thread or background work only when the response itself must reconcile evidence, investigate, or explain multiple facts. Use speech_balloon for ordinary alignment, warning or rotating_light for material operational risk. Never perform an alignment intervention from agent_output_unverified or any restricted-awareness source, and never reveal even the existence of another private channel, DM, or group DM. If a direct mention asks to quote, paste, show, share, or summarize private-channel, DM, or group-DM content outside its destination, use a light/low full agent for one brief reply_in_channel refusal. Cite no evidence and reveal no awareness, names, channels, or content.
 
-For an unmistakably social message that needs no factual answer, tools, action, private context, or follow-up—such as thanks, a greeting, a farewell, light praise, or brief friendly banter—you may answer directly without a full agent. Set reply_in_channel for a top-level message or reply_in_thread for an active thread, set requires_full_agent false, leave all agent recommendation and evidence fields empty, and place one natural reply of at most 240 characters in direct_reply. Keep it to one plain-text line. It must not contain facts, advice, commitments, status claims, links, mentions, identifiers, markdown, or claims derived from context. Use white_check_mark for thanks or praise and speech_balloon for a greeting or banter. Examples include "You're welcome!", "Happy to help!", and "Morning!". Otherwise leave direct_reply empty. Never use direct_reply to answer a question, summarize content, perform a transformation, report work, or avoid full-agent admission.
+For an unmistakably social message that needs no factual answer, tools, action, private context, or follow-up—such as thanks, a greeting, a farewell, light praise, or brief friendly banter—you may answer directly without a full agent. Set reply_in_channel for a top-level message or reply_in_thread for an active thread, set requires_full_agent false, leave all agent recommendation and evidence fields empty, and place one natural reply of at most 240 characters in direct_reply. Keep it to one plain-text line. It must not contain facts, advice, commitments, status claims, links, mentions, identifiers, markdown, or claims derived from context. Use white_check_mark for thanks or praise and speech_balloon for a greeting or banter. Examples include "You're welcome!", "Happy to help!", and "Morning!". The only non-social direct-reply exception is one bounded clarification for a likely-addressed weather or forecast question missing its location; ask which location to check, make no weather claim, and use speech_balloon. Otherwise leave direct_reply empty. Never use direct_reply to answer a substantive question, summarize content, perform a transformation, report work, or avoid full-agent admission.
 
 For every non-silent action select exactly one allowed Slack reaction. Apply these meanings consistently: eyes acknowledges newly requested work; thinking_face marks a question or decision that needs consideration; white_check_mark marks a completed, confirmed, or immediately resolved acknowledgement; warning marks a non-urgent risk or degraded condition; rotating_light marks an active urgent incident; hammer_and_wrench marks implementation, repair, or build work; speech_balloon marks a conversational explanation or discussion. Select only from the allowed list and choose the closest semantic match.
 
@@ -390,14 +492,16 @@ func classifierSchema(profiles []advertisedAgentProfile, reactions []string) map
 		"restricted_signal_ids":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 		"response_intent":         map[string]any{"type": "string"},
 		"direct_reply":            map[string]any{"type": "string", "maxLength": 240},
-		"disclosure_class":        map[string]any{"type": "string", "enum": []string{"destination_safe", "restricted_awareness_only"}},
-		"requires_full_agent":     map[string]any{"type": "boolean"},
-		"reaction":                map[string]any{"type": "string", "enum": reactionValues},
-		"agent_model_profile":     map[string]any{"type": "string", "enum": profileIDs},
-		"agent_model_strength":    map[string]any{"type": "string", "enum": strengths},
-		"agent_reasoning_effort":  map[string]any{"type": "string", "enum": efforts},
+		"source_write_requested":  map[string]any{"type": "boolean"},
+		"authoritative_product_retrieval_required": map[string]any{"type": "boolean"},
+		"disclosure_class":                         map[string]any{"type": "string", "enum": []string{"destination_safe", "restricted_awareness_only"}},
+		"requires_full_agent":                      map[string]any{"type": "boolean"},
+		"reaction":                                 map[string]any{"type": "string", "enum": reactionValues},
+		"agent_model_profile":                      map[string]any{"type": "string", "enum": profileIDs},
+		"agent_model_strength":                     map[string]any{"type": "string", "enum": strengths},
+		"agent_reasoning_effort":                   map[string]any{"type": "string", "enum": efforts},
 	}
-	required := []string{"outcome", "confidence", "reason_codes", "topic_ids", "releasable_evidence_ids", "restricted_signal_ids", "response_intent", "direct_reply", "disclosure_class", "requires_full_agent", "reaction", "agent_model_profile", "agent_model_strength", "agent_reasoning_effort"}
+	required := []string{"outcome", "confidence", "reason_codes", "topic_ids", "releasable_evidence_ids", "restricted_signal_ids", "response_intent", "direct_reply", "source_write_requested", "authoritative_product_retrieval_required", "disclosure_class", "requires_full_agent", "reaction", "agent_model_profile", "agent_model_strength", "agent_reasoning_effort"}
 	return map[string]any{
 		"type":        "json_schema",
 		"name":        "tos_tag_classification",
@@ -453,7 +557,9 @@ func withDefaultReaction(decision types.ClassificationDecision, reactions []stri
 		return decision
 	}
 	preferred := []string{"speech_balloon", "eyes"}
-	if decision.DirectReply != "" {
+	if decision.SourceWriteRequested {
+		preferred = []string{"speech_balloon", "eyes"}
+	} else if decision.DirectReply != "" {
 		preferred = []string{"white_check_mark", "speech_balloon"}
 	} else if decision.Outcome == types.OutcomeStartBackgroundJob || decision.Outcome == types.OutcomeEscalateForApproval {
 		preferred = []string{"eyes", "thinking_face"}
@@ -468,6 +574,196 @@ func withDefaultReaction(decision types.ClassificationDecision, reactions []stri
 	decision.Reaction = reactions[0]
 	decision.ReasonCodes = append(decision.ReasonCodes, "policy.default_reaction")
 	return decision
+}
+
+const sourceWriteRedirectReply = "TelemetryOS source is read-only here. Please file broken existing behavior as a Linear bug and new or changed behavior as a Linear feature, or ask me to create the issue for you."
+
+func withSourceWritePolicyCorrections(decision types.ClassificationDecision, target Target) types.ClassificationDecision {
+	if !decision.SourceWriteRequested && !isObviousSourceWriteRequest(target.Envelope.Text) {
+		return decision
+	}
+	outcome := types.OutcomeReplyInChannel
+	if target.ActiveThread {
+		outcome = types.OutcomeReplyInThread
+	}
+	return types.ClassificationDecision{
+		Outcome:                  outcome,
+		Confidence:               max(decision.Confidence, 0.99),
+		ReasonCodes:              append(decision.ReasonCodes, "policy.source_write_to_linear"),
+		ResponseIntent:           "direct the requester to Linear issue intake because TelemetryOS source access is read-only",
+		DirectReply:              sourceWriteRedirectReply,
+		SourceWriteRequested:     true,
+		ProductRetrievalRequired: false,
+		DisclosureClass:          types.DisclosureDestinationSafe,
+		Reaction:                 "speech_balloon",
+		AgentModelStrength:       "none",
+	}
+}
+
+func isObviousSourceWriteRequest(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return false
+	}
+	if containsAny(lower, "read the code", "inspect the code", "review the code", "explain the code", "show me the code", "code sample", "code example", "pseudocode") &&
+		!containsAny(lower, "then fix", "and fix", "then change", "and change", "then implement", "and implement") {
+		return false
+	}
+	explicit := containsAny(lower,
+		"edit the code", "change the code", "modify the code", "update the code", "write the code",
+		"edit the source", "change the source", "modify the source", "patch the source",
+		"commit the change", "commit this", "push the change", "push this", "open a pull request", "open a pr",
+		"merge the change", "merge this", "deploy the change", "ship the change",
+	)
+	engineeringAction := containsAny(lower, "implement ", "refactor ", "patch ", "fix the bug", "fix this bug", "fix that bug", "fix the regression", "build the feature", "add support for ", "remove support for ")
+	// Do not use the loose prefix " pr" here: it also matches product words
+	// such as "Premium" and turns ordinary plan questions into write requests.
+	sourceSurface := containsAny(lower, " code", "codebase", " source", " repo", "repository", " pull request", " branch", " commit")
+	return explicit || engineeringAction || (sourceSurface && containsAny(lower, "edit", "change", "modify", "update", "write", "fix", "add", "remove", "rename", "delete", "commit", "push", "merge", "deploy"))
+}
+
+func withReadOnlyCodeAnalysisPolicyCorrections(decision types.ClassificationDecision, target Target, profiles []advertisedAgentProfile) types.ClassificationDecision {
+	if decision.SourceWriteRequested || isObviousSourceWriteRequest(target.Envelope.Text) || !isObviousReadOnlyCodeAnalysisRequest(target.Envelope.Text) {
+		return decision
+	}
+	decision.Outcome = types.OutcomeReplyInThread
+	decision.Confidence = max(decision.Confidence, 0.99)
+	decision.ReasonCodes = append(decision.ReasonCodes, "policy.read_only_code_analysis_floor")
+	decision.DirectReply = ""
+	decision.SourceWriteRequested = false
+	decision.RequiresFullAgent = true
+	decision.AgentModelProfile = ""
+	if isSecuritySensitiveCodeAnalysis(target.Envelope.Text) {
+		decision.AgentModelStrength = "strong"
+		decision.AgentReasoningEffort = "max"
+		decision.ResponseIntent = strings.TrimSpace(decision.ResponseIntent + " Inspect the relevant implementation with the reviewed read-only source capability before reaching security or privacy conclusions; distinguish source evidence from unverified Slack summaries.")
+	} else {
+		decision.AgentModelStrength = "standard"
+		decision.AgentReasoningEffort = "medium"
+	}
+	return withCanonicalAgentProfile(decision, profiles)
+}
+
+func isObviousReadOnlyCodeAnalysisRequest(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" || isObviousSourceWriteRequest(lower) {
+		return false
+	}
+	readOnlyAction := containsAny(lower, "read the", "inspect the", "review the", "explain the", "analyze the", "investigate", "trace the", "show me the")
+	codeSurface := containsAny(lower, " code", "codebase", " source", " repository", " repo", "package", "module", "component", "service", "authentication", "handler", "implementation", "context boundary", "context construction", "privacy boundary", "security boundary", "delivery reconciliation")
+	ownershipQuestion := containsAny(lower,
+		"which package", "what package", "which module", "what module", "which component", "what component",
+		"which repository", "what repository", "which repo", "what repo", "where in the code",
+	) || (containsAny(lower, " owns ", "owned by", "responsibilities") && codeSurface)
+	return (readOnlyAction && codeSurface) || ownershipQuestion
+}
+
+func isSecuritySensitiveCodeAnalysis(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	return isObviousReadOnlyCodeAnalysisRequest(lower) && containsAny(lower, "security", "privacy", " private ", "leak", "threat", "attack", "exposure", "cross-channel", "cross channel")
+}
+
+func withBriefMentionPolicyCorrections(decision types.ClassificationDecision, target Target, profiles []advertisedAgentProfile) types.ClassificationDecision {
+	if target.Envelope.IsMention && decision.DirectReply != "" && !decision.SourceWriteRequested && !isDirectSocialCandidate(target.Envelope.Text) {
+		decision.DirectReply = ""
+		decision.RequiresFullAgent = true
+		decision.AgentModelProfile = ""
+		decision.AgentModelStrength = ""
+		decision.AgentReasoningEffort = ""
+		decision.Reaction = "thinking_face"
+		decision.ReasonCodes = append(decision.ReasonCodes, "policy.substantive_direct_reply_rejected")
+	}
+	if !target.Envelope.IsMention || target.ActiveThread || decision.SourceWriteRequested || decision.ProductRetrievalRequired || decision.DirectReply != "" || len(decision.ReleasableEvidenceIDs) != 0 || decision.Reaction == "warning" || decision.Reaction == "rotating_light" || !briefSelfContainedMention(target.Envelope.Text) {
+		return decision
+	}
+	decision.Outcome = types.OutcomeReplyInChannel
+	decision.Confidence = max(decision.Confidence, 0.99)
+	decision.ReasonCodes = append(decision.ReasonCodes, "policy.brief_surface_channel")
+	decision.RequiresFullAgent = true
+	return withLightestProfile(decision, profiles)
+}
+
+func withProductKnowledgePolicyCorrections(decision types.ClassificationDecision, target Target, profiles []advertisedAgentProfile) types.ClassificationDecision {
+	if decision.ProductRetrievalRequired && isClearlyOperationalSchedulingQuestion(target.Envelope.Text) {
+		decision.ProductRetrievalRequired = false
+		decision.ReasonCodes = append(decision.ReasonCodes, "policy.non_product_operational_question")
+		return decision
+	}
+	productQuestion := decision.ProductRetrievalRequired || isObviousProductKnowledgeQuestion(target.Envelope.Text, decision)
+	providerSourceWrite := decision.SourceWriteRequested
+	// The provider can over-index on ordinary product-state verbs such as
+	// "changes" or "moves" and incorrectly mark a plan comparison as a source
+	// mutation. Product questions only lose their retrieval path when the text
+	// itself contains an unambiguous source-write request.
+	if decision.SourceWriteRequested && productQuestion && !isObviousSourceWriteRequest(target.Envelope.Text) {
+		decision.SourceWriteRequested = false
+		decision.ReasonCodes = append(decision.ReasonCodes, "policy.product_question_not_source_write")
+	}
+	if decision.SourceWriteRequested || !productQuestion {
+		return decision
+	}
+	corrected := types.ClassificationDecision{
+		Outcome:                  types.OutcomeReplyInThread,
+		Confidence:               max(decision.Confidence, 0.99),
+		ReasonCodes:              append(decision.ReasonCodes, "policy.authoritative_product_retrieval"),
+		TopicIDs:                 append([]string(nil), decision.TopicIDs...),
+		ReleasableEvidenceIDs:    append([]string(nil), decision.ReleasableEvidenceIDs...),
+		ResponseIntent:           "retrieve authoritative TelemetryOS product evidence from the Agent Wiki Primer and/or official product documentation before answering; do not answer from model memory or Slack context alone",
+		ProductRetrievalRequired: true,
+		DisclosureClass:          types.DisclosureDestinationSafe,
+		RequiresFullAgent:        true,
+		Reaction:                 "thinking_face",
+		AgentModelStrength:       "standard",
+		AgentReasoningEffort:     "medium",
+	}
+	if target.ActiveThread {
+		corrected.Outcome = types.OutcomeReplyInThread
+	} else if !providerSourceWrite && (decision.Outcome == types.OutcomeReplyInChannel || isBriefProductDefinitionQuestion(target.Envelope.Text)) {
+		corrected.Outcome = types.OutcomeReplyInChannel
+	}
+	return withCanonicalAgentProfile(corrected, profiles)
+}
+
+func isBriefProductDefinitionQuestion(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" || len(strings.Fields(lower)) > 18 || strings.ContainsAny(lower, "\n;") {
+		return false
+	}
+	if containsAny(lower, "compare", "comparison", "difference", " versus ", " vs ", "trade-off", "tradeoff", "what changes", "how does", "how do", "why ", "which ") {
+		return false
+	}
+	return strings.HasPrefix(lower, "what is ") || strings.HasPrefix(lower, "what's ") || strings.HasPrefix(lower, "does ") || strings.HasPrefix(lower, "can ") || strings.HasPrefix(lower, "is ")
+}
+
+func isClearlyOperationalSchedulingQuestion(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if containsAny(lower, "premium", "enterprise", "billing", "pricing", "trial", "node pro", "node mini", "telemetryos", "telemetry os", "product", "subscription", "device tier") {
+		return false
+	}
+	return containsAny(lower, "deploy window", "deployment window", "release window", "maintenance window")
+}
+
+func isObviousProductKnowledgeQuestion(text string, decision types.ClassificationDecision) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	question := strings.Contains(lower, "?") || containsAny(lower, "what is", "what's", "what are", "how does", "how do", "does the", "can the", "tell me about", "explain the", "compare ", "difference between")
+	if !question {
+		return false
+	}
+	for _, topic := range decision.TopicIDs {
+		if containsAny(strings.ToLower(topic), "product", "pricing", "billing", "trial", "plan", "hardware", "device", "compatibility", "feature") {
+			return true
+		}
+	}
+	if containsAny(strings.ToLower(decision.ResponseIntent), "authoritative product", "primer wiki", "product documentation", "public documentation") {
+		return true
+	}
+	if strings.Contains(lower, "premium") && strings.Contains(lower, "enterprise") {
+		return true
+	}
+	return containsAny(lower,
+		"telemetryos", "telemetry os", "premium trial", "premium plan", "enterprise plan", "billing plan", "pricing plan",
+		"subscription plan", "subscription tier", "node pro", "node mini", "tos node", "device tier", "product tier",
+	)
 }
 
 func withDirectMentionPolicyCorrections(decision types.ClassificationDecision, target Target, profiles []advertisedAgentProfile) types.ClassificationDecision {
@@ -494,7 +790,40 @@ func requestsCrossDestinationPrivateDisclosure(text string) bool {
 }
 
 func withAddressedSocialPolicyCorrections(decision types.ClassificationDecision, target Target) types.ClassificationDecision {
+	if target.ActiveThread && isDirectSocialCandidate(target.Envelope.Text) {
+		if decision.DirectReply != "" && (decision.Outcome == types.OutcomeReplyInChannel || decision.Outcome == types.OutcomeReplyInThread) {
+			decision.Outcome = types.OutcomeReplyInThread
+			decision.RequiresFullAgent = false
+			decision.AgentModelProfile = ""
+			decision.AgentModelStrength = "none"
+			decision.AgentReasoningEffort = ""
+			decision.Reaction = "white_check_mark"
+			decision.ReasonCodes = append(decision.ReasonCodes, "policy.thread_social_reply")
+			return decision
+		}
+		return types.ClassificationDecision{
+			Outcome:            types.OutcomeReplyInThread,
+			Confidence:         max(decision.Confidence, 0.99),
+			ReasonCodes:        append(decision.ReasonCodes, "policy.thread_social_reply"),
+			ResponseIntent:     "brief social acknowledgement in the active thread",
+			DirectReply:        "Happy to help!",
+			DisclosureClass:    types.DisclosureDestinationSafe,
+			Reaction:           "white_check_mark",
+			AgentModelStrength: "none",
+		}
+	}
 	if target.ActiveThread || target.Envelope.IsMention || !explicitlyAddressesTag(target.Envelope.Text) || !isDirectSocialCandidate(target.Envelope.Text) {
+		return decision
+	}
+	if decision.DirectReply != "" && (decision.Outcome == types.OutcomeReplyInChannel || decision.Outcome == types.OutcomeReplyInThread) {
+		wantReaction := "white_check_mark"
+		if containsAny(strings.ToLower(target.Envelope.Text), "morning", "afternoon", "evening", "hello", "hi ", "hey ") {
+			wantReaction = "speech_balloon"
+		}
+		if decision.Reaction != wantReaction {
+			decision.Reaction = wantReaction
+			decision.ReasonCodes = append(decision.ReasonCodes, "policy.addressed_social_reaction")
+		}
 		return decision
 	}
 	if decision.Outcome != types.OutcomeSilent && decision.Outcome != types.OutcomeReact {
@@ -535,7 +864,10 @@ func explicitlyAddressesTag(text string) bool {
 }
 
 func withAmbientPolicyCorrections(decision types.ClassificationDecision, target Target, pack types.ContextPackRevision, profiles []advertisedAgentProfile) types.ClassificationDecision {
-	if decision.Outcome == types.OutcomeSilent || decision.DirectReply != "" || target.Envelope.IsMention || target.ActiveThread {
+	if decision.DirectReply != "" || target.Envelope.IsMention || target.ActiveThread {
+		return decision
+	}
+	if decision.Outcome == types.OutcomeSilent {
 		return decision
 	}
 	if decision.Outcome == types.OutcomeReact && isUndirectedGroupGreeting(target.Envelope.Text) {
@@ -558,6 +890,10 @@ func withAmbientPolicyCorrections(decision types.ClassificationDecision, target 
 		}
 	}
 	if source, ok := alignmentConflict(target, pack); ok {
+		if decision.Reaction != "speech_balloon" && decision.Reaction != "warning" && decision.Reaction != "rotating_light" {
+			decision.Reaction = "speech_balloon"
+			decision.ReasonCodes = append(decision.ReasonCodes, "policy.alignment_reaction")
+		}
 		switch decision.Outcome {
 		case types.OutcomeReplyInChannel:
 			decision.Confidence = max(decision.Confidence, 0.99)
@@ -623,6 +959,20 @@ func withLightestProfile(decision types.ClassificationDecision, profiles []adver
 }
 
 func withCanonicalAgentProfile(decision types.ClassificationDecision, profiles []advertisedAgentProfile) types.ClassificationDecision {
+	if decision.Outcome == types.OutcomeSilent {
+		if decision.Reaction != "" || decision.DirectReply != "" || decision.RequiresFullAgent || decision.AgentModelProfile != "" || (decision.AgentModelStrength != "" && decision.AgentModelStrength != "none") || decision.AgentReasoningEffort != "" || len(decision.ReleasableEvidenceIDs) != 0 || len(decision.RestrictedSignalIDs) != 0 {
+			decision.ReasonCodes = append(decision.ReasonCodes, "policy.silent_action_cleared")
+		}
+		decision.Reaction = ""
+		decision.DirectReply = ""
+		decision.RequiresFullAgent = false
+		decision.AgentModelProfile = ""
+		decision.AgentModelStrength = "none"
+		decision.AgentReasoningEffort = ""
+		decision.ReleasableEvidenceIDs = nil
+		decision.RestrictedSignalIDs = nil
+		return decision
+	}
 	if !decision.RequiresFullAgent {
 		if decision.Outcome == types.OutcomeReact || decision.DirectReply != "" {
 			if decision.AgentModelProfile != "" || (decision.AgentModelStrength != "" && decision.AgentModelStrength != "none") || decision.AgentReasoningEffort != "" {
@@ -633,6 +983,10 @@ func withCanonicalAgentProfile(decision types.ClassificationDecision, profiles [
 			decision.AgentReasoningEffort = ""
 		}
 		return decision
+	}
+	if decision.DirectReply != "" {
+		decision.DirectReply = ""
+		decision.ReasonCodes = append(decision.ReasonCodes, "policy.agent_direct_reply_cleared")
 	}
 	for _, profile := range profiles {
 		if profile.ID == decision.AgentModelProfile && profile.Strength == decision.AgentModelStrength && profile.ReasoningEffort == decision.AgentReasoningEffort {

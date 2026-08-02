@@ -123,6 +123,18 @@ func RunLive(ctx context.Context, cfg config.Config) (Score, error) {
 			passed = false
 			failures = append(failures, "full_agent_contract_failed")
 		}
+		if fixture.WantSourceWriteRedirect && (!result.Predicted.SourceWriteRequested || !strings.Contains(result.Predicted.DirectReply, "Linear bug") || !strings.Contains(result.Predicted.DirectReply, "Linear feature")) {
+			passed = false
+			failures = append(failures, "source_write_redirect_contract_failed")
+		}
+		if fixture.WantProductRetrieval && (!result.Predicted.ProductRetrievalRequired || !result.Predicted.RequiresFullAgent) {
+			passed = false
+			failures = append(failures, "product_retrieval_contract_failed")
+		}
+		if fixture.ForbidSourceRedirect && result.Predicted.SourceWriteRequested {
+			passed = false
+			failures = append(failures, "read_only_analysis_misclassified_as_write")
+		}
 
 		if len(fixture.WantLiveReactions) != 0 && result.Predicted.Outcome != types.OutcomeSilent {
 			reactionTotal++

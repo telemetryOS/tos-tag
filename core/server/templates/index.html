@@ -5,155 +5,1061 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>tos-tag management</title>
   <style>
-    :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; background: #0b1020; color: #e8edf7; }
-    body { margin: 0; }
-    header { padding: 2rem clamp(1rem, 5vw, 5rem); background: linear-gradient(120deg, #18213d, #102f38); border-bottom: 1px solid #33415f; }
-    nav { display: flex; flex-wrap: wrap; gap: .45rem; padding: 1rem clamp(1rem, 5vw, 5rem); background: #0e1628; border-bottom: 1px solid #273654; }
-    nav a { color: #a8c9ff; text-decoration: none; border: 1px solid #344768; border-radius: .4rem; padding: .35rem .55rem; }
-    nav a:hover { background: #1a2944; }
-    main { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); padding: 1.5rem clamp(1rem, 5vw, 5rem); }
-    section { background: #121a2d; border: 1px solid #2b3959; border-radius: .8rem; padding: 1rem; box-shadow: 0 .8rem 2rem #0005; }
-    h1, h2 { margin-top: 0; } h1 { letter-spacing: -.04em; } code { color: #73e0cc; }
-    .metric { font-size: 2rem; font-weight: 700; color: #8bb8ff; }
-    label { display: block; margin: .7rem 0 .25rem; color: #bac6da; }
-    input, select, textarea, button { box-sizing: border-box; width: 100%; border-radius: .4rem; border: 1px solid #405170; padding: .65rem; background: #0b1222; color: inherit; }
-    textarea { min-height: 7rem; resize: vertical; } button { margin-top: .8rem; cursor: pointer; background: #276c62; border-color: #4da394; font-weight: 700; }
-    button:hover { background: #328174; } .muted { color: #93a0b7; } .wide { grid-column: 1 / -1; }
-    pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 28rem; overflow: auto; }
+    :root {
+      color-scheme: dark;
+      --page: #1b2632;
+      --surface: #2c3b4d;
+      --elevated: #1f2a3a;
+      --well: #131c26;
+      --ink: #eee9df;
+      --muted: #b8b3a9;
+      --faint: #6f7780;
+      --border: #3b434c;
+      --border-strong: #5e666d;
+      --accent: #f8b334;
+      --accent-hover: #ffc14d;
+      --on-accent: #1b2632;
+      --success: #6dc85a;
+      --destructive: #eb4a3c;
+      --font: "Rubik", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "SF Mono", ui-monospace, Monaco, "Cascadia Code", "Courier New", monospace;
+      --topbar-h: 52px;
+      --stripe-h: 3px;
+      --chrome-top: calc(var(--topbar-h) + var(--stripe-h));
+      --sidebar-w: 276px;
+      --fast: 150ms cubic-bezier(.4, 0, .2, 1);
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html { -webkit-text-size-adjust: 100%; scroll-padding-top: calc(var(--chrome-top) + 16px); }
+    body { margin: 0; background: var(--page); color: var(--ink); font: 400 16px/1.5 var(--font); }
+    ::selection { background: var(--accent); color: var(--on-accent); }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+    * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+    *::-webkit-scrollbar { width: 8px; height: 8px; }
+    *::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
+    .topstripe { position: fixed; inset: 0 0 auto; height: var(--stripe-h); background: var(--accent); z-index: 60; }
+    .topbar {
+      position: fixed; inset: var(--stripe-h) 0 auto; z-index: 50; height: var(--topbar-h);
+      display: flex; align-items: center; gap: 20px; padding: 0 20px;
+      background: color-mix(in srgb, var(--page) 88%, black 12%); border-bottom: 1px solid var(--border);
+    }
+    .wordmark { display: flex; align-items: center; flex-shrink: 0; color: var(--ink); text-decoration: none; }
+    .wordmark-name { font-size: 22px; font-weight: 450; letter-spacing: -.045em; }
+    .wordmark-name strong { color: var(--accent); font-weight: 500; }
+    .wordmark .app {
+      margin-left: 14px; padding-left: 14px; border-left: 1px solid var(--border);
+      color: var(--muted); font-size: 11px; font-weight: 500; letter-spacing: .18em; line-height: 1;
+      text-transform: uppercase; translate: 0 1px;
+    }
+    .organization-switcher { position: relative; flex: 0 1 320px; min-width: 180px; }
+    .organization-switcher::before {
+      content: ""; position: absolute; left: 12px; top: 50%; width: 7px; height: 7px; z-index: 1;
+      border-radius: 2px; background: var(--accent); transform: translateY(-50%); pointer-events: none;
+    }
+    .organization-switcher select {
+      width: 100%; height: 34px; padding: 6px 34px 6px 29px; border: 1px solid var(--border); border-radius: 6px;
+      background-color: var(--elevated); color: var(--ink); font-size: 12.5px; font-weight: 500; cursor: pointer;
+    }
+    .organization-switcher select:hover { border-color: var(--border-strong); }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    .topbar-meta { margin-left: auto; display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 12px; }
+    .status-dot { width: 7px; height: 7px; border-radius: 2px; background: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 12%, transparent); }
+    .nav-toggle-input { display: none; }
+    .nav-toggle {
+      display: none; flex-shrink: 0; width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 6px;
+      cursor: pointer; background: linear-gradient(var(--ink),var(--ink)) no-repeat center 12px/16px 1.5px,
+        linear-gradient(var(--ink),var(--ink)) no-repeat center 17px/16px 1.5px,
+        linear-gradient(var(--ink),var(--ink)) no-repeat center 22px/16px 1.5px;
+    }
+    .shell { display: flex; min-height: 100vh; padding-top: var(--chrome-top); }
+    .sidebar {
+      width: var(--sidebar-w); flex-shrink: 0; position: sticky; top: var(--chrome-top); height: calc(100vh - var(--chrome-top));
+      overflow-y: auto; padding: 20px 12px 32px 16px; border-right: 1px solid var(--border);
+      background: color-mix(in srgb, var(--page) 94%, black 6%);
+    }
+    .sidebar-head { display: block; padding: 4px 10px 16px; text-decoration: none; }
+    .sidebar-head .label { display: block; margin-bottom: 4px; color: var(--accent); font-size: 10px; font-weight: 500; letter-spacing: .2em; text-transform: uppercase; }
+    .sidebar-head .name { color: var(--ink); font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+    .sidebar-head .description { display: block; margin-top: 4px; color: var(--faint); font-size: 11px; line-height: 1.4; }
+    .nav-group { margin: 10px 0 18px; }
+    .nav-group-label { margin: 0 9px 6px; color: var(--faint); font-size: 9.5px; font-weight: 550; letter-spacing: .16em; text-transform: uppercase; }
+    .nav-group a {
+      display: flex; align-items: center; gap: 9px; min-height: 31px; margin: 1px 0; padding: 6px 10px;
+      border-radius: 5px; color: var(--muted); font-size: 12.5px; text-decoration: none;
+      transition: color var(--fast), background var(--fast);
+    }
+    .nav-group a::before { content: ""; width: 5px; height: 5px; flex: 0 0 auto; border: 1px solid var(--faint); border-radius: 1px; }
+    .nav-group a:hover { background: var(--elevated); color: var(--ink); }
+    .nav-group a[aria-current="page"] { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+    .nav-group a[aria-current="page"]::before { border-color: var(--on-accent); background: var(--on-accent); }
+    .main-column { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+    .content { --content-x: 56px; width: 100%; flex: 1; padding: 36px var(--content-x) 72px; }
+    .page-head { margin: 0 0 30px; max-width: 68ch; }
+    .section-label { margin: 0 0 8px; color: var(--accent); font-size: 10px; font-weight: 550; letter-spacing: .18em; text-transform: uppercase; }
+    .page-head h1 { margin: 0; color: var(--ink); font-size: clamp(29px, 3vw, 40px); font-weight: 650; letter-spacing: -.035em; line-height: 1.12; }
+    .page-head h1 .highlight { color: var(--accent); }
+    .page-head h1.route-title { text-transform: capitalize; }
+    .page-head p { margin: 12px 0 0; color: var(--muted); font-size: 14px; font-weight: 350; }
+    main { display: grid; grid-template-columns: repeat(12, minmax(0,1fr)); gap: 18px; }
+    section {
+      grid-column: span 4; min-width: 0; padding: 22px 24px 20px;
+      background: color-mix(in srgb, var(--surface) 65%, var(--page)); border: 1px solid var(--border); border-radius: 8px;
+      transition: border-color var(--fast), background var(--fast);
+    }
+    section:hover { border-color: var(--border-strong); background: color-mix(in srgb, var(--surface) 78%, var(--page)); }
+    section.wide { grid-column: 1 / -1; }
+    h2 { margin: 0 0 14px; color: var(--ink); font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+    main > section.wide > h2 { padding-bottom: 10px; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 550; letter-spacing: .14em; text-transform: capitalize; }
+    code { padding: 1px 6px; border-radius: 4px; background: var(--elevated); color: var(--accent); font-family: var(--mono); font-size: .88em; }
+    .metric { color: var(--ink); font-size: 34px; font-weight: 620; letter-spacing: -.04em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+    .metric::after { content: ""; display: block; width: 28px; height: 2px; margin: 12px 0 8px; background: var(--accent); }
+    .muted { color: var(--muted); }
+    label { display: block; margin: 14px 0 6px; color: var(--muted); font-size: 11px; font-weight: 500; letter-spacing: .12em; text-transform: uppercase; }
+    input, select, textarea, button { font-family: var(--font); }
+    input, select, textarea {
+      display: block; width: 100%; padding: 10px 13px; border: 1px solid #4a4e52; border-radius: 6px;
+      background: var(--elevated); color: var(--ink); font-size: 14px; transition: border-color var(--fast), box-shadow var(--fast);
+    }
+    input::placeholder, textarea::placeholder { color: var(--faint); }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
+    select { appearance: none; padding-right: 34px; background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="%23b8b3a9" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>'); background-repeat: no-repeat; background-position: right 12px center; }
+    textarea { min-height: 8.5rem; resize: vertical; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; }
+    button {
+      display: inline-flex; align-items: center; justify-content: center; width: auto; margin-top: 16px; padding: 9px 20px;
+      border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: var(--on-accent);
+      font-size: 13.5px; font-weight: 600; letter-spacing: .01em; cursor: pointer; transition: background var(--fast), border-color var(--fast);
+    }
+    button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+    pre {
+      max-height: 30rem; margin: 16px 0 0; padding: 16px 18px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+      border: 1px solid var(--border); border-top: 2px solid var(--accent); border-radius: 0 0 6px 6px;
+      background: var(--well); color: var(--muted); font: 12.5px/1.6 var(--mono); tab-size: 2;
+    }
+    .data-view { width: 100%; margin-top: 18px; overflow-x: auto; }
+    .data-table { width: 100%; border-collapse: separate; border-spacing: 0; border: 1px solid var(--border); border-top: 2px solid var(--accent); border-radius: 0 0 6px 6px; background: color-mix(in srgb, var(--surface) 55%, var(--page)); font-size: 13px; }
+    .data-table th, .data-table td { padding: 10px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent); }
+    .data-table th { color: var(--muted); font-size: 10px; font-weight: 550; letter-spacing: .1em; text-transform: uppercase; white-space: nowrap; }
+    .data-table tbody tr:last-child td, .data-table tbody tr:last-child th { border-bottom: 0; }
+    .data-table tbody tr:hover { background: color-mix(in srgb, var(--surface) 85%, transparent); }
+    .data-table td { max-width: 28rem; color: var(--ink); overflow-wrap: anywhere; }
+    .data-table td code { display: inline-block; max-width: 26rem; overflow-x: auto; white-space: pre-wrap; color: var(--muted); }
+    .data-table.page-channels th:first-child, .data-table.page-channels td:first-child { min-width: 180px; }
+    .value-true { color: var(--success); }
+    .value-false { color: var(--faint); }
+    .data-state { padding: 22px; border: 1px solid var(--border); border-top: 2px solid var(--accent); border-radius: 0 0 6px 6px; background: var(--well); color: var(--muted); font-size: 13px; }
+    .overview-metrics, .summary-cards { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+    .summary-cards { margin: 0 0 18px; }
+    .insight-card { min-width: 0; padding: 17px 18px; border: 1px solid var(--border); border-radius: 7px; background: color-mix(in srgb, var(--surface) 72%, var(--page)); }
+    .insight-card .label { color: var(--muted); font-size: 10px; font-weight: 550; letter-spacing: .12em; text-transform: uppercase; }
+    .insight-card .value { margin-top: 5px; color: var(--ink); font-size: 28px; font-weight: 620; letter-spacing: -.035em; line-height: 1.1; }
+    .insight-card .detail { margin-top: 7px; color: var(--faint); font-size: 11.5px; line-height: 1.35; }
+    .insight-card.attention .value { color: var(--accent); }
+    .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 16px; }
+    .section-heading h2 { margin-bottom: 3px; }
+    .section-heading p { margin: 0; }
+    .record-count { flex: 0 0 auto; padding: 5px 9px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 11px; }
+    .text-link { flex: 0 0 auto; color: var(--accent); font-size: 12px; font-weight: 550; text-decoration: none; }
+    .text-link:hover { color: var(--accent-hover); text-decoration: underline; }
+    .attention-panel { padding: 0; overflow: hidden; }
+    .attention-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+    .attention-head .status-dot { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
+    .attention-items { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px,1fr)); }
+    .attention-item { padding: 17px 20px; border-right: 1px solid var(--border); }
+    .attention-item:last-child { border-right: 0; }
+    .attention-item strong { display: block; margin-bottom: 3px; font-size: 13px; }
+    .attention-item span { color: var(--muted); font-size: 12px; }
+    .all-clear { display: flex; align-items: center; gap: 12px; padding: 18px 20px; color: var(--muted); }
+    .all-clear .status-dot { width: 9px; height: 9px; }
+    .live-activity-panel { padding: 0; overflow: hidden; border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); background: var(--well); }
+    .live-activity-panel:hover { background: var(--well); }
+    .activity-console-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 22px 24px 18px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 50%, var(--well)); }
+    .activity-console-head h2 { margin: 5px 0 4px; font-size: 20px; }
+    .activity-console-head p { max-width: 74ch; margin: 0; font-size: 12px; }
+    .activity-live-label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: .11em; text-transform: uppercase; }
+    .activity-connection-dot { width: 8px; height: 8px; border-radius: 2px; background: var(--faint); box-shadow: 0 0 0 3px color-mix(in srgb, var(--faint) 14%, transparent); }
+    .activity-connection-dot.connected { background: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 14%, transparent); }
+    .activity-connection-dot.reconnecting { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
+    .activity-controls { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+    .activity-controls label { margin: 0; }
+    .activity-controls select { width: 160px; height: 34px; padding: 6px 32px 6px 10px; font-size: 11.5px; }
+    button.secondary-button { height: 34px; margin: 0; padding: 6px 11px; border-color: var(--border); background: transparent; color: var(--muted); font-size: 11.5px; }
+    button.secondary-button:hover { border-color: var(--accent); background: var(--elevated); color: var(--ink); }
+    button.secondary-button.active { border-color: var(--accent); color: var(--accent); }
+    .activity-console-meta { display: flex; justify-content: space-between; gap: 16px; padding: 9px 24px; border-bottom: 1px solid var(--border); color: var(--faint); font: 10.5px/1.4 var(--mono); }
+    .live-activity-feed { max-height: min(62vh, 720px); min-height: 380px; overflow-y: auto; overscroll-behavior: contain; }
+    .activity-empty { display: grid; min-height: 360px; place-items: center; padding: 24px; color: var(--faint); font-size: 12px; }
+    .activity-event { display: grid; grid-template-columns: 92px 12px minmax(0,1fr); gap: 14px; padding: 15px 24px; border-bottom: 1px solid color-mix(in srgb, var(--border) 68%, transparent); }
+    .activity-event:hover { background: color-mix(in srgb, var(--surface) 38%, transparent); }
+    .activity-time { color: var(--faint); font: 10.5px/1.5 var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .activity-rail { position: relative; display: flex; justify-content: center; }
+    .activity-rail::before { content: ""; position: absolute; top: 13px; bottom: -28px; width: 1px; background: var(--border); }
+    .activity-event:last-child .activity-rail::before { display: none; }
+    .activity-marker { position: relative; z-index: 1; width: 8px; height: 8px; margin-top: 4px; border: 2px solid var(--well); border-radius: 2px; background: #63aaf2; box-shadow: 0 0 0 1px #63aaf2; }
+    .activity-event.category-classifier .activity-marker { background: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+    .activity-event.category-codex .activity-marker { background: #b494f7; box-shadow: 0 0 0 1px #b494f7; }
+    .activity-event.category-tool .activity-marker { background: #55c7ba; box-shadow: 0 0 0 1px #55c7ba; }
+    .activity-event.level-warn .activity-marker { background: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+    .activity-event.level-error .activity-marker { background: var(--destructive); box-shadow: 0 0 0 1px var(--destructive); }
+    .activity-event-body { min-width: 0; }
+    .activity-event-topline { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+    .activity-category { color: var(--faint); font-size: 9.5px; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
+    .activity-event-title { color: var(--ink); font-size: 12.5px; font-weight: 600; }
+    .activity-event-summary { margin-top: 3px; color: var(--muted); font-size: 11.5px; }
+    .activity-message { margin: 9px 0 0; padding: 9px 12px; border-left: 2px solid var(--accent); background: color-mix(in srgb, var(--surface) 38%, transparent); color: var(--ink); font-size: 12.5px; line-height: 1.45; overflow-wrap: anywhere; }
+    .activity-details { margin-top: 9px; }
+    .activity-details summary { color: var(--faint); font-size: 10.5px; cursor: pointer; }
+    .activity-details dl { display: grid; grid-template-columns: max-content minmax(0,1fr); gap: 5px 12px; margin: 9px 0 0; padding: 10px 12px; border: 1px solid var(--border); background: color-mix(in srgb, var(--page) 60%, transparent); }
+    .activity-details dt { color: var(--faint); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; }
+    .activity-details dd { min-width: 0; margin: 0; color: var(--muted); font: 10.5px/1.45 var(--mono); overflow-wrap: anywhere; }
+    .split-panel { display: grid; grid-template-columns: 1.2fr .8fr; gap: 0; padding: 0; }
+    .split-panel > div { min-width: 0; padding: 22px 24px; }
+    .split-panel > div + div { border-left: 1px solid var(--border); }
+    .activity-list, .compact-list { display: grid; gap: 0; }
+    .activity-row, .compact-row { display: grid; align-items: center; gap: 12px; padding: 11px 0; border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent); }
+    .activity-row { grid-template-columns: minmax(0,1fr) auto auto; }
+    .compact-row { grid-template-columns: minmax(0,1fr) auto; }
+    .activity-title, .compact-title { min-width: 0; overflow: hidden; color: var(--ink); font-size: 12.5px; font-weight: 520; text-overflow: ellipsis; white-space: nowrap; }
+    .activity-detail, .compact-detail { color: var(--faint); font-size: 11px; }
+    .health-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
+    .health-item { padding: 15px 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--well); }
+    .health-item .health-label { color: var(--faint); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+    .health-item .health-value { margin-top: 5px; color: var(--ink); font-size: 13px; font-weight: 550; }
+    .pill { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 10.5px; font-weight: 550; line-height: 1.2; white-space: nowrap; }
+    .pill::before { content: ""; width: 6px; height: 6px; flex: 0 0 auto; border-radius: 2px; background: var(--faint); }
+    .pill.good::before { background: var(--success); }
+    .pill.warn::before { background: var(--accent); }
+    .pill.bad::before { background: var(--destructive); }
+    .pill.info::before { background: #63aaf2; }
+    .data-toolbar { display: flex; align-items: center; gap: 10px; margin: 4px 0 14px; }
+    .data-toolbar label { margin: 0; }
+    .search-control { flex: 1 1 320px; max-width: 440px; }
+    .filter-control { flex: 0 0 210px; }
+    .data-toolbar input, .data-toolbar select { height: 38px; padding-top: 8px; padding-bottom: 8px; font-size: 12.5px; }
+    .data-meta { margin-left: auto; color: var(--faint); font-size: 11px; white-space: nowrap; }
+    .data-table .detail-column { width: 1%; min-width: 68px; }
+    .row-action, .pagination button, .icon-button { width: auto; margin: 0; padding: 5px 9px; border-color: var(--border); background: transparent; color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .row-action:hover, .pagination button:hover, .icon-button:hover { border-color: var(--accent); background: var(--elevated); color: var(--ink); }
+    .pagination { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 14px; color: var(--muted); font-size: 11px; }
+    .pagination button:disabled { cursor: not-allowed; opacity: .35; }
+    .record-dialog { width: min(720px, calc(100vw - 32px)); max-height: min(82vh, 860px); padding: 0; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--page); color: var(--ink); box-shadow: 0 24px 80px #000b; }
+    .record-dialog::backdrop { background: #05080db8; backdrop-filter: blur(3px); }
+    .dialog-head { position: sticky; top: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 20px 22px 15px; border-bottom: 1px solid var(--border); background: var(--page); }
+    .dialog-head h2 { margin: 0; }
+    .icon-button { padding: 1px 9px 4px; font-size: 22px; line-height: 1; }
+    .detail-grid { display: grid; grid-template-columns: minmax(140px,.35fr) minmax(0,1fr); max-height: calc(82vh - 78px); overflow: auto; }
+    .detail-grid dt, .detail-grid dd { margin: 0; padding: 11px 18px; border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+    .detail-grid dt { color: var(--faint); font-size: 10px; font-weight: 550; letter-spacing: .09em; text-transform: uppercase; }
+    .detail-grid dd { min-width: 0; color: var(--ink); font-size: 12px; overflow-wrap: anywhere; }
+    .detail-grid dd code { display: block; max-height: 16rem; overflow: auto; white-space: pre-wrap; }
+    .dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .developer-tools { grid-column: 1 / -1; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in srgb, var(--surface) 45%, var(--page)); }
+    .developer-tools summary { padding: 16px 20px; color: var(--muted); font-size: 12px; font-weight: 550; cursor: pointer; }
+    .developer-tools[open] summary { border-bottom: 1px solid var(--border); color: var(--ink); }
+    .developer-tools-body { display: grid; gap: 16px; padding: 18px; }
+    .developer-tools-body section { padding: 18px 20px; }
+    .chrome-footer { display: flex; gap: 16px; align-items: baseline; padding: 18px 56px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; font-weight: 300; letter-spacing: .04em; }
+    .chrome-footer .spacer { margin-left: auto; }
+    @media (max-width: 1200px) { .content { --content-x: 40px; } }
+    @media (max-width: 960px) {
+      .nav-toggle { display: block; }
+      .topbar { gap: 12px; padding: 0 14px; }
+      .wordmark .app { display: none; }
+      .organization-switcher { min-width: 140px; max-width: 240px; }
+      .sidebar { position: fixed; inset: var(--chrome-top) auto 0 0; z-index: 45; transform: translateX(-100%); transition: transform 300ms cubic-bezier(.4,0,.2,1); box-shadow: 0 20px 48px #0008; }
+      .nav-toggle-input:checked ~ .shell .sidebar { transform: translateX(0); }
+      .content { --content-x: 20px; padding-top: 24px; }
+      section { grid-column: span 6; }
+      .overview-metrics, .summary-cards { grid-template-columns: repeat(2, minmax(0,1fr)); }
+      .split-panel { grid-template-columns: 1fr; }
+      .split-panel > div + div { border-left: 0; border-top: 1px solid var(--border); }
+      .health-grid { grid-template-columns: 1fr; }
+      .activity-console-head { align-items: stretch; flex-direction: column; }
+      .activity-controls { flex-wrap: wrap; }
+      .chrome-footer { padding: 16px 20px; }
+    }
+    @media (max-width: 620px) {
+      .topbar-meta span:last-child { display: none; }
+      .topbar-meta { display: none; }
+      .organization-switcher { min-width: 0; flex: 1; }
+      .page-head h1 { font-size: 29px; }
+      section { grid-column: 1 / -1; padding: 19px 18px; }
+      .overview-metrics, .summary-cards { grid-template-columns: 1fr; }
+      .attention-items { grid-template-columns: 1fr; }
+      .attention-item { border-right: 0; border-bottom: 1px solid var(--border); }
+      .data-toolbar { align-items: stretch; flex-direction: column; }
+      .search-control, .filter-control { flex: 1 1 auto; width: 100%; max-width: none; }
+      .data-meta { margin-left: 0; }
+      .detail-grid { grid-template-columns: 1fr; }
+      .detail-grid dt { padding-bottom: 3px; border-bottom: 0; }
+      .detail-grid dd { padding-top: 3px; }
+      .content { padding-bottom: 48px; }
+      .activity-event { grid-template-columns: 12px minmax(0,1fr); gap: 11px; padding: 14px 16px; }
+      .activity-time { grid-column: 2; grid-row: 2; }
+      .activity-rail { grid-column: 1; grid-row: 1 / span 2; }
+      .activity-event-body { grid-column: 2; grid-row: 1; }
+      .activity-controls select { width: 100%; }
+      .activity-controls label { flex: 1 1 100%; }
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1>tos-tag</h1>
-    <p>Cross-channel Slack intelligence · shadow gating · dynamic model routes</p>
-    <p class="muted">Stubbed Slack control plane remains available for pre-live testing; external model providers are opt-in.</p>
+  <div class="topstripe"></div>
+  <input type="checkbox" id="nav-toggle" class="nav-toggle-input">
+  <header class="topbar">
+    <label for="nav-toggle" class="nav-toggle" aria-label="Toggle navigation"></label>
+    <a class="wordmark" href="/admin">
+      <span class="wordmark-name">telemetry<strong>OS</strong></span>
+      <span class="app">Tag</span>
+    </a>
+    <div class="organization-switcher">
+      <label class="sr-only" for="organizationSelector">Organization</label>
+      <select id="organizationSelector" aria-label="Current organization"><option>Loading organizations…</option></select>
+    </div>
+    <div class="topbar-meta"><span class="status-dot" aria-hidden="true"></span><span>Management plane</span></div>
   </header>
-  <nav aria-label="Management sections">
-    <a href="/admin">Overview</a><a href="/admin/channels">Channels</a><a href="/admin/observations">Observations</a><a href="/admin/decisions">Decisions</a><a href="/admin/context">Context</a><a href="/admin/jobs">Jobs</a><a href="/admin/routes">Routes</a><a href="/admin/marketplaces">Skills</a><a href="/admin/tools">Tools</a><a href="/admin/approvals">Approvals</a><a href="/admin/routines">Routines</a><a href="/admin/triggers">Triggers</a><a href="/admin/notes">Notes</a><a href="/admin/directives">Directives</a><a href="/admin/keystore">Keystore</a><a href="/admin/retention">Retention</a><a href="/admin/audit">Audit</a><a href="/admin/usage">Usage</a>
-  </nav>
-  <main>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="sidebar-head" href="/admin">
+        <span class="label">Slack intelligence</span>
+        <span class="name">tos-tag</span>
+        <span class="description">Classifier, agent work, and channel controls</span>
+      </a>
+      <nav aria-label="Management sections">
+        <div class="nav-group">
+          <div class="nav-group-label">Live operations</div>
+          <a href="/admin"{{if eq .Page "overview"}} aria-current="page"{{end}}>Activity</a>
+          <a href="/admin/jobs"{{if eq .Page "jobs"}} aria-current="page"{{end}}>Agent work</a>
+          <a href="/admin/approvals"{{if eq .Page "approvals"}} aria-current="page"{{end}}>Approvals</a>
+        </div>
+        <div class="nav-group">
+          <div class="nav-group-label">Behavior</div>
+          <a href="/admin/channels"{{if eq .Page "channels"}} aria-current="page"{{end}}>Channel coverage</a>
+          <a href="/admin/decisions"{{if eq .Page "decisions"}} aria-current="page"{{end}}>Decisions</a>
+          <a href="/admin/context"{{if eq .Page "context"}} aria-current="page"{{end}}>Context health</a>
+          <a href="/admin/directives"{{if eq .Page "directives"}} aria-current="page"{{end}}>Channel directives</a>
+          <a href="/admin/notes"{{if eq .Page "notes"}} aria-current="page"{{end}}>Learned notes</a>
+          <a href="/admin/memory"{{if eq .Page "memory"}} aria-current="page"{{end}}>Agent memory</a>
+        </div>
+        <div class="nav-group">
+          <div class="nav-group-label">Automation</div>
+          <a href="/admin/routines"{{if eq .Page "routines"}} aria-current="page"{{end}}>Scheduled routines</a>
+          <a href="/admin/triggers"{{if eq .Page "triggers"}} aria-current="page"{{end}}>Event triggers</a>
+        </div>
+        <div class="nav-group">
+          <div class="nav-group-label">Configuration</div>
+          <a href="/admin/routes"{{if eq .Page "routes"}} aria-current="page"{{end}}>Model routing</a>
+          <a href="/admin/marketplaces"{{if eq .Page "marketplaces"}} aria-current="page"{{end}}>Skills</a>
+          <a href="/admin/tools"{{if eq .Page "tools"}} aria-current="page"{{end}}>Tools</a>
+          <a href="/admin/keystore"{{if eq .Page "keystore"}} aria-current="page"{{end}}>Secrets</a>
+        </div>
+        <div class="nav-group">
+          <div class="nav-group-label">Diagnostics</div>
+          <a href="/admin/observations"{{if eq .Page "observations"}} aria-current="page"{{end}}>Message intake</a>
+          <a href="/admin/usage"{{if eq .Page "usage"}} aria-current="page"{{end}}>Usage &amp; latency</a>
+          <a href="/admin/audit"{{if eq .Page "audit"}} aria-current="page"{{end}}>Audit log</a>
+          <a href="/admin/retention"{{if eq .Page "retention"}} aria-current="page"{{end}}>Data retention</a>
+        </div>
+      </nav>
+    </aside>
+    <div class="main-column">
+      <div class="content">
+        <div class="page-head">
+          <div class="section-label">{{.Section}}</div>
+          <h1 class="route-title">{{.Title}}</h1>
+          <p>{{.Description}}</p>
+        </div>
+        <main>
     {{if eq .Page "overview"}}
-    <section><h2>Jobs</h2><div class="metric" id="jobs">—</div><span class="muted">durable work records</span></section>
-    <section><h2>Deliveries</h2><div class="metric" id="deliveries">—</div><span class="muted">stub delivery records</span></section>
-    <section><h2>Decisions</h2><div class="metric" id="decisions">—</div><span class="muted">gating receipts</span></section>
-    <section class="wide">
-      <h2>Inject deterministic Slack fixture</h2>
-      <form id="inject"><label for="payload">Normalized envelope JSON</label><textarea id="payload"></textarea><button type="submit">Inject fixture</button></form>
-      <pre id="result" aria-live="polite"></pre>
+    <section class="wide live-activity-panel">
+      <div class="activity-console-head">
+        <div>
+          <div class="activity-live-label"><span id="activityConnectionDot" class="activity-connection-dot" aria-hidden="true"></span><span id="activityConnection">Connecting live feed…</span></div>
+          <h2>Real-time control-plane activity</h2>
+          <p class="muted">A safe operational timeline. Public message excerpts and classifier results are visible; restricted content and Codex payloads remain redacted.</p>
+        </div>
+        <div class="activity-controls">
+          <label for="activityFilter"><span class="sr-only">Activity category</span><select id="activityFilter"><option value="">All activity</option><option value="classifier">Classifier</option><option value="codex">Codex</option><option value="slack">Slack</option><option value="agent">Agent work</option><option value="tool">Tools</option><option value="delivery">Delivery</option><option value="system">System</option></select></label>
+          <button type="button" id="pauseActivity" class="secondary-button">Pause</button>
+          <button type="button" id="clearActivity" class="secondary-button">Clear view</button>
+        </div>
+      </div>
+      <div class="activity-console-meta"><span id="activityCount">Waiting for activity</span><span>Newest first · SSE</span></div>
+      <div id="liveActivity" class="live-activity-feed" aria-live="polite"><div class="activity-empty">Connecting to the live event stream…</div></div>
     </section>
-    <section class="wide"><h2>Redacted status</h2><pre id="status">Loading…</pre></section>
-    <section class="wide"><h2>Model routes</h2><pre id="routes">Loading…</pre></section>
-    <section class="wide">
-      <h2>Route preview</h2>
-      <form id="preview"><label for="previewPayload">Route context JSON</label><textarea id="previewPayload"></textarea><button type="submit">Preview effective model</button></form>
-      <pre id="previewResult" aria-live="polite"></pre>
+    <div id="overviewMetrics" class="overview-metrics" aria-live="polite"></div>
+    <section class="wide attention-panel" id="attentionPanel"><div class="data-state">Checking for items that need attention…</div></section>
+    <section class="wide split-panel">
+      <div><div class="section-heading"><div><h2>Recent agent work</h2><p class="muted">The latest admitted jobs and their outcome.</p></div><a class="text-link" href="/admin/jobs">View all work</a></div><div id="recentJobs" class="activity-list"><div class="data-state">Loading…</div></div></div>
+      <div><div class="section-heading"><div><h2>Channel participation</h2><p class="muted">Where Tag can answer versus observe only.</p></div><a class="text-link" href="/admin/channels">Review coverage</a></div><div id="channelCoverage" class="compact-list"><div class="data-state">Loading…</div></div></div>
     </section>
-    <section class="wide"><h2>Retention reconciler</h2><pre id="retention">Loading…</pre></section>
+    <section class="wide"><div class="section-heading"><div><h2>Control-plane health</h2><p class="muted">Live configuration and lifecycle signals, summarized for operators.</p></div></div><div id="healthSummary" class="health-grid"><div class="data-state">Loading…</div></div></section>
+    <details class="wide developer-tools">
+      <summary>Developer and diagnostic tools</summary>
+      <div class="developer-tools-body">
+        <section class="wide"><h2>Inject deterministic Slack fixture</h2><form id="inject"><label for="payload">Normalized envelope JSON</label><textarea id="payload"></textarea><button type="submit">Inject fixture</button></form><pre id="result" aria-live="polite"></pre></section>
+        <section class="wide"><h2>Redacted status</h2><pre id="status">Loading…</pre></section>
+        <section class="wide"><h2>Model routes</h2><pre id="routes">Loading…</pre></section>
+        <section class="wide"><h2>Route preview</h2><form id="preview"><label for="previewPayload">Route context JSON</label><textarea id="previewPayload"></textarea><button type="submit">Preview effective model</button></form><pre id="previewResult" aria-live="polite"></pre></section>
+        <section class="wide"><h2>Retention reconciler</h2><pre id="retention">Loading…</pre></section>
+      </div>
+    </details>
     {{else if eq .Page "keystore"}}
     <section class="wide">
       <h2>Write-only keystore</h2>
       <p class="muted">Secret values are encrypted at rest, injected only into declared tool subprocess ENV, and never returned by this interface.</p>
       <form id="secretForm">
-        <label for="secretOrg">Organization ID</label><input id="secretOrg" required>
         <label for="secretName">ENV name</label><input id="secretName" placeholder="LINEAR_API_KEY" required>
         <label for="secretPurpose">Purpose</label><input id="secretPurpose" required>
         <label for="secretValue">Secret value</label><input id="secretValue" type="password" autocomplete="new-password" required>
         <button type="submit">Store secret reference</button>
       </form>
-      <pre id="pageData">Keystore is write-only. Enter an organization to store or refresh a reference.</pre>
+      <div id="pageData" class="data-view" aria-live="polite"><div class="data-state">Loading secret references…</div></div>
     </section>
     {{else}}
-    <section class="wide">
-      <h2>{{.Page}}</h2>
-      <p class="muted">Redacted management data from <code>{{.Endpoint}}</code>.</p>
-      <form id="queryForm">
-        <label for="queryOrg">Organization ID</label><input id="queryOrg" placeholder="org-local">
-        <label for="queryChannel">Channel ID (optional)</label><input id="queryChannel" placeholder="C012345">
-        <button type="submit">Load scoped records</button>
-      </form>
-      <pre id="pageData">Loading…</pre>
+    <section class="wide data-section">
+      <div class="section-heading"><div><h2>{{.Title}}</h2><p class="muted" id="viewGuidance">Loading organization data…</p></div><span class="record-count" id="recordCount"></span></div>
+      <div id="summaryCards" class="summary-cards" aria-live="polite"></div>
+      <div id="dataToolbar" class="data-toolbar" hidden>
+        <label class="search-control" for="dataSearch"><span class="sr-only">Search records</span><input id="dataSearch" type="search" placeholder="Search records"></label>
+        <label class="filter-control" for="dataFilter"><span class="sr-only">Filter records</span><select id="dataFilter"><option value="">All records</option></select></label>
+        <span class="data-meta" id="dataMeta"></span>
+      </div>
+      <div id="pageData" class="data-view" aria-live="polite"><div class="data-state">Loading…</div></div>
+      <div id="pagination" class="pagination" hidden><button type="button" id="previousPage">Previous</button><span id="pagePosition"></span><button type="button" id="nextPage">Next</button></div>
     </section>
-    <section class="wide" id="mutationSection">
-      <h2>Managed mutation</h2>
-      <p class="muted">Mutations are authenticated, CSRF protected, schema validated, tenant scoped, and audit-receipted. Use only an endpoint shown by the page template.</p>
-      <form id="mutationForm">
-        <label for="mutationPreset">Operation</label><select id="mutationPreset"></select>
-        <label for="mutationEndpoint">Endpoint</label><input id="mutationEndpoint" readonly>
-        <label for="mutationMethod">Method</label><input id="mutationMethod" readonly>
-        <label for="mutationPayload">JSON payload</label><textarea id="mutationPayload"></textarea>
-        <button type="submit">Apply mutation</button>
-      </form>
-      <pre id="mutationResult" aria-live="polite"></pre>
-    </section>
+    <dialog id="recordDialog" class="record-dialog"><div class="dialog-head"><div><div class="section-label">Record details</div><h2 id="recordDialogTitle">Details</h2></div><button type="button" id="closeRecordDialog" class="icon-button" aria-label="Close details">×</button></div><div id="recordDetails" class="detail-grid"></div></dialog>
     {{end}}
-  </main>
+        </main>
+      </div>
+      <footer class="chrome-footer"><span>TelemetryOS · tos-tag</span><span>Redacted management surface</span><span class="spacer">Local control plane</span></footer>
+    </div>
+  </div>
   <script>
-    const page = {{printf "%q" .Page}};
-    const endpoint = {{printf "%q" .Endpoint}};
-    if (page !== 'overview' && page !== 'keystore') {
-      const mutations = {
-        channels:[
-          {label:'Create/update organization',endpoint:'/admin/api/organizations',method:'PUT',payload:{public_id:'org-local',name:'Local organization',enrollment_mode:'allowlist',kill_switch:false,default_model_profile:'chatgpt-luna-max'}},
-          {label:'Create/update workspace',endpoint:'/admin/api/workspaces',method:'PUT',payload:{organization_id:'org-local',team_id:'team-local',name:'Local workspace',enabled:true}},
-          {label:'Create/update channel policy',endpoint:'/admin/api/channels',method:'PUT',payload:{organization_id:'org-local',team_id:'team-local',channel_id:'C012345',enrolled:true,restricted:false,participation_mode:'observe',kill_switch:false,cooldown:0,max_responses_per_hour:6,max_concurrent_jobs:1,default_model_profile:'chatgpt-luna-max',approver_user_ids:['U012345'],membership_revision:'manual/v1',membership_refreshed_at:new Date().toISOString()}}
-        ],
-        routes:[
-          {label:'Create/update model profile',endpoint:'/admin/api/routes/profiles?organization_id=org-local',method:'PUT',payload:{id:'chatgpt-luna-max',organization_id:'org-local',provider_id:'openai',model_id:'gpt-5.6-luna',variant:'max',required_capabilities:['structured'],allowed_data_classes:['internal'],max_input_tokens:200000,max_output_tokens:16000,enabled:true}},
-          {label:'Create/update route rule',endpoint:'/admin/api/routes/rules',method:'PUT',payload:{id:'product-route',organization_id:'org-local',workspace_id:'team-local',channel_id:'C012345',phase:'response',profile_id:'chatgpt-luna-max',priority:100,enabled:true}}
-        ],
-        directives:[{label:'Draft directive',endpoint:'/admin/api/directives',method:'POST',payload:{organization_id:'org-local',channel_id:'C012345',prompt:'Use concise incident-response language.',actor_id:'admin'}},{label:'Activate directive revision',endpoint:'/admin/api/directives/activate',method:'POST',payload:{organization_id:'org-local',channel_id:'C012345',revision_id:'directive-revision-id'}}],
-        notes:[{label:'Propose source-linked note',endpoint:'/admin/api/notes',method:'POST',payload:{organization_id:'org-local',channel_id:'C012345',text:'Reviewed channel note',source_ids:['C012345/100.001'],actor_id:'admin'}},{label:'Review note',endpoint:'/admin/api/notes/review',method:'POST',payload:{organization_id:'org-local',channel_id:'C012345',note_id:'note-id',reviewer_id:'human-admin',approve:true}}],
-        approvals:[{label:'Approve pending tool action',endpoint:'/admin/api/approvals/approve',method:'POST',payload:{organization_id:'org-local',approval_id:'approval-id',approver_id:'human-admin'}}],
-        routines:[{label:'Create/update routine',endpoint:'/admin/api/routines',method:'PUT',payload:{id:'daily-brief',organization_id:'org-local',workspace_id:'team-local',channel_id:'C012345',root_thread_ts:'',session_id:'session-id',generation:1,owner_id:'human-admin',input:'Prepare the daily channel brief.',interval_seconds:86400,next_run:new Date().toISOString(),enabled:true}}],
-        triggers:[{label:'Create/update classifier-gated heartbeat',endpoint:'/admin/api/trigger-subscriptions',method:'PUT',payload:{id:'channel-heartbeat',organization_id:'org-local',workspace_id:'team-local',channel_id:'C012345',root_thread_ts:'',session_id:'session-id',generation:1,owner_id:'human-admin',kind:'heartbeat',instruction:'Check whether the channel needs useful agent participation.',interval_seconds:300,next_run:new Date().toISOString(),classifier_gate:true,min_confidence:0.8,enabled:true}}]
-      };
-      async function loadScoped() {
-        const params = new URLSearchParams();
-        if (queryOrg.value) params.set('organization_id',queryOrg.value);
-        if (queryChannel.value) params.set('channel_id',queryChannel.value);
-        const suffix = params.toString() ? '?'+params.toString() : '';
-        const response = await fetch(endpoint+suffix);
-        pageData.textContent = JSON.stringify(await response.json(),null,2);
-      }
-      queryForm.addEventListener('submit',e=>{e.preventDefault();loadScoped().catch(x=>{pageData.textContent=String(x)})});
-      const choices = mutations[page];
-      if (!choices) {
-        mutationSection.hidden = true;
-      } else {
-        choices.forEach((choice,index)=>mutationPreset.add(new Option(choice.label,String(index))));
-        function selectMutation(){const mutation=choices[Number(mutationPreset.value||0)];mutationEndpoint.value=mutation.endpoint;mutationMethod.value=mutation.method;mutationPayload.value=JSON.stringify(mutation.payload,null,2)}
-        mutationPreset.addEventListener('change',selectMutation); selectMutation();
-        mutationForm.addEventListener('submit',async e=>{e.preventDefault();const c=await(await fetch('/admin/api/csrf')).json();const response=await fetch(mutationEndpoint.value,{method:mutationMethod.value,headers:{'content-type':'application/json','x-tos-tag-csrf':c.token},body:mutationPayload.value});mutationResult.textContent=JSON.stringify(await response.json(),null,2);if(response.ok)await loadScoped()});
-      }
-      if (['marketplaces','tools','retention'].includes(page)) loadScoped().catch(x=>{pageData.textContent=String(x)}); else pageData.textContent='Enter an organization ID to load tenant-scoped records.';
+    const page = {{.Page}};
+    const endpoint = {{.Endpoint}};
+    const organizationSelector = document.getElementById('organizationSelector');
+    const overviewStatus = document.getElementById('status');
+    const hiddenTableColumns = new Set(['organization_id', 'workspace_id', 'team_id']);
+    const tableState = {rows: [], filtered: [], page: 1, pageSize: 20, columns: []};
+    let channelNames = new Map();
+
+    const pageViews = {
+      channels: {
+        guidance: 'Search by channel name, then filter by participation mode. Open details for limits and membership metadata.',
+        search: 'Find a channel…', filter: {key: 'participation_mode', label: 'mode'},
+        columns: ['name', {key:'participation_mode', label:'Mode'}, {key:'bot_is_member', label:'Tag joined'}, 'restricted', 'kill_switch', 'membership_refreshed_at'],
+        summaries: rows => [
+          {label:'Known channels', value:rows.length, detail:'Visible to the installed Slack app'},
+          {label:'Can participate', value:rows.filter(row => ['assist','proactive'].includes(row.participation_mode) && row.enrolled && !row.kill_switch && (!row.participation_managed_by_membership || row.bot_is_member)).length, detail:'Joined assist/proactive channels passing safeguards'},
+          {label:'Observe only', value:rows.filter(row => row.participation_mode === 'observe').length, detail:'Context only; no messages or reactions'},
+          {label:'Restricted', value:rows.filter(row => row.restricted).length, detail:'Private channels, DMs, and group DMs'}
+        ]
+      },
+      jobs: {
+        guidance: 'Focus on outcome and timing. Use details for correlation IDs, routing traces, and retry evidence.',
+        search: 'Find work by channel, state, or model…', filter: {key: 'state', label: 'status'},
+        columns: ['state', 'kind', {key:'channel_id', label:'Channel'}, {key:'resolved_model', label:'Model'}, 'attempt', 'created_at', 'updated_at', 'failure_reason'],
+        summaries: rows => [
+          {label:'In progress', value:rows.filter(row => ['queued','leased','running'].includes(row.state)).length, detail:'Queued or actively executing'},
+          {label:'Succeeded', value:rows.filter(row => row.state === 'succeeded').length, detail:'Completed in this result window'},
+          {label:'Needs attention', value:rows.filter(row => ['failed','dead','cancelled'].includes(row.state)).length, detail:'Failed, exhausted, or cancelled', tone:'attention'},
+          {label:'Retried', value:rows.filter(row => Number(row.attempt) > 1).length, detail:'Required more than one attempt'}
+        ]
+      },
+      decisions: {
+        guidance: 'Review the effective outcome first; open details to compare the raw prediction, policy override, and evidence.',
+        search: 'Find decisions by outcome, reaction, or model…', filter: {key: 'result.effective.outcome', label: 'outcome'},
+        columns: ['created_at', {key:'result.effective.outcome', label:'Outcome'}, {key:'result.effective.confidence', label:'Confidence'}, {key:'result.effective.reaction', label:'Reaction'}, {key:'result.effective.agent_model_profile', label:'Agent model'}, {key:'result.shadowed', label:'Shadowed'}],
+        summaries: rows => [
+          {label:'Answered', value:rows.filter(row => ['reply_in_channel','reply_in_thread'].includes(valueAt(row,'result.effective.outcome'))).length, detail:'Channel and thread responses'},
+          {label:'Stayed quiet', value:rows.filter(row => valueAt(row,'result.effective.outcome') === 'silent').length, detail:'Relevant context retained without interruption'},
+          {label:'Threaded', value:rows.filter(row => valueAt(row,'result.effective.outcome') === 'reply_in_thread').length, detail:'Deeper or continuing work'},
+          {label:'Full agent', value:rows.filter(row => valueAt(row,'result.effective.requires_full_agent') === true).length, detail:'Admitted to the agent harness'}
+        ]
+      },
+      observations: {
+        guidance: 'Use this diagnostic view to confirm that Slack events were normalized, scoped, and considered exactly once.',
+        search: 'Find intake events by channel or event type…', filter: {key: 'decision_state', label: 'processing state'},
+        columns: ['received_at', {key:'channel_id', label:'Channel'}, 'event_type', 'is_mention', 'restricted', 'decision_state', 'output_produced'],
+        summaries: rows => [
+          {label:'Received', value:rows.length, detail:'Recent normalized events'},
+          {label:'Mentions', value:rows.filter(row => row.is_mention).length, detail:'Direct participation triggers'},
+          {label:'Private scope', value:rows.filter(row => row.restricted).length, detail:'Destination-local context only'},
+          {label:'Produced output', value:rows.filter(row => row.output_produced).length, detail:'Reaction or message delivered'}
+        ]
+      },
+      context: {
+        guidance: 'Each row is a bounded, immutable context pack. Source count indicates breadth without exposing message content.',
+        search: 'Find a context pack…',
+        columns: ['created_at', 'expires_at', 'source_count', 'revision', 'target_observation_id'],
+        summaries: rows => [
+          {label:'Context packs', value:rows.length, detail:'Recent immutable reasoning inputs'},
+          {label:'Average sources', value:rows.length ? Math.round(rows.reduce((sum,row) => sum + Number(row.source_count || 0), 0) / rows.length) : 0, detail:'Messages represented per context pack'},
+          {label:'Expiring soon', value:rows.filter(row => { const hours = hoursUntil(row.expires_at); return hours >= 0 && hours <= 4; }).length, detail:'Expires within four hours'},
+          {label:'Latest revision', value:Math.max(0, ...rows.map(row => Number(row.revision || 0))), detail:'Context schema revision'}
+        ]
+      },
+      approvals: {
+        guidance: 'Pending write actions appear here after Slack-native approval is requested. Resolved requests remain available as evidence.',
+        search: 'Find an approval…', filter: {key: 'status', label: 'status'},
+        columns: ['status', 'action', 'risk', 'requested_at', 'expires_at', 'resolved_at'],
+        summaries: rows => [
+          {label:'Pending', value:rows.filter(row => ['pending','requested'].includes(row.status)).length, detail:'Waiting for a human decision', tone:'attention'},
+          {label:'Approved', value:rows.filter(row => row.status === 'approved').length, detail:'Authorized exact actions'},
+          {label:'Denied', value:rows.filter(row => row.status === 'denied').length, detail:'Rejected requests'},
+          {label:'Expired', value:rows.filter(row => row.status === 'expired').length, detail:'No longer actionable'}
+        ]
+      },
+      routines: {guidance:'Recurring work is classifier-gated before any output. Open details for instructions, confidence, and schedule.', search:'Find a routine…', filter:{key:'enabled',label:'state'}, columns:['id','enabled','kind','interval_seconds','next_run','min_confidence']},
+      triggers: {guidance:'Event subscriptions connect a bounded event pattern to reviewed agent work.', search:'Find a trigger…', filter:{key:'enabled',label:'state'}, columns:['id','enabled','event_type','channel_id','kind','created_at']},
+      directives: {guidance:'Directives are channel-specific instructions assembled into both classifier and worker context.', search:'Find a directive…', filter:{key:'state',label:'state'}, columns:['channel_id','state','revision_id','created_at','activated_at','actor_id']},
+      notes: {guidance:'Learned notes stay local to their channel and require review before becoming active context.', search:'Find a learned note…', filter:{key:'state',label:'state'}, columns:['channel_id','state','text','created_at','reviewed_at']},
+      memory: {
+        guidance:'Source-linked summaries are generated asynchronously by Luna. Open a record to correct, pin, or forget it.', search:'Find remembered context…', filter:{key:'status',label:'status'},
+        columns:['updated_at',{key:'channel_id',label:'Channel'},'scope','status','pinned','confidence','text'],
+        summaries: rows => [
+          {label:'Active memories', value:rows.filter(row => row.status === 'active' && (row.origin === 'operator' || (row.facts || []).length > 0)).length, detail:'Eligible for privacy-scoped recall'},
+          {label:'Pinned', value:rows.filter(row => row.pinned).length, detail:'Retained until explicitly changed'},
+          {label:'Private scope', value:rows.filter(row => row.restricted).length, detail:'Recalled only in the source channel'},
+          {label:'Forgotten', value:rows.filter(row => row.status === 'forgotten').length, detail:'Content erased; source hash tombstone retained'}
+        ]
+      },
+      routes: {guidance:'Profiles describe available model strength. Open details for token limits, capabilities, and policy metadata.', search:'Find a model profile…', filter:{key:'enabled',label:'state'}, columns:['id','model_id','variant','enabled','max_input_tokens','max_output_tokens']},
+      marketplaces: {guidance:'Validated skill snapshots are injected read-only into every admitted worker.', search:'Find a skill package…', columns:['name','version','hash','marketplace_id']},
+      tools: {guidance:'Reviewed tools expose bounded operations—not arbitrary shell access. Open details for scope and integrity metadata.', search:'Find a reviewed tool…', columns:['name','version','hash','marketplace_id']},
+      usage: {guidance:'Filter by activity type to compare classifier, model, tool, worker, reaction, and delivery costs.', search:'Find usage by job, model, or category…', filter:{key:'category',label:'category'}, columns:['created_at','category','calls','job_id','duration_ms','input_tokens','output_tokens','model_id']},
+      audit: {guidance:'Receipts are ordered and hash-linked. Open details for resource metadata without exposing secrets or message content.', search:'Find an audit event…', filter:{key:'type',label:'event type'}, columns:['created_at','type','resource_id','sequence','retention_epoch']},
+      retention: {guidance:'Retention operates on stored source and derived records. This page reports lifecycle progress, not retained content.', columns:['last_started_at','last_finished_at','sweeps','deleted_sources','deleted_derived']}
+    };
+
+    function currentOrganization() { return organizationSelector.value || ''; }
+    function humanize(key) { return String(key).replaceAll('_', ' '); }
+    function valueAt(record, key) { return String(key).split('.').reduce((value, part) => value == null ? undefined : value[part], record); }
+    function hoursUntil(value) { const time = Date.parse(value); return Number.isFinite(time) ? (time - Date.now()) / 3600000 : Infinity; }
+    function relativeTime(value) {
+      const time = Date.parse(value);
+      if (!Number.isFinite(time)) return String(value);
+      const seconds = Math.round((time - Date.now()) / 1000);
+      const ranges = [[31536000,'year'],[2592000,'month'],[86400,'day'],[3600,'hour'],[60,'minute']];
+      const formatter = new Intl.RelativeTimeFormat(undefined, {numeric:'auto'});
+      for (const [size, unit] of ranges) if (Math.abs(seconds) >= size) return formatter.format(Math.round(seconds / size), unit);
+      return formatter.format(seconds, 'second');
     }
-    if (page === 'keystore') {
-      secretForm.addEventListener('submit', async e => {
-        e.preventDefault();
-        const csrf = await (await fetch('/admin/api/csrf')).json();
-        const body = {organization_id:secretOrg.value,name:secretName.value,purpose:secretPurpose.value,value:secretValue.value};
-        const response = await fetch('/admin/api/keystore',{method:'PUT',headers:{'content-type':'application/json','x-tos-tag-csrf':csrf.token},body:JSON.stringify(body)});
-        secretValue.value = '';
-        const stored = await response.json();
-        const refs = response.ok ? await (await fetch('/admin/api/keystore?organization_id='+encodeURIComponent(secretOrg.value))).json() : stored;
-        pageData.textContent = JSON.stringify(refs, null, 2);
+    function normalizedColumn(column) { return typeof column === 'string' ? {key:column, label:humanize(column)} : column; }
+    function toneFor(value) {
+      const normalized = String(value ?? '').toLowerCase();
+      if (['succeeded','approved','assist','proactive','active','enabled','reply_in_channel','reply_in_thread','react'].includes(normalized)) return 'good';
+      if (['queued','leased','running','pending','requested','observe','shadow'].includes(normalized)) return 'warn';
+      if (['failed','dead','cancelled','denied','expired','disabled'].includes(normalized)) return 'bad';
+      return 'info';
+    }
+    function stateMessage(container, message) {
+      container.replaceChildren();
+      const state = document.createElement('div');
+      state.className = 'data-state';
+      state.textContent = message;
+      container.append(state);
+    }
+    function cellValue(value, key = '') {
+      if (key === 'name' && (value === null || value === undefined || value === '')) return document.createTextNode('Unnamed conversation');
+      if (value === null || value === undefined || value === '') return document.createTextNode('—');
+      if (typeof value === 'boolean') {
+        const span = document.createElement('span');
+        span.className = value ? 'value-true' : 'value-false';
+        span.textContent = value ? 'Yes' : 'No';
+        return span;
+      }
+      if (key === 'channel_id' && channelNames.has(String(value))) return document.createTextNode('#' + channelNames.get(String(value)));
+      if (key === 'cooldown' && Number.isFinite(Number(value))) return document.createTextNode(Math.round(Number(value) / 1e9) + ' sec');
+      if (key.endsWith('_at') || key === 'received_at' || key === 'created_at' || key === 'updated_at' || key === 'next_run') {
+        const time = document.createElement('time');
+        time.dateTime = String(value);
+        time.title = String(value);
+        time.textContent = relativeTime(value);
+        return time;
+      }
+      if (typeof value === 'string' && ['state','status','outcome','participation_mode','category'].some(part => key.endsWith(part))) {
+        const pill = document.createElement('span');
+        pill.className = 'pill ' + toneFor(value);
+        pill.textContent = humanize(value);
+        return pill;
+      }
+      if (key === 'resolved_model' && typeof value === 'object') return document.createTextNode(value.profile_id || value.model_id || 'Resolved');
+      if (typeof value === 'number' && key.includes('confidence')) return document.createTextNode(Math.round(value * 100) + '%');
+      if (typeof value === 'object') {
+        const code = document.createElement('code');
+        code.textContent = JSON.stringify(value, null, 2);
+        return code;
+      }
+      if (key.endsWith('_id') || key === 'id') {
+        const code = document.createElement('code');
+        code.textContent = String(value);
+        return code;
+      }
+      return document.createTextNode(String(value));
+    }
+    function renderSummaryCards(rows, config) {
+      if (typeof summaryCards === 'undefined') return;
+      summaryCards.replaceChildren();
+      const summaries = config.summaries ? config.summaries(rows) : [{label:'Records', value:rows.length, detail:'Available in the current result window'}];
+      for (const summary of summaries) {
+        const card = document.createElement('div');
+        card.className = 'insight-card' + (summary.tone ? ' ' + summary.tone : '');
+        const label = document.createElement('div'); label.className = 'label'; label.textContent = summary.label;
+        const value = document.createElement('div'); value.className = 'value'; value.textContent = String(summary.value);
+        const detail = document.createElement('div'); detail.className = 'detail'; detail.textContent = summary.detail || '';
+        card.append(label, value, detail); summaryCards.append(card);
+      }
+    }
+    function renderSimpleData(container, value) {
+      const rows = Array.isArray(value) ? value : [value];
+      if (!rows.length) return stateMessage(container, 'No secret references are configured.');
+      const columns = [...new Set(rows.flatMap(row => Object.keys(row)))].filter(column => !hiddenTableColumns.has(column) && !['value','ciphertext'].includes(column));
+      const table = document.createElement('table'); table.className = 'data-table';
+      const head = table.createTHead().insertRow();
+      for (const column of columns) { const th = document.createElement('th'); th.scope = 'col'; th.textContent = humanize(column); head.append(th); }
+      const body = table.createTBody();
+      for (const row of rows) { const tr = body.insertRow(); for (const column of columns) tr.insertCell().append(cellValue(row[column], column)); }
+      container.replaceChildren(table);
+    }
+    function openRecordDetails(row) {
+      recordDialogTitle.textContent = row.name || row.id || row.public_id || humanize(page) + ' record';
+      recordDetails.replaceChildren();
+      for (const key of Object.keys(row).filter(key => !hiddenTableColumns.has(key))) {
+        const term = document.createElement('dt'); term.textContent = humanize(key);
+        const detail = document.createElement('dd'); detail.append(cellValue(row[key], key));
+        recordDetails.append(term, detail);
+      }
+      if (page === 'memory' && row.id) {
+        const term = document.createElement('dt'); term.textContent = 'memory controls';
+        const controls = document.createElement('dd'); controls.className = 'dialog-actions';
+        const correct = document.createElement('button'); correct.type = 'button'; correct.className = 'secondary-button'; correct.textContent = 'Correct';
+        correct.disabled = row.status === 'forgotten';
+        correct.addEventListener('click', async () => {
+          const text = window.prompt('Correct the durable memory text:', row.text || '');
+          if (text === null || !text.trim()) return;
+          await mutateMemory('/admin/api/memory/correct', {record_id:row.id, text:text.trim()});
+        });
+        const pin = document.createElement('button'); pin.type = 'button'; pin.className = 'secondary-button'; pin.textContent = row.pinned ? 'Unpin' : 'Pin';
+        pin.disabled = row.status === 'forgotten';
+        pin.addEventListener('click', () => mutateMemory('/admin/api/memory/pin', {record_id:row.id, pinned:!row.pinned}));
+        const forget = document.createElement('button'); forget.type = 'button'; forget.className = 'secondary-button'; forget.textContent = 'Forget';
+        forget.disabled = row.status === 'forgotten';
+        forget.addEventListener('click', () => { if (window.confirm('Forget this memory? Its text, facts, and source references will be erased.')) mutateMemory('/admin/api/memory/forget', {record_id:row.id}); });
+        controls.append(correct, pin, forget); recordDetails.append(term, controls);
+      }
+      recordDialog.showModal();
+    }
+    async function mutateMemory(url, values) {
+      try {
+        const csrf = await fetchJSON('/admin/api/csrf');
+        await fetchJSON(url, {method:'POST', headers:{'content-type':'application/json','x-tos-tag-csrf':csrf.token}, body:JSON.stringify({organization_id:currentOrganization(), actor_id:'admin', ...values})});
+        recordDialog.close();
+        window.dispatchEvent(new CustomEvent('organizationchange'));
+      } catch (error) {
+        window.alert(error.message);
+      }
+    }
+    function applyTableFilters() {
+      const config = pageViews[page] || {};
+      const query = (dataSearch?.value || '').trim().toLowerCase();
+      const selected = dataFilter?.value || '';
+      tableState.filtered = tableState.rows.filter(row => {
+        if (query && !JSON.stringify(row).toLowerCase().includes(query) && !(row.channel_id && String(channelNames.get(String(row.channel_id)) || '').toLowerCase().includes(query))) return false;
+        return !selected || String(valueAt(row, config.filter?.key)) === selected;
+      });
+      tableState.page = 1;
+      renderTablePage();
+    }
+    function renderTablePage() {
+      pageData.replaceChildren();
+      const total = tableState.filtered.length;
+      const pageCount = Math.max(1, Math.ceil(total / tableState.pageSize));
+      tableState.page = Math.min(tableState.page, pageCount);
+      const start = (tableState.page - 1) * tableState.pageSize;
+      const rows = tableState.filtered.slice(start, start + tableState.pageSize);
+      dataMeta.textContent = total ? `${start + 1}–${Math.min(start + rows.length, total)} of ${total}` : '0 records';
+      if (!rows.length) {
+        stateMessage(pageData, tableState.rows.length ? 'No records match these filters.' : (pageViews[page]?.empty || 'Nothing needs attention here yet.'));
+      } else {
+        const table = document.createElement('table'); table.className = 'data-table page-' + page;
+        const head = table.createTHead().insertRow();
+        for (const column of tableState.columns) { const th = document.createElement('th'); th.scope = 'col'; th.textContent = column.label; head.append(th); }
+        const detailHead = document.createElement('th'); detailHead.scope = 'col'; detailHead.className = 'detail-column'; detailHead.textContent = 'Details'; head.append(detailHead);
+        const body = table.createTBody();
+        for (const row of rows) {
+          const tr = body.insertRow();
+          for (const column of tableState.columns) tr.insertCell().append(cellValue(valueAt(row, column.key), column.key));
+          const actionCell = tr.insertCell(); actionCell.className = 'detail-column';
+          const action = document.createElement('button'); action.type = 'button'; action.className = 'row-action'; action.textContent = 'Open'; action.addEventListener('click', () => openRecordDetails(row)); actionCell.append(action);
+        }
+        pageData.append(table);
+      }
+      pagination.hidden = total <= tableState.pageSize;
+      pagePosition.textContent = `Page ${tableState.page} of ${pageCount}`;
+      previousPage.disabled = tableState.page <= 1;
+      nextPage.disabled = tableState.page >= pageCount;
+    }
+    function renderData(container, value) {
+      if (page === 'keystore') return renderSimpleData(container, value);
+      const config = pageViews[page] || {};
+      const normalized = page === 'routes' && Array.isArray(value?.profiles) ? value.profiles : value;
+      let rows = Array.isArray(normalized) ? [...normalized] : [normalized];
+      if (page === 'channels') rows.sort((left, right) => {
+        const participation = Number(['assist','proactive'].includes(right.participation_mode)) - Number(['assist','proactive'].includes(left.participation_mode));
+        return participation || String(left.name || '').localeCompare(String(right.name || ''));
+      });
+      if (!rows.length) {
+        tableState.rows = []; tableState.filtered = []; tableState.page = 1; tableState.columns = [];
+        viewGuidance.textContent = config.guidance || 'This area is ready when the first record is created.';
+        recordCount.textContent = '0 records'; dataToolbar.hidden = true; pagination.hidden = true;
+        renderSummaryCards([], config);
+        stateMessage(container, config.empty || 'Nothing needs attention here yet.');
+        return;
+      }
+      if (!rows.length || rows.some(row => row === null || typeof row !== 'object' || Array.isArray(row))) {
+        stateMessage(container, JSON.stringify(value));
+        return;
+      }
+      const available = new Set(rows.flatMap(row => Object.keys(row)));
+      const configured = (config.columns || []).map(normalizedColumn);
+      const columns = configured.length ? configured.filter(column => column.key.includes('.') || available.has(column.key)) : [...available].filter(column => !hiddenTableColumns.has(column)).slice(0, 8).map(normalizedColumn);
+      if (!columns.length) {
+        stateMessage(container, 'No data available.');
+        return;
+      }
+      tableState.rows = rows; tableState.filtered = rows; tableState.page = 1; tableState.columns = columns;
+      viewGuidance.textContent = config.guidance || 'Search recent records and open a row for complete redacted details.';
+      recordCount.textContent = rows.length === 1 ? '1 record' : `${rows.length} records`;
+      dataToolbar.hidden = false; dataSearch.placeholder = config.search || 'Search records…'; dataSearch.value = '';
+      dataFilter.replaceChildren(new Option(config.filter ? (config.filter.allLabel || `All ${config.filter.label}${String(config.filter.label).endsWith('s') ? 'es' : 's'}`) : 'All records', ''));
+      if (config.filter) for (const option of [...new Set(rows.map(row => valueAt(row, config.filter.key)).filter(value => value !== undefined && value !== null))].sort()) dataFilter.add(new Option(humanize(option), String(option)));
+      dataFilter.parentElement.hidden = !config.filter;
+      renderSummaryCards(rows, config); renderTablePage();
+      if (!dataSearch.dataset.bound) {
+        dataSearch.addEventListener('input', applyTableFilters); dataFilter.addEventListener('change', applyTableFilters);
+        previousPage.addEventListener('click', () => { if (tableState.page > 1) { tableState.page--; renderTablePage(); } });
+        nextPage.addEventListener('click', () => { if (tableState.page * tableState.pageSize < tableState.filtered.length) { tableState.page++; renderTablePage(); } });
+        closeRecordDialog.addEventListener('click', () => recordDialog.close());
+        dataSearch.dataset.bound = 'true';
+      }
+    }
+    async function fetchJSON(url, options) {
+      const response = await fetch(url, options);
+      const body = await response.text();
+      let value;
+      try {
+        value = JSON.parse(body);
+      } catch (error) {
+        throw new Error(`Invalid server response: ${error.message}`);
+      }
+      if (!response.ok) throw new Error(value.error || `Request failed (${response.status})`);
+      return value;
+    }
+    function preserveOrganizationInNavigation(organizationID) {
+      const currentURL = new URL(window.location.href);
+      currentURL.searchParams.set('organization_id', organizationID);
+      history.replaceState(null, '', currentURL);
+      document.querySelectorAll('a[href^="/admin"]').forEach(link => {
+        const target = new URL(link.getAttribute('href'), window.location.origin);
+        target.searchParams.set('organization_id', organizationID);
+        link.setAttribute('href', target.pathname + target.search);
       });
     }
+    async function initializeOrganizations() {
+      const organizations = await fetchJSON('/admin/api/organizations');
+      organizationSelector.replaceChildren();
+      if (!organizations.length) {
+        organizationSelector.add(new Option('No organizations', ''));
+        organizationSelector.disabled = true;
+        return;
+      }
+      for (const organization of organizations) {
+        const option = new Option(organization.name || organization.id, organization.id);
+        option.title = organization.id;
+        organizationSelector.add(option);
+      }
+      const requested = new URLSearchParams(window.location.search).get('organization_id');
+      organizationSelector.value = organizations.some(org => org.id === requested) ? requested : organizations[0].id;
+      preserveOrganizationInNavigation(currentOrganization());
+      organizationSelector.addEventListener('change', () => {
+        preserveOrganizationInNavigation(currentOrganization());
+        window.dispatchEvent(new CustomEvent('organizationchange'));
+      });
+      window.dispatchEvent(new CustomEvent('organizationchange'));
+    }
+
+    if (page !== 'overview' && page !== 'keystore') {
+      async function loadScoped() {
+        const organizationID = currentOrganization();
+        if (!organizationID) return stateMessage(pageData, 'No organization selected.');
+        stateMessage(pageData, 'Loading…');
+        try {
+          const url = new URL(endpoint, window.location.origin);
+          url.searchParams.set('organization_id', organizationID);
+          if (['jobs', 'observations', 'memory'].includes(page)) {
+            const [records, channels] = await Promise.all([
+              fetchJSON(url.pathname + url.search),
+              fetchJSON('/admin/api/channels?organization_id=' + encodeURIComponent(organizationID))
+            ]);
+            channelNames = new Map(channels.filter(channel => channel.name).map(channel => [String(channel.channel_id), channel.name]));
+            renderData(pageData, records);
+          } else {
+            renderData(pageData, await fetchJSON(url.pathname + url.search));
+          }
+        } catch (error) {
+          stateMessage(pageData, error.message);
+        }
+      }
+      window.addEventListener('organizationchange', loadScoped);
+    }
+
+    if (page === 'keystore') {
+      async function loadSecrets() {
+        const organizationID = currentOrganization();
+        if (!organizationID) return stateMessage(pageData, 'No organization selected.');
+        try {
+          renderData(pageData, await fetchJSON('/admin/api/keystore?organization_id=' + encodeURIComponent(organizationID)));
+        } catch (error) {
+          stateMessage(pageData, error.message);
+        }
+      }
+      window.addEventListener('organizationchange', loadSecrets);
+      secretForm.addEventListener('submit', async event => {
+        event.preventDefault();
+        const csrf = await fetchJSON('/admin/api/csrf');
+        const body = {organization_id: currentOrganization(), name: secretName.value, purpose: secretPurpose.value, value: secretValue.value};
+        try {
+          await fetchJSON('/admin/api/keystore', {method:'PUT', headers:{'content-type':'application/json','x-tos-tag-csrf':csrf.token}, body:JSON.stringify(body)});
+          secretValue.value = '';
+          await loadSecrets();
+        } catch (error) {
+          stateMessage(pageData, error.message);
+        }
+      });
+    }
+
     if (page === 'overview') {
-    const sample = {organization_id:"org-local", envelope_id:"env-demo", event_id:"event-demo", team_id:"team-local", channel_id:"product", message_ts:"100.001", user_id:"user-local", kind:"message", text:"<@tos-tag> hello from the stub", event_time:new Date().toISOString(), received_at:new Date().toISOString(), is_mention:true};
-    payload.value = JSON.stringify(sample, null, 2);
-    previewPayload.value = JSON.stringify({route:{organization_id:"org-local",workspace_id:"team-local",channel_id:"product",phase:"response",data_classes:["internal"],capabilities:["structured"],input_tokens:1000},constraints:{}},null,2);
-    async function load() {
-      const r = await fetch('/admin/api/status'); const x = await r.json();
-      status.textContent = JSON.stringify(x, null, 2); jobs.textContent=x.counts.jobs; deliveries.textContent=x.counts.deliveries; decisions.textContent=x.counts.decisions;
-      routes.textContent=JSON.stringify(await (await fetch('/admin/api/routes')).json(),null,2);
-      retention.textContent=JSON.stringify(await (await fetch('/admin/api/retention')).json(),null,2);
+      let activitySource = null;
+      let activityRecords = [];
+      let activityPaused = false;
+      let overviewRefreshTimer = null;
+      const seenActivityIDs = new Set();
+
+      function activityTimestamp(value) {
+        const time = new Date(value);
+        if (Number.isNaN(time.getTime())) return 'now';
+        return new Intl.DateTimeFormat(undefined, {hour:'2-digit', minute:'2-digit', second:'2-digit'}).format(time);
+      }
+      function activityDetailValue(value) {
+        if (Array.isArray(value)) return value.join(', ');
+        if (value && typeof value === 'object') return JSON.stringify(value);
+        if (typeof value === 'number' && value >= 0 && value <= 1) return Math.round(value * 100) + '%';
+        return String(value);
+      }
+      function renderActivityFeed() {
+        if (activityPaused) return;
+        const selected = activityFilter.value;
+        const records = selected ? activityRecords.filter(record => record.category === selected) : activityRecords;
+        liveActivity.replaceChildren();
+        activityCount.textContent = `${records.length} visible event${records.length === 1 ? '' : 's'}`;
+        if (!records.length) {
+          const empty = document.createElement('div'); empty.className = 'activity-empty';
+          empty.textContent = selected ? `No ${humanize(selected)} activity in the current window.` : 'No runtime activity has been observed yet.';
+          liveActivity.append(empty); return;
+        }
+        for (const record of records.slice(0, 200)) {
+          const row = document.createElement('article');
+          row.className = `activity-event category-${record.category || 'system'} level-${record.level || 'info'}`;
+          const time = document.createElement('time'); time.className = 'activity-time'; time.dateTime = record.occurred_at || ''; time.textContent = activityTimestamp(record.occurred_at);
+          const rail = document.createElement('div'); rail.className = 'activity-rail'; const marker = document.createElement('span'); marker.className = 'activity-marker'; rail.append(marker);
+          const body = document.createElement('div'); body.className = 'activity-event-body';
+          const top = document.createElement('div'); top.className = 'activity-event-topline';
+          const category = document.createElement('span'); category.className = 'activity-category'; category.textContent = humanize(record.category || 'system');
+          const title = document.createElement('span'); title.className = 'activity-event-title'; title.textContent = record.title || humanize(record.kind || 'activity');
+          top.append(category, title); body.append(top);
+          if (record.summary) { const summary = document.createElement('div'); summary.className = 'activity-event-summary'; summary.textContent = record.summary; body.append(summary); }
+          if (record.message) { const message = document.createElement('blockquote'); message.className = 'activity-message'; message.textContent = record.message; body.append(message); }
+          const detailsValue = record.details && typeof record.details === 'object' ? {...record.details} : {};
+          if (detailsValue.channel_id && channelNames.has(String(detailsValue.channel_id))) detailsValue.channel = '#' + channelNames.get(String(detailsValue.channel_id));
+          const entries = Object.entries(detailsValue).filter(([, value]) => value !== '' && value !== null && value !== undefined);
+          if (entries.length) {
+            const details = document.createElement('details'); details.className = 'activity-details';
+            const disclosure = document.createElement('summary'); disclosure.textContent = 'Correlation and result details'; details.append(disclosure);
+            const list = document.createElement('dl');
+            for (const [key, value] of entries) { const term = document.createElement('dt'); term.textContent = humanize(key); const description = document.createElement('dd'); description.textContent = activityDetailValue(value); list.append(term, description); }
+            details.append(list); body.append(details);
+          }
+          row.append(time, rail, body); liveActivity.append(row);
+        }
+      }
+      function acceptActivity(record) {
+        if (!record || !record.id || seenActivityIDs.has(record.id)) return;
+        seenActivityIDs.add(record.id);
+        activityRecords.unshift(record);
+        if (activityRecords.length > 200) {
+          const removed = activityRecords.splice(200);
+          for (const item of removed) seenActivityIDs.delete(item.id);
+        }
+        renderActivityFeed();
+      }
+      function setActivityConnection(label, state) {
+        activityConnection.textContent = label;
+        activityConnectionDot.className = 'activity-connection-dot' + (state ? ' ' + state : '');
+      }
+      function scheduleOverviewRefresh() {
+        clearTimeout(overviewRefreshTimer);
+        overviewRefreshTimer = setTimeout(loadOverview, 250);
+      }
+      function openActivityStream() {
+        if (activitySource) activitySource.close();
+        activityRecords = []; seenActivityIDs.clear(); renderActivityFeed();
+        const organizationID = currentOrganization();
+        if (!organizationID) return setActivityConnection('No organization selected', '');
+        setActivityConnection('Connecting live feed…', 'reconnecting');
+        activitySource = new EventSource('/admin/events?organization_id=' + encodeURIComponent(organizationID));
+        activitySource.addEventListener('ready', () => setActivityConnection('Live · connected', 'connected'));
+        activitySource.addEventListener('activity', event => {
+          try { acceptActivity(JSON.parse(event.data)); } catch (_) { setActivityConnection('Live feed returned invalid data', 'reconnecting'); }
+        });
+        activitySource.addEventListener('refresh', scheduleOverviewRefresh);
+        activitySource.onopen = () => setActivityConnection('Live · connected', 'connected');
+        activitySource.onerror = () => setActivityConnection('Reconnecting…', 'reconnecting');
+      }
+      activityFilter.addEventListener('change', renderActivityFeed);
+      pauseActivity.addEventListener('click', () => {
+        activityPaused = !activityPaused;
+        pauseActivity.classList.toggle('active', activityPaused);
+        pauseActivity.textContent = activityPaused ? 'Resume' : 'Pause';
+        activityCount.textContent = activityPaused ? `Paused · ${activityRecords.length} buffered events` : activityCount.textContent;
+        if (!activityPaused) renderActivityFeed();
+      });
+      clearActivity.addEventListener('click', () => { activityRecords = []; seenActivityIDs.clear(); renderActivityFeed(); });
+
+      function updateOverviewScope() {
+        const organizationID = currentOrganization() || 'org-local';
+        const sample = {organization_id:organizationID, envelope_id:'env-demo', event_id:'event-demo', team_id:'team-local', channel_id:'product', message_ts:'100.001', user_id:'user-local', kind:'message', text:'<@tos-tag> hello from the stub', event_time:new Date().toISOString(), received_at:new Date().toISOString(), is_mention:true};
+        payload.value = JSON.stringify(sample, null, 2);
+        previewPayload.value = JSON.stringify({route:{organization_id:organizationID,workspace_id:'team-local',channel_id:'product',phase:'response',data_classes:['internal'],capabilities:['structured'],input_tokens:1000},constraints:{}},null,2);
+      }
+      function overviewMetric(labelText, valueText, detailText, tone = '') {
+        const card = document.createElement('div'); card.className = 'insight-card' + (tone ? ' ' + tone : '');
+        const label = document.createElement('div'); label.className = 'label'; label.textContent = labelText;
+        const value = document.createElement('div'); value.className = 'value'; value.textContent = String(valueText);
+        const detail = document.createElement('div'); detail.className = 'detail'; detail.textContent = detailText;
+        card.append(label, value, detail); return card;
+      }
+      function renderOverviewMetrics(jobValues, channelValues, approvalValues) {
+        const assisting = channelValues.filter(channel => ['assist','proactive'].includes(channel.participation_mode) && channel.enrolled && !channel.kill_switch).length;
+        const activeJobs = jobValues.filter(job => ['queued','leased','running'].includes(job.state)).length;
+        const pendingApprovals = approvalValues.filter(approval => ['pending','requested'].includes(approval.status)).length;
+        const failures = jobValues.filter(job => ['failed','dead','cancelled'].includes(job.state)).length;
+        overviewMetrics.replaceChildren(
+          overviewMetric('Participating channels', assisting, 'Can answer or act under channel policy'),
+          overviewMetric('Work in progress', activeJobs, 'Queued or currently executing'),
+          overviewMetric('Pending approvals', pendingApprovals, 'Waiting for a human decision', pendingApprovals ? 'attention' : ''),
+          overviewMetric('Recent failures', failures, 'Failed, exhausted, or cancelled jobs', failures ? 'attention' : '')
+        );
+      }
+      function renderAttention(jobValues, channelValues, approvalValues) {
+        const issues = [];
+        const failures = jobValues.filter(job => ['failed','dead'].includes(job.state));
+        const pending = approvalValues.filter(approval => ['pending','requested'].includes(approval.status));
+        const disabled = channelValues.filter(channel => channel.kill_switch);
+        if (failures.length) issues.push({title:`${failures.length} agent job${failures.length === 1 ? '' : 's'} failed`, detail:'Open Agent work for the failure reason and retry history.'});
+        if (pending.length) issues.push({title:`${pending.length} action${pending.length === 1 ? '' : 's'} awaiting approval`, detail:'Review the exact requested action before it expires.'});
+        if (disabled.length) issues.push({title:`${disabled.length} channel kill switch${disabled.length === 1 ? '' : 'es'} active`, detail:'Participation is blocked in those channels.'});
+        attentionPanel.replaceChildren();
+        if (!issues.length) {
+          const clear = document.createElement('div'); clear.className = 'all-clear';
+          const dot = document.createElement('span'); dot.className = 'status-dot'; dot.setAttribute('aria-hidden','true');
+          const text = document.createElement('span'); text.textContent = 'No immediate operator action is required.';
+          clear.append(dot, text); attentionPanel.append(clear); return;
+        }
+        const head = document.createElement('div'); head.className = 'attention-head';
+        const dot = document.createElement('span'); dot.className = 'status-dot'; dot.setAttribute('aria-hidden','true');
+        const heading = document.createElement('strong'); heading.textContent = 'Needs attention'; head.append(dot, heading);
+        const list = document.createElement('div'); list.className = 'attention-items';
+        for (const issue of issues.slice(0,3)) { const item = document.createElement('div'); item.className = 'attention-item'; const title = document.createElement('strong'); title.textContent = issue.title; const detail = document.createElement('span'); detail.textContent = issue.detail; item.append(title, detail); list.append(item); }
+        attentionPanel.append(head, list);
+      }
+      function renderRecentJobs(jobValues) {
+        recentJobs.replaceChildren();
+        if (!jobValues.length) return stateMessage(recentJobs, 'No agent work has been admitted yet.');
+        for (const job of jobValues.slice(0,6)) {
+          const row = document.createElement('div'); row.className = 'activity-row';
+          const identity = document.createElement('div');
+          const title = document.createElement('div'); title.className = 'activity-title'; title.textContent = humanize(job.kind || 'agent work');
+          const detail = document.createElement('div'); detail.className = 'activity-detail'; detail.textContent = channelNames.has(String(job.channel_id)) ? '#' + channelNames.get(String(job.channel_id)) : 'Slack channel'; identity.append(title, detail);
+          const status = cellValue(job.state, 'state'); const time = document.createElement('span'); time.className = 'activity-detail'; time.textContent = relativeTime(job.created_at);
+          row.append(identity, status, time); recentJobs.append(row);
+        }
+      }
+      function renderChannelCoverage(channelValues) {
+        channelCoverage.replaceChildren();
+        const coverage = [
+          ['Assist', channelValues.filter(channel => channel.participation_mode === 'assist').length],
+          ['Proactive', channelValues.filter(channel => channel.participation_mode === 'proactive').length],
+          ['Observe only', channelValues.filter(channel => channel.participation_mode === 'observe').length],
+          ['Disabled', channelValues.filter(channel => channel.kill_switch || !channel.enrolled).length]
+        ];
+        for (const [labelText, count] of coverage) { const row = document.createElement('div'); row.className = 'compact-row'; const title = document.createElement('div'); title.className = 'compact-title'; title.textContent = labelText; const detail = document.createElement('div'); detail.className = 'compact-detail'; detail.textContent = String(count); row.append(title, detail); channelCoverage.append(row); }
+      }
+      function renderHealth(statusValue) {
+        const configuration = statusValue.configuration || {};
+        const health = [
+          ['Slack transport', configuration.slack_live_enabled ? humanize(configuration.slack_mode || 'live') : 'Stub mode'],
+          ['Classifier', `${humanize(configuration.classifier_mode || 'unknown')} · ${configuration.classifier_model || 'not configured'}`],
+          ['Agent harness', configuration.codex_app_server_enabled ? 'Enabled' : 'Disabled'],
+          ['Worker capacity', `${configuration.job_worker_concurrency || 0} concurrent jobs`],
+          ['Context sync', configuration.slack_context_sync_enabled ? 'Enabled' : 'Paused'],
+          ['Allowed outputs', `${configuration.slack_output_channel_count || 0} channel${configuration.slack_output_channel_count === 1 ? '' : 's'}`]
+        ];
+        healthSummary.replaceChildren();
+        for (const [labelText, valueText] of health) { const item = document.createElement('div'); item.className = 'health-item'; const label = document.createElement('div'); label.className = 'health-label'; label.textContent = labelText; const value = document.createElement('div'); value.className = 'health-value'; value.textContent = valueText; item.append(label, value); healthSummary.append(item); }
+      }
+      async function loadOverview() {
+        const organizationID = currentOrganization();
+        const scope = organizationID ? '?organization_id=' + encodeURIComponent(organizationID) : '';
+        try {
+          const [statusValue, jobValues, channelValues, approvalValues, routeValues, retentionValue] = await Promise.all([
+            fetchJSON('/admin/api/status'), fetchJSON('/admin/api/jobs' + scope), fetchJSON('/admin/api/channels' + scope),
+            fetchJSON('/admin/api/approvals' + scope), fetchJSON('/admin/api/routes'), fetchJSON('/admin/api/retention')
+          ]);
+          channelNames = new Map(channelValues.filter(channel => channel.name).map(channel => [String(channel.channel_id), channel.name]));
+          renderOverviewMetrics(jobValues, channelValues, approvalValues);
+          renderAttention(jobValues, channelValues, approvalValues);
+          renderRecentJobs(jobValues);
+          renderChannelCoverage(channelValues);
+          renderHealth(statusValue);
+          overviewStatus.textContent = JSON.stringify(statusValue, null, 2);
+          routes.textContent = JSON.stringify(routeValues, null, 2);
+          retention.textContent = JSON.stringify(retentionValue, null, 2);
+        } catch (error) {
+          stateMessage(attentionPanel, `Unable to load overview: ${error.message}`);
+          overviewStatus.textContent = `Unable to load diagnostics: ${error.message}`;
+        }
+      }
+      window.addEventListener('organizationchange', () => { updateOverviewScope(); loadOverview(); openActivityStream(); });
+      inject.addEventListener('submit', async event => {
+        event.preventDefault();
+        const csrf = await fetchJSON('/admin/api/csrf');
+        result.textContent = JSON.stringify(await fetchJSON('/admin/api/stub/envelopes', {method:'POST',headers:{'content-type':'application/json','x-tos-tag-csrf':csrf.token},body:payload.value}), null, 2);
+        await loadOverview();
+      });
+      preview.addEventListener('submit', async event => {
+        event.preventDefault();
+        const csrf = await fetchJSON('/admin/api/csrf');
+        previewResult.textContent = JSON.stringify(await fetchJSON('/admin/api/routes/preview', {method:'POST',headers:{'content-type':'application/json','x-tos-tag-csrf':csrf.token},body:previewPayload.value}), null, 2);
+      });
     }
-    inject.addEventListener('submit', async e => { e.preventDefault(); const c=await (await fetch('/admin/api/csrf')).json(); const r=await fetch('/admin/api/stub/envelopes',{method:'POST',headers:{'content-type':'application/json','x-tos-tag-csrf':c.token},body:payload.value}); result.textContent=JSON.stringify(await r.json(),null,2); await load(); });
-    preview.addEventListener('submit',async e=>{e.preventDefault();const c=await(await fetch('/admin/api/csrf')).json();const r=await fetch('/admin/api/routes/preview',{method:'POST',headers:{'content-type':'application/json','x-tos-tag-csrf':c.token},body:previewPayload.value});previewResult.textContent=JSON.stringify(await r.json(),null,2)});
-    new EventSource('/admin/events').addEventListener('refresh',()=>load());
-    load();
-    }
+
+    initializeOrganizations().catch(error => {
+      organizationSelector.replaceChildren(new Option('Organizations unavailable', ''));
+      organizationSelector.disabled = true;
+      if (typeof pageData !== 'undefined') stateMessage(pageData, error.message);
+    });
   </script>
 </body>
 </html>

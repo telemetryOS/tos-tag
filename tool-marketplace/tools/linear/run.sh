@@ -60,22 +60,22 @@
 #       uuid/email that `update --assign` takes.
 #   linear.sh set-state --issue ENG-1234 --state-id <uuid>
 #     → ISSUE=ENG-1234 STATE_APPLIED=<uuid> STATE_NAME=<name>
-#   linear.sh comment --issue ENG-1234 --body-file <path>
+#   linear.sh comment --issue ENG-1234 (--body <text> | --body-file <path>)
 #     → ISSUE=ENG-1234 COMMENT_ID=<uuid>
-#   linear.sh update --issue ENG-1234 [--title-file <path>] [--description-file <path>] [--assign-me | --assign <uuid|email>] [--priority <0-4>] [--add-label <name>] [--remove-label <name>]
+#   linear.sh update --issue ENG-1234 [--title <text> | --title-file <path>] [--description <text> | --description-file <path>] [--comment <text> | --comment-file <path>] [--assign-me | --assign <uuid|email>] [--priority <0-4>] [--add-label <name>] [--remove-label <name>]
 #     → ISSUE=ENG-1234 [TITLE_APPLIED=1 TITLE_CHARS=<n>] [DESCRIPTION_APPLIED=1 DESCRIPTION_CHARS=<n>] [ASSIGNEE=<uuid>] [PRIORITY=<n>] [STATE_PRESERVED=1 LABELS_PRESERVED=1] [LABELS=<comma-joined names>]
 #       --assign takes a user UUID (from `history` events or `members`) or an
 #       email resolved against active workspace users (the $qafail
 #       assign-back-to-developer path).
-#       Title and description updates are accepted only from existing,
-#       non-empty files. The title file must contain one line (an optional
-#       final newline is removed). Output reports read-back equality and
-#       character counts without printing either field's contents.
-#   linear.sh start --issue ENG-1234 --assign-me --state-id <uuid> --comment-file <path>
+#       Inline values are the disposable-worker path; existing non-empty files
+#       remain available to trusted local callers. Titles must contain one line.
+#       Output reports read-back equality and character counts without printing
+#       title or description contents.
+#   linear.sh start --issue ENG-1234 --assign-me --state-id <uuid> (--comment <text> | --comment-file <path>)
 #     → ISSUE=ENG-1234 [ASSIGNEE=<uuid>] [PRIORITY=<n>] [STATE_APPLIED=<uuid>] [COMMENT_ID=<uuid>] STATE_NAME=<name>
 #   linear.sh update --issue ENG-1234 [--assign-me] [--priority <0-4>] [--state-id <uuid>] [--comment-file <path>] [...]
 #     → same one-line contract; one issueUpdate mutation, then one commentCreate mutation when requested
-#   linear.sh create --title <text> --description-file <path> [--parent <ENG-key|uuid>] [--team-id <uuid>] [--state-id <uuid>] [--priority <0-4>] [--label-id <uuid>]... [--label <name>]...
+#   linear.sh create --title <text> (--description <text> | --description-file <path>) [--parent <ENG-key|uuid>] [--team-id <uuid>] [--state-id <uuid>] [--priority <0-4>] [--label-id <uuid>]... [--label <name>]...
 #     → ISSUE=ENG-1234 URL=<issue url> STATE_APPLIED=<uuid> PRIORITY=<n> TITLE_APPLIED=1 TITLE_CHARS=<n> DESCRIPTION_APPLIED=1 DESCRIPTION_CHARS=<n> PARENT_APPLIED=1 PARENT=<ENG-key|none> PARENT_ID=<uuid|none> [LABELS_APPLIED=1 LABELS=<comma-joined names> | STATE_NAME=<name>]
 #   linear.sh upload --file <path>
 #     → SIZE=<bytes> ASSET_URL=<uploads.linear.app url> FILE=<filename>
@@ -149,7 +149,7 @@ case "${TOS_TAG_OPERATION_ID:-}" in
 esac
 case "$cmd" in
   get|comments|whoami|mine|list|search|history|members|set-state|comment|update|start|create|upload|download) ;;
-  *) die "usage: linear.sh get --issue <ENG-1234> [--description-limit <chars>] | comments --issue <ENG-1234> [--limit <count>] [--body-limit <chars>] | whoami | mine [--team <key>] [--state <name>]... [--limit <count>] | list [--team <key>] [--state <name>]... [--assignee me|none|<uuid|email>] [--label <name>] [--limit <count>] | search --query <text> [--team <key>|all] [--state <name>]... [--assignee me|none|<uuid|email>] [--label <name>] [--include-archived] [--limit <count>] | history --issue <ENG-1234> [--limit <count>] | members [--query <text>] [--limit <count>] | set-state --issue <ENG-1234> --state-id <uuid> | comment --issue <ENG-1234> --body-file <path> | update --issue <ENG-1234> [--title-file <path>] [--description-file <path>] [--assign-me | --assign <uuid|email>] [--priority 0-4] [--state-id <uuid>] [--comment-file <path>] [--add-label <name>] [--remove-label <name>] | start --issue <ENG-1234> --assign-me --state-id <uuid> --comment-file <path> | create --title <text> --description-file <path> [--parent <ENG-key|uuid>] [--team-id <uuid>] [--state-id <uuid>] [--priority 0-4] [--label-id <uuid>]... [--label <name>]... | upload --file <path> | download --url <asset-url> --out <path>" ;;
+  *) die "usage: linear.sh get/comments/search/... | comment --issue ENG-1234 (--body <text> | --body-file <path>) | update --issue ENG-1234 [--title <text>] [--description <text>] [--comment <text>] [...] | create --title <text> (--description <text> | --description-file <path>) [...]" ;;
 esac
 
 [ -n "${LINEAR_API_KEY:-}" ] || die "LINEAR_API_KEY not set in the environment"
@@ -263,11 +263,16 @@ resolve_assignee() {
   esac
 }
 
+validate_inline_text() {
+  local flag="$1" value="$2" max="$3"
+  [ -n "$value" ] || die "$flag must not be empty"
+  [ "${#value}" -le "$max" ] || die "$flag exceeds the $max character limit"
+}
+
 create_comment() {
-  local body_file="$1" vars resp ok cid
-  [ -n "$body_file" ] && [ -f "$body_file" ] || die "--comment-file/--body-file <existing path> required"
-  [ -s "$body_file" ] || die "comment body file is empty: $body_file"
-  vars="$(jq -n --arg id "$ISSUE_UUID" --rawfile body "$body_file" '{input:{issueId:$id, body:$body}}')" || die "failed to read body file"
+  local body="$1" vars resp ok cid
+  validate_inline_text "comment body" "$body" 20000
+  vars="$(jq -n --arg id "$ISSUE_UUID" --arg body "$body" '{input:{issueId:$id, body:$body}}')" || die "failed to encode comment body"
   resp="$(gql 'mutation($input: CommentCreateInput!){ commentCreate(input: $input){ success comment { id } } }' "$vars")" || exit $?
   ok="$(jq -r '.data.commentCreate.success // false' <<<"$resp")"
   cid="$(jq -r '.data.commentCreate.comment.id // empty' <<<"$resp")"
@@ -629,33 +634,41 @@ set-state)
   ;;
 
 comment)
-  ISSUE=""; BODY_FILE=""
+  ISSUE=""; BODY=""; BODY_FILE=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --issue)     [ $# -ge 2 ] || die "--issue needs a value"; ISSUE="$2"; shift 2 ;;
+      --body)      [ $# -ge 2 ] || die "--body needs a value"; BODY="$2"; shift 2 ;;
       --body-file) [ $# -ge 2 ] || die "--body-file needs a value"; BODY_FILE="$2"; shift 2 ;;
       *) die "unknown arg: $1" ;;
     esac
   done
   [ -n "$ISSUE" ] || die "--issue <ENG-1234> required"
-  [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ] || die "--body-file <existing path> required"
-  [ -s "$BODY_FILE" ] || die "--body-file is empty: $BODY_FILE"
+  [ -z "$BODY" ] || [ -z "$BODY_FILE" ] || die "--body and --body-file are mutually exclusive"
+  if [ -n "$BODY_FILE" ]; then
+    [ -f "$BODY_FILE" ] && [ -s "$BODY_FILE" ] || die "--body-file <existing non-empty path> required"
+    BODY="$(cat "$BODY_FILE")" || die "failed to read body file"
+  fi
+  validate_inline_text "--body" "$BODY" 20000
   resolve_issue "$ISSUE"
-  create_comment "$BODY_FILE"
+  create_comment "$BODY"
   echo "ISSUE=$ISSUE COMMENT_ID=$COMMENT_ID"
   ;;
 
 update|start)
-  ISSUE=""; TITLE_FILE=""; DESC_FILE=""; ASSIGN_ME=0; ASSIGN=""; PRIORITY=""; STATE_ID=""; COMMENT_FILE=""; ADD_LABEL=""; REMOVE_LABEL=""
+  ISSUE=""; TITLE=""; TITLE_FILE=""; DESCRIPTION=""; DESC_FILE=""; ASSIGN_ME=0; ASSIGN=""; PRIORITY=""; STATE_ID=""; COMMENT=""; COMMENT_FILE=""; ADD_LABEL=""; REMOVE_LABEL=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --issue)        [ $# -ge 2 ] || die "--issue needs a value"; ISSUE="$2"; shift 2 ;;
+      --title)        [ $# -ge 2 ] || die "--title needs a value"; TITLE="$2"; shift 2 ;;
       --title-file)   [ $# -ge 2 ] || die "--title-file needs a value"; TITLE_FILE="$2"; shift 2 ;;
+      --description)  [ $# -ge 2 ] || die "--description needs a value"; DESCRIPTION="$2"; shift 2 ;;
       --description-file) [ $# -ge 2 ] || die "--description-file needs a value"; DESC_FILE="$2"; shift 2 ;;
       --assign-me)    ASSIGN_ME=1; shift ;;
       --assign)       [ $# -ge 2 ] || die "--assign needs a value"; ASSIGN="$2"; shift 2 ;;
       --priority)     [ $# -ge 2 ] || die "--priority needs a value"; PRIORITY="$2"; shift 2 ;;
       --state-id)     [ $# -ge 2 ] || die "--state-id needs a value"; STATE_ID="$2"; shift 2 ;;
+      --comment)      [ $# -ge 2 ] || die "--comment needs a value"; COMMENT="$2"; shift 2 ;;
       --comment-file) [ $# -ge 2 ] || die "--comment-file needs a value"; COMMENT_FILE="$2"; shift 2 ;;
       --add-label)    [ $# -ge 2 ] || die "--add-label needs a value"; ADD_LABEL="$2"; shift 2 ;;
       --remove-label) [ $# -ge 2 ] || die "--remove-label needs a value"; REMOVE_LABEL="$2"; shift 2 ;;
@@ -663,13 +676,16 @@ update|start)
     esac
   done
   [ -n "$ISSUE" ] || die "--issue <ENG-1234> required"
+  [ -z "$TITLE" ] || [ -z "$TITLE_FILE" ] || die "--title and --title-file are mutually exclusive"
+  [ -z "$DESCRIPTION" ] || [ -z "$DESC_FILE" ] || die "--description and --description-file are mutually exclusive"
+  [ -z "$COMMENT" ] || [ -z "$COMMENT_FILE" ] || die "--comment and --comment-file are mutually exclusive"
   [ "$ASSIGN_ME" = 0 ] || [ -z "$ASSIGN" ] || die "--assign-me and --assign are mutually exclusive"
-  [ "$ASSIGN_ME" = 1 ] || [ -n "$ASSIGN" ] || [ -n "$PRIORITY" ] || [ -n "$STATE_ID" ] || [ -n "$COMMENT_FILE" ] || [ -n "$ADD_LABEL" ] || [ -n "$REMOVE_LABEL" ] || [ -n "$TITLE_FILE" ] || [ -n "$DESC_FILE" ] || die "$cmd needs at least one lifecycle/update flag"
+  [ "$ASSIGN_ME" = 1 ] || [ -n "$ASSIGN" ] || [ -n "$PRIORITY" ] || [ -n "$STATE_ID" ] || [ -n "$COMMENT" ] || [ -n "$COMMENT_FILE" ] || [ -n "$ADD_LABEL" ] || [ -n "$REMOVE_LABEL" ] || [ -n "$TITLE" ] || [ -n "$TITLE_FILE" ] || [ -n "$DESCRIPTION" ] || [ -n "$DESC_FILE" ] || die "$cmd needs at least one lifecycle/update flag"
   if [ "$cmd" = "start" ]; then
-    [ -z "$TITLE_FILE" ] && [ -z "$DESC_FILE" ] || die "start does not accept --title-file or --description-file"
+    [ -z "$TITLE" ] && [ -z "$TITLE_FILE" ] && [ -z "$DESCRIPTION" ] && [ -z "$DESC_FILE" ] || die "start does not accept title or description changes"
     [ "$ASSIGN_ME" = 1 ] || die "start requires --assign-me"
     [ -n "$STATE_ID" ] || die "start requires --state-id <uuid>"
-    [ -n "$COMMENT_FILE" ] || die "start requires --comment-file <path>"
+    [ -n "$COMMENT" ] || [ -n "$COMMENT_FILE" ] || die "start requires --comment <text> or --comment-file <path>"
   fi
   if [ -n "$ADD_LABEL" ] && [ -n "$REMOVE_LABEL" ] && \
      [ "$(printf '%s' "$ADD_LABEL" | tr 'A-Z' 'a-z')" = "$(printf '%s' "$REMOVE_LABEL" | tr 'A-Z' 'a-z')" ]; then
@@ -684,6 +700,7 @@ update|start)
   if [ -n "$COMMENT_FILE" ]; then
     [ -f "$COMMENT_FILE" ] || die "--comment-file <existing path> required"
     [ -s "$COMMENT_FILE" ] || die "--comment-file is empty: $COMMENT_FILE"
+    COMMENT="$(cat "$COMMENT_FILE")" || die "failed to read comment file"
   fi
   TITLE_JSON='null'; DESCRIPTION_JSON='null'; TITLE_CHARS=""; DESCRIPTION_CHARS=""
   if [ -n "$TITLE_FILE" ]; then
@@ -692,21 +709,31 @@ update|start)
     TITLE_JSON="$(jq -Rs 'sub("\\r?\\n$"; "")' "$TITLE_FILE")" || die "failed to read title file"
     jq -e 'length > 0 and (test("[\\r\\n]") | not)' <<<"$TITLE_JSON" >/dev/null || die "--title-file must contain one non-empty line (an optional final newline is allowed)"
     TITLE_CHARS="$(jq -r 'length' <<<"$TITLE_JSON")"
+  elif [ -n "$TITLE" ]; then
+    validate_inline_text "--title" "$TITLE" 512
+    TITLE_JSON="$(jq -n --arg value "$TITLE" '$value')" || die "failed to encode title"
+    jq -e 'test("[\\r\\n]") | not' <<<"$TITLE_JSON" >/dev/null || die "--title must contain one non-empty line"
+    TITLE_CHARS="$(jq -r 'length' <<<"$TITLE_JSON")"
   fi
   if [ -n "$DESC_FILE" ]; then
     [ -f "$DESC_FILE" ] || die "--description-file <existing path> required"
     [ -s "$DESC_FILE" ] || die "--description-file is empty: $DESC_FILE"
     DESCRIPTION_JSON="$(jq -Rs '.' "$DESC_FILE")" || die "failed to read description file"
     DESCRIPTION_CHARS="$(jq -r 'length' <<<"$DESCRIPTION_JSON")"
+  elif [ -n "$DESCRIPTION" ]; then
+    validate_inline_text "--description" "$DESCRIPTION" 100000
+    DESCRIPTION_JSON="$(jq -n --arg value "$DESCRIPTION" '$value')" || die "failed to encode description"
+    DESCRIPTION_CHARS="$(jq -r 'length' <<<"$DESCRIPTION_JSON")"
   fi
+  if [ -n "$COMMENT" ]; then validate_inline_text "--comment" "$COMMENT" 20000; fi
   resolve_issue "$ISSUE"
 
   input='{}'
   out="ISSUE=$ISSUE"
-  if [ -n "$TITLE_FILE" ]; then
+  if [ -n "$TITLE_FILE" ] || [ -n "$TITLE" ]; then
     input="$(jq -c --argjson t "$TITLE_JSON" '. + {title:$t}' <<<"$input")"
   fi
-  if [ -n "$DESC_FILE" ]; then
+  if [ -n "$DESC_FILE" ] || [ -n "$DESCRIPTION" ]; then
     input="$(jq -c --argjson d "$DESCRIPTION_JSON" '. + {description:$d}' <<<"$input")"
   fi
   if [ "$ASSIGN_ME" = 1 ]; then
@@ -761,21 +788,21 @@ update|start)
       applied_assignee="$(jq -r '.data.issueUpdate.issue.assignee.id // "none"' <<<"$resp")"
       [ "$applied_assignee" = "$ASSIGNEE_UUID" ] || reject "assignee did not take (now $applied_assignee)"
     fi
-    if [ -n "$TITLE_FILE" ]; then
+    if [ -n "$TITLE_FILE" ] || [ -n "$TITLE" ]; then
       if jq -e --argjson expected "$TITLE_JSON" '.data.issueUpdate.issue.title == $expected' <<<"$resp" >/dev/null; then
         out="$out TITLE_APPLIED=1 TITLE_CHARS=$TITLE_CHARS"
       else
         out="$out TITLE_APPLIED=0 TITLE_CHARS=$TITLE_CHARS"; verify_error="title"
       fi
     fi
-    if [ -n "$DESC_FILE" ]; then
+    if [ -n "$DESC_FILE" ] || [ -n "$DESCRIPTION" ]; then
       if jq -e --argjson expected "$DESCRIPTION_JSON" '.data.issueUpdate.issue.description == $expected' <<<"$resp" >/dev/null; then
         out="$out DESCRIPTION_APPLIED=1 DESCRIPTION_CHARS=$DESCRIPTION_CHARS"
       else
         out="$out DESCRIPTION_APPLIED=0 DESCRIPTION_CHARS=$DESCRIPTION_CHARS"; verify_error="${verify_error:+$verify_error/}description"
       fi
     fi
-    if [ -n "$TITLE_FILE" ] || [ -n "$DESC_FILE" ]; then
+    if [ -n "$TITLE_FILE" ] || [ -n "$TITLE" ] || [ -n "$DESC_FILE" ] || [ -n "$DESCRIPTION" ]; then
       if [ -z "$STATE_ID" ]; then
         applied_state="$(jq -r '.data.issueUpdate.issue.state.id // empty' <<<"$resp")"
         if [ "$applied_state" = "$ISSUE_STATE_ID" ]; then
@@ -795,8 +822,8 @@ update|start)
       fi
     fi
   fi
-  if [ -n "$COMMENT_FILE" ]; then
-    create_comment "$COMMENT_FILE"
+  if [ -n "$COMMENT" ]; then
+    create_comment "$COMMENT"
     out="$out COMMENT_ID=$COMMENT_ID"
   fi
   if [ -n "$ADD_LABEL" ] || [ -n "$REMOVE_LABEL" ]; then
@@ -810,10 +837,11 @@ update|start)
   ;;
 
 create)
-  TITLE=""; DESC_FILE=""; PARENT=""; TEAM_ID="65861c09-dd00-4ace-ab70-bda91f06f929"; STATE_ID="c6ddabe1-23a7-4ade-a65a-d52fccc31af6"; PRIORITY="3"; LABEL_IDS='[]'; LABEL_NAMES=()
+  TITLE=""; DESCRIPTION=""; DESC_FILE=""; PARENT=""; TEAM_ID="65861c09-dd00-4ace-ab70-bda91f06f929"; STATE_ID="c6ddabe1-23a7-4ade-a65a-d52fccc31af6"; PRIORITY="3"; LABEL_IDS='[]'; LABEL_NAMES=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --title)            [ $# -ge 2 ] || die "--title needs a value"; TITLE="$2"; shift 2 ;;
+      --description)      [ $# -ge 2 ] || die "--description needs a value"; DESCRIPTION="$2"; shift 2 ;;
       --description-file) [ $# -ge 2 ] || die "--description-file needs a value"; DESC_FILE="$2"; shift 2 ;;
       --parent)           [ $# -ge 2 ] || die "--parent needs a value"; PARENT="$2"; shift 2 ;;
       --team-id)          [ $# -ge 2 ] || die "--team-id needs a value"; TEAM_ID="$2"; shift 2 ;;
@@ -831,8 +859,14 @@ create)
     esac
   done
   [ -n "$TITLE" ] || die "--title <text> required"
-  [ -n "$DESC_FILE" ] && [ -f "$DESC_FILE" ] || die "--description-file <existing path> required"
-  [ -s "$DESC_FILE" ] || die "--description-file is empty: $DESC_FILE"
+  validate_inline_text "--title" "$TITLE" 512
+  case "$TITLE" in *$'\n'*|*$'\r'*) die "--title must contain one line" ;; esac
+  [ -z "$DESCRIPTION" ] || [ -z "$DESC_FILE" ] || die "--description and --description-file are mutually exclusive"
+  if [ -n "$DESC_FILE" ]; then
+    [ -f "$DESC_FILE" ] && [ -s "$DESC_FILE" ] || die "--description-file <existing non-empty path> required"
+    DESCRIPTION="$(cat "$DESC_FILE")" || die "failed to read description file"
+  fi
+  validate_inline_text "--description" "$DESCRIPTION" 100000
   case "$PRIORITY" in 0|1|2|3|4) ;; *) die "--priority must be 0-4 (0=None 1=Urgent 2=High 3=Medium 4=Low)" ;; esac
   normalize_state_id "$STATE_ID"
   TEAM_ID="$(printf '%s' "$TEAM_ID" | tr 'A-Z' 'a-z')"
@@ -853,8 +887,8 @@ create)
     [ -n "$LABEL_ID" ] || die "label '$lname' not found for the target team or workspace (this script does not create labels)"
     LABEL_IDS="$(jq -c --arg l "$LABEL_ID" '(. + [$l]) | unique' <<<"$LABEL_IDS")"
   done
-  input="$(jq -n --arg t "$TITLE" --rawfile d "$DESC_FILE" --arg team "$TEAM_ID" --arg s "$STATE_ID" --argjson p "$PRIORITY" \
-    '{title:$t, description:$d, teamId:$team, stateId:$s, priority:$p}')" || die "failed to read description file"
+  input="$(jq -n --arg t "$TITLE" --arg d "$DESCRIPTION" --arg team "$TEAM_ID" --arg s "$STATE_ID" --argjson p "$PRIORITY" \
+    '{title:$t, description:$d, teamId:$team, stateId:$s, priority:$p}')" || die "failed to encode issue input"
   if [ "$LABEL_IDS" != '[]' ]; then
     input="$(jq -c --argjson ls "$LABEL_IDS" '. + {labelIds:$ls}' <<<"$input")"
   fi

@@ -6,7 +6,8 @@ tos-tag is a Slack-native ambient agent control plane. It observes authorized
 Slack traffic, builds privacy-filtered context, asks a small direct classifier
 whether and how to participate, and starts a full Codex agent only for admitted
 work. MongoDB is authoritative for observations, policy, decisions, jobs,
-approvals, deliveries, directives, routines, triggers, usage, and audit data.
+approvals, deliveries, directives, source-linked memory, routines, triggers,
+usage, and audit data.
 
 ## Non-negotiable invariants
 
@@ -33,6 +34,8 @@ approvals, deliveries, directives, routines, triggers, usage, and audit data.
 flowchart LR
     S["Slack Socket Mode"] --> O["Durable observation"]
     O --> C["Privacy-filtered context pack"]
+    O --> M["Asynchronous Luna memory curator"]
+    M --> C
     C --> G["Direct OpenAI classifier"]
     G -->|silent| Z["No output"]
     G -->|short social reply| D["Durable delivery"]
@@ -50,12 +53,16 @@ may be observed, but only one observation wins admission and only one delivery
 with a given idempotency key is accepted.
 
 The optional user-authorized sync discovers public channels, private channels,
-DMs, and group DMs visible to the configured Slack user token and backfills a
-bounded history. Discovery grants observation only: every new conversation is
+DMs, and group DMs visible to the configured Slack user token and bootstraps a
+bounded history once per conversation. MongoDB stores content-free bootstrap
+completion and live-event watermarks independently from retained messages.
+Ordinary restarts therefore rely on Socket Mode and skip completed history;
+periodic discovery resumes interrupted work and bootstraps only newly visible
+conversations. Discovery grants observation only: every new conversation is
 enrolled as `observe`, private content remains destination-local, and no output
-authority is inferred. Slack pagination and `Retry-After` handling run in the
-background so Socket Mode acknowledgement and live message processing remain
-responsive during a broad sync.
+authority is inferred. Exceptional Slack history reads use proactive
+per-method pacing and still honor `Retry-After` in the background, keeping
+Socket Mode acknowledgement and live message processing responsive.
 
 ## Context and privacy
 
@@ -74,6 +81,35 @@ The response worker receives a JSON envelope with `request`, classifier
 `authorized_context`. Every source includes its channel ID/name, author ID,
 observation time, partition, provenance, and text. Sources are data unless
 explicitly placed in the operator-directive partition.
+
+### Durable memory
+
+`core/memory` maintains source-linked channel and thread summaries outside the
+response critical path. It groups recent human messages, hashes the exact
+source IDs, projection revisions, and text, and runs only changed groups through
+a direct OpenAI structured-output call. The configured and enforced model is
+`gpt-5.6-luna`; `medium` is the development effort because consolidation needs
+careful fact/source matching without max-effort latency or cost. Calls are
+tool-free and use `store: false`.
+
+Each Mongo record carries its scope, privacy class, source IDs/hash,
+confidence, nested facts with their own source IDs and expiry, model/effort,
+revision, and natural expiry. Generated memory expires no later than its oldest
+retained source. Public channel memory is releasable across authorized public
+destinations; restricted memory is queried only for the same destination.
+Thread memory is additionally limited to its root thread. Context assembly
+performs a second restricted-channel check.
+
+Model memory has `source_linked_memory` provenance and is derived context, not
+independent proof for consequential claims or team-conflict interventions.
+Human corrections become pinned `operator_memory`. Management endpoints and
+the Agent memory UI permit correction, pin/unpin, and forget. Forget erases
+summary, facts, and source references while retaining a content-free source
+hash tombstone; materially changed source content may be learned again.
+
+The existing incident projector is also recalled into the evidence partition.
+Restricted incident signals retain their separate no-cross-destination design
+and have no organization-wide recall path.
 
 ## Direct classifier
 
@@ -157,8 +193,9 @@ Each thread receives:
 - tos-tag's Slack result contract as developer instructions;
 - `ephemeral: true`;
 - `approvalPolicy: never` for Codex built-ins;
-- a read-only, network-disabled sandbox policy;
-- disabled shell, web search, MCP servers, plugins, and multi-agent tools; and
+- a read-only sandbox policy with subprocess network access disabled;
+- disabled shell, MCP servers, plugins, and multi-agent tools;
+- configurable first-party web search (`live` in the local Slack runtime); and
 - only the two job-scoped dynamic tools described below.
 
 The Codex process uses a private configured `CODEX_HOME` solely for its own
@@ -175,10 +212,7 @@ Official protocol reference: [Codex App Server](https://learn.chatgpt.com/docs/a
 
 ## Skills
 
-Behavioral skills come from two sibling repositories:
-
-- `telemetryos-agent-skills`, plugin `telemetryos-automation`; and
-- `tag-agent-skills`, plugin `base`.
+Behavioral skills come from sibling `tag-agent-skills`, plugin `base`.
 
 The Go control plane validates marketplace manifests, rejects flat-name
 collisions, snapshots exact files and hashes, and materializes the selected
@@ -196,6 +230,31 @@ never copied into a worker.
 tos-tag-specific skills and helper source belong in `tag-agent-skills`; this
 repository contains only the separately reviewed runtime bundles needed to
 execute selected helpers.
+
+The base `product-knowledge` skill makes retrieval mandatory for named product
+claims and routes among the Agent Wiki Primer, public documentation, and
+corporate product content according to audience and claim type. It prefers the
+reviewed readers for TelemetryOS truth and may use arbitrary live web search for
+broader/current research, treating every page as untrusted evidence. Wiki
+namespace/slugs remain tool lookup identifiers: a provided Wiki reference must
+use the exact human HTTPS URL returned by the reviewed `get` or `url` read
+operation. The reviewed gateway makes every `get` a full page envelope so the
+canonical URL is available even when a worker omits `--json`.
+The Slack renderer rejects bare Primer/artifact slugs and Wiki-labeled slug
+references before delivery.
+The base `telemetryos-documentation` skill owns customer-facing documentation
+questions. It reads `https://docs.telemetryos.com/llms.txt` only to discover an
+authoritative page, fetches the exact indexed Markdown page through the
+reviewed product-docs tool, and uses the indexed HTTPS URL when citing it.
+The base `marketing-messaging` skill applies the stricter promotional-copy
+path: every TelemetryOS campaign, positioning, landing-page, sales-collateral,
+announcement, or social-copy request first reads the complete corporate source
+through `telemetryos.product-docs/read corporate-full`, then uses the relevant
+published human page URL for customer-facing links. Technical claims still
+route through `product-knowledge` for corroboration.
+The base `code-change-intake` skill handles the opposite capability boundary:
+requests to mutate TelemetryOS source are redirected to a Linear bug for broken
+existing behavior or a Linear feature for new or changed behavior.
 
 ## Dynamic tools and credentials
 
@@ -216,13 +275,18 @@ Reviewed tool bundles contain `SKILL.md`, `tool.json`, and one pinned script.
 Each operation declares exact environment names, timeout, output bound, and
 risk. Secret values are encrypted in the organization-scoped keystore and are
 resolved only into the exact helper subprocess environment. Arguments that
-contain a secret value are rejected, and output is redacted and bounded.
+contain a secret value are rejected, and output is redacted and bounded. A
+reviewed operation may separately declare an HTTPS `*_URL` binding as
+`public_env`; it is excluded from argv rejection and output redaction only when
+it has no embedded credentials, query, or fragment. The Wiki URL uses this path
+so canonical page links remain visible while `WIKI_TOKEN` remains secret.
 
 The current reviewed catalog is:
 
 | Tool | Risk classes | Approval | Boundary |
 | --- | --- | --- | --- |
 | `telemetryos.code` | `read` | Risk-based | Bounded list/search/read below the server-owned Aion source root; no mount, shell, traversal, symlinks, runtime env, credential ledger, or private tool state |
+| `telemetryos.product-docs` | `read` | Never | Credential-free, fixed-host reads of `docs.telemetryos.com/llms.txt`, its `docs/` or `reference/` Markdown pages, and `www.telemetryos.com/llms-full.txt`; no redirects or arbitrary URLs |
 | `telemetryos.linear` | `read`, `write` | Risk-based | Typed Linear helper operations |
 | `telemetryos.wiki` | `read`, `write`, `delete` | Never for page read/write; always for recoverable page soft-delete | Page-only CRUD; namespace, asset, publish-file, cascading move, activity, undo, and admin operations are unavailable |
 | `telemetryos.otel` | `read` | Risk-based | Bounded SigNoz/OpenTelemetry queries |
@@ -233,6 +297,21 @@ The current reviewed catalog is:
 the Aion checkout or its path. The server validates typed read arguments against
 `TAG_AION_DEVELOPER_PATH` and returns only bounded results through the same
 capability gateway.
+The tool loader and executor independently reject any `telemetryos.code`
+operation that is not exactly read-only. There is no Slack approval path for
+source edits, patches, commits, pushes, merges, or deployments.
+
+`telemetryos.product-docs` is a separate deterministic public-network
+capability. Its script constructs requests from fixed TelemetryOS hosts
+and a constrained documentation path grammar. Product retrieval can combine it
+with destination-authorized `telemetryos.wiki` Primer reads without exposing
+Wiki credentials to the worker. Native Codex live web search is independently
+available for arbitrary public research; it has no credential, destination, or
+private-context authority and every completed search is audit-receipted by hash.
+When the classifier marks authoritative product retrieval as required, the
+pipeline accepts a final answer only after that same worker attempt completes a
+full Primer page, docs page, or corporate full-content read. Search/index/web
+results, Slack context, and model memory do not satisfy the delivery gate.
 
 Because source reads return content rather than a shared filename, Wiki writes
 accept an explicit inline body. The complete body is committed in the Wiki tool
@@ -250,12 +329,21 @@ timeouts/output, organization kill switches, and tamper-evident audit receipts.
 
 ## Slack rendering and delivery
 
-The model returns `slack-output/v2`, a typed JSON result whose segment palette
-is limited to header, mrkdwn text, context, divider, table, image, and artifact.
-Tables render as native Block Kit tables. Approval buttons, notices, and
+The model returns `slack-output/v3`, a typed JSON result whose segment palette
+is limited to header, mrkdwn text, context, divider, table, card, carousel,
+image, and artifact. Captioned tables render as native sortable/paginated Data
+Tables; uncaptioned tables retain the compact native Table. Cards and Carousels
+are presentation-only and have no model-exposed action field. Approval buttons, notices, and
 destination selection are control-plane-owned. Generated Slack mentions are
 rejected unless the exact user/channel ID came from classifier-selected
 destination-safe evidence; broadcast and user-group mentions remain forbidden.
+
+For a full-agent result, the harness captures the current turn's
+provider-reported token breakdown from Codex App Server and the pipeline binds
+it to the resolved model, effort, and elapsed execution time. This metadata is
+stored outside model JSON. The renderer appends it as the final de-emphasized
+context block on the final Slack payload. Classifier-only replies and
+reaction-only outcomes never receive the footer.
 
 Delivery uses a graduated surface policy. Short and medium answers remain
 Slack-native. When the expected result is genuinely long and expository, or
@@ -271,14 +359,43 @@ same-attempt provenance.
 
 Before posting, the renderer validates every field, rejects privileged segment
 types and generated special mentions, and creates a safe fallback string.
+Long AI-authored section text sets Slack's `expand` hint so substantive answers
+remain visible instead of being collapsed behind “see more.” Modal-only Alert
+blocks communicate channel-directive scope; they are never posted to messages.
+Native agent Cards, Carousels, and Data Tables travel in streamed block chunks;
+ordinary posts and stream-failure fallback deterministically downgrade them to
+standard Sections/Tables while preserving accessible message fallback text.
+Formatted table cells are converted into native rich-text/link elements, and
+the same validation rejects unproven mentions inside every cell type.
 Delivery records are durable and leased. Multipart sends reconcile immutable
 metadata so restart cannot duplicate already accepted parts.
 
+Admitted full-agent thread work starts a Slack
+[Thinking Steps](https://slack.dev/slack-thinking-steps-ai-agents/) stream in
+the classifier-selected thread. The returned message timestamp is
+persisted on the leased job. Reviewed harness events become concise task-card
+updates from a fixed control-plane vocabulary; raw prompts, reasoning, tool
+arguments, tool output, and message deltas are never streamed. Exact HTTPS
+artifact sources may be attached after the reviewed tool boundary validates
+them. On success, the durable delivery record carries the stream timestamp and
+`chat.stopStream` adds the validated Block Kit result as a chunks-mode block
+and finalizes that same message.
+Start reconciliation uses immutable Slack metadata, retries reuse the persisted
+timestamp, and unsupported stream operations fall back to ordinary durable
+delivery. Intentional reaction-only and short direct classifier outcomes do not
+create a timeline. Slack requires `thread_ts` for streaming, so brief
+classifier-selected in-channel jobs keep their direct placement and do not
+attempt a progress stream.
+
 The approved local development posture observes all user-authorized
-conversations, enrolls new conversations as `observe`, enables `assist` only in
-`#tos-tag`, and hard-restricts all reactions and messages to the `#tos-tag`
-destination allowlist. Checked-in defaults remain stub/shadow/disabled and do
-not encode the live IDs or secrets.
+conversations and enrolls new conversations as `observe`. When explicitly
+enabled, it reconciles that human inventory with a bot-token inventory and
+derives `assist` only for public/private channels Tag has joined; membership
+events apply joins and leaves in real time, with bounded periodic inventory
+reconciliation as a fallback. DMs and group DMs are not auto-enabled. An
+optional destination allowlist can narrow this set further.
+Checked-in defaults remain stub/shadow/disabled and do not encode live IDs or
+secrets.
 
 ## Channel directives, routines, and triggers
 
@@ -315,7 +432,20 @@ Every observation, classifier decision, reaction/delivery attempt, job lease,
 worker stage, tool call, approval decision, directive change, routine/trigger
 run, and usage record carries correlation identifiers. Operator diagnostics can
 be written to an owner-readable JSONL file, while durable audit receipts remain
-in MongoDB. Logs and broad management listings omit Slack message text,
+in MongoDB.
+
+The management home page is an organization-scoped real-time activity feed.
+A bounded in-memory hub receives safe structured lifecycle logs plus explicit
+classifier and Codex protocol events, replays its recent window, and streams new
+records through authenticated Server-Sent Events. Public classifier records
+include a bounded single-line excerpt of the source Slack message and the
+effective outcome, confidence, reaction, routing, effort, and reason codes.
+Restricted conversation text is replaced before publication. Codex records
+contain only direction, protocol method, status, and correlation identifiers;
+prompts, output, provider bodies, tool arguments/results, and credentials never
+enter the feed. The feed is diagnostic and disposable, not a durable authority.
+
+JSONL logs, audit records, and broad data listings omit Slack message text,
 provider bodies, prompts, results, secrets, lease tokens, and connector
 credentials. Raw observations, normalized messages, prompt/context data, and
 derived state follow configured TTL and source-linked deletion rules.
@@ -341,7 +471,7 @@ tests, vet, behavioral evals, gosec, and govulncheck. Network and credential
 tests are opt-in. `integration/codex_live_test.go` verifies the installed App
 Server handshake, dynamic-tool registration, model/effort routing, structured
 output, event normalization, and teardown against a real authenticated Codex
-runtime. `make eval-live` sends the 33 natural classifier messages through the
+runtime. `make eval-live` sends the 39 natural classifier messages through the
 configured direct OpenAI provider and scores outcomes, source grounding,
 restricted disclosure, placement, reaction semantics, and model/effort routing;
 fixture names and expected results are never part of the provider request.

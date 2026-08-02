@@ -26,6 +26,8 @@ func TestNaturalisticFixturesRejectEvaluatorCues(t *testing.T) {
 		"please reply in the channel",
 		"use a thread for this",
 		"this is a classifier probe",
+		"include a clickable link to the Agent Wiki page you used",
+		"cite your sources",
 	} {
 		fixture := Fixture{Name: "contaminated", Target: classifier.Target{Envelope: types.SlackEnvelope{Text: cue}}}
 		if err := validateNaturalisticFixture(fixture); err == nil || !strings.Contains(err.Error(), "evaluator cue") {
@@ -64,14 +66,14 @@ func TestBehavioralFixturesAreNaturalistic(t *testing.T) {
 }
 
 func TestBehavioralEvalIncludesExpandedNaturalisticMatrix(t *testing.T) {
-	if got := len(Fixtures()); got != 33 {
-		t.Fatalf("behavioral classifier fixtures=%d, want 33 plus two infrastructure invariants", got)
+	if got := len(Fixtures()); got != 39 {
+		t.Fatalf("behavioral classifier fixtures=%d, want 39 plus two infrastructure invariants", got)
 	}
 	score, err := Run()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if score.Total != 35 {
-		t.Fatalf("behavioral eval total=%d, want 35", score.Total)
+	if score.Total != 41 {
+		t.Fatalf("behavioral eval total=%d, want 41", score.Total)
 	}
 }

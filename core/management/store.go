@@ -4,6 +4,7 @@ package management
 import (
 	"context"
 	"fmt"
+
 	"github.com/telemetryos/tos-tag/core/database"
 	"github.com/telemetryos/tos-tag/models"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -47,6 +48,10 @@ func (m *Mongo) List(ctx context.Context, kind, organizationID string, limit int
 		}
 		if kind == "context" {
 			delete(document, "payload")
+			if sources, ok := document["source_ids"].(bson.A); ok {
+				document["source_count"] = len(sources)
+			}
+			delete(document, "source_ids")
 		}
 	}
 	return result, nil

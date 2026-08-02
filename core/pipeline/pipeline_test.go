@@ -11,6 +11,7 @@ import (
 
 	"github.com/RobertWHurst/blackbox"
 
+	"github.com/telemetryos/tos-tag/core/activity"
 	"github.com/telemetryos/tos-tag/core/approvals"
 	"github.com/telemetryos/tos-tag/core/classifier"
 	"github.com/telemetryos/tos-tag/core/config"
@@ -18,6 +19,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/deliveries"
 	"github.com/telemetryos/tos-tag/core/harness"
 	"github.com/telemetryos/tos-tag/core/jobs"
+	agentmemory "github.com/telemetryos/tos-tag/core/memory"
 	"github.com/telemetryos/tos-tag/core/observer"
 	"github.com/telemetryos/tos-tag/core/orgconfig"
 	"github.com/telemetryos/tos-tag/core/sessions"
@@ -86,6 +88,79 @@ func (*blockingHarness) Permission(context.Context, string, harness.PermissionDe
 }
 func (*blockingHarness) Abort(context.Context, string) error { return nil }
 
+type footerHarness struct{}
+
+func (*footerHarness) Health(context.Context) error { return nil }
+func (*footerHarness) CreateSession(context.Context, string) (harness.Session, error) {
+	return harness.Session{ID: "footer-session", CreatedAt: time.Now().UTC()}, nil
+}
+func (*footerHarness) Prompt(context.Context, string, harness.Prompt) error { return nil }
+func (*footerHarness) Events(context.Context, string) (<-chan harness.Event, <-chan error) {
+	events := make(chan harness.Event, 3)
+	errs := make(chan error)
+	events <- harness.Event{Type: "usage.updated", Data: map[string]any{"input_tokens": int64(18_000), "output_tokens": int64(2_400), "cached_input_tokens": int64(7_000), "reasoning_output_tokens": int64(800), "total_tokens": int64(20_400)}}
+	events <- harness.Event{Type: "message.delta", Data: map[string]any{"text": `{"segments":[{"kind":"mrkdwn_text","text":"done"}]}`}}
+	events <- harness.Event{Type: "session.idle"}
+	close(events)
+	close(errs)
+	return events, errs
+}
+func (*footerHarness) Permission(context.Context, string, harness.PermissionDecision) error {
+	return nil
+}
+func (*footerHarness) Abort(context.Context, string) error { return nil }
+
+type duplicateToolProgressHarness struct{}
+
+func (*duplicateToolProgressHarness) Health(context.Context) error { return nil }
+func (*duplicateToolProgressHarness) CreateSession(context.Context, string) (harness.Session, error) {
+	return harness.Session{ID: "duplicate-tool-progress-session", CreatedAt: time.Now().UTC()}, nil
+}
+func (*duplicateToolProgressHarness) Prompt(context.Context, string, harness.Prompt) error {
+	return nil
+}
+func (*duplicateToolProgressHarness) Events(context.Context, string) (<-chan harness.Event, <-chan error) {
+	events := make(chan harness.Event, 4)
+	errs := make(chan error)
+	toolEvent := harness.Event{Type: "tool.execution.completed", Data: map[string]any{"tool_id": "telemetryos.code", "operation_id": "read", "resource_action": "source"}}
+	events <- toolEvent
+	events <- toolEvent
+	events <- harness.Event{Type: "message.delta", Data: map[string]any{"text": `{"segments":[{"kind":"mrkdwn_text","text":"done"}]}`}}
+	events <- harness.Event{Type: "session.idle"}
+	close(events)
+	close(errs)
+	return events, errs
+}
+func (*duplicateToolProgressHarness) Permission(context.Context, string, harness.PermissionDecision) error {
+	return nil
+}
+func (*duplicateToolProgressHarness) Abort(context.Context, string) error { return nil }
+
+type contextFailureHarness struct{}
+
+func (*contextFailureHarness) Health(context.Context) error { return nil }
+func (*contextFailureHarness) CreateSession(ctx context.Context, _ string) (harness.Session, error) {
+	return harness.Session{}, ctx.Err()
+}
+func (*contextFailureHarness) Prompt(context.Context, string, harness.Prompt) error { return nil }
+func (*contextFailureHarness) Events(context.Context, string) (<-chan harness.Event, <-chan error) {
+	return nil, nil
+}
+func (*contextFailureHarness) Permission(context.Context, string, harness.PermissionDecision) error {
+	return nil
+}
+func (*contextFailureHarness) Abort(context.Context, string) error { return nil }
+
+type recordingRequeueQueue struct {
+	jobs.Queue
+	contextErr error
+}
+
+func (q *recordingRequeueQueue) Requeue(ctx context.Context, id types.JobID, token, reason string, delay time.Duration) (jobs.Job, error) {
+	q.contextErr = ctx.Err()
+	return q.Queue.Requeue(ctx, id, token, reason, delay)
+}
+
 func (f classifierFunc) Decide(ctx context.Context, target classifier.Target, pack types.ContextPackRevision) (types.ClassificationDecision, error) {
 	return f(ctx, target, pack)
 }
@@ -115,6 +190,7 @@ type testSystem struct {
 	jobs       *jobs.MemoryQueue
 	deliveries *deliveries.MemoryQueue
 	decisions  *classifier.MemoryDecisionStore
+	activity   *activity.Hub
 }
 
 func newTestSystem(t *testing.T) testSystem {
@@ -135,8 +211,10 @@ func newTestSystem(t *testing.T) testSystem {
 	jobQueue := jobs.NewMemoryQueue(nil)
 	deliveryQueue := deliveries.NewMemoryQueue(nil)
 	decisionStore := classifier.NewMemoryDecisionStore()
+	activityFeed := activity.New(50)
 	pipe, err := New(Dependencies{
 		Config:       &cfg,
+		Activity:     activityFeed,
 		Ingress:      ingress,
 		Transport:    transport,
 		Observations: observer.NewMemoryStore(cfg.Retention.Messages, nil),
@@ -165,7 +243,7 @@ func newTestSystem(t *testing.T) testSystem {
 			t.Errorf("stop pipeline: %v", err)
 		}
 	})
-	return testSystem{pipe, ingress, transport, jobQueue, deliveryQueue, decisionStore}
+	return testSystem{pipe, ingress, transport, jobQueue, deliveryQueue, decisionStore, activityFeed}
 }
 
 func envelope(eventID, channelID, messageTS, text string) types.SlackEnvelope {
@@ -192,8 +270,15 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 		t.Fatal("first envelope was marked duplicate")
 	}
 	waitFor(t, func() bool { return len(system.transport.Requests()) == 1 })
-	if reactions := system.transport.ReactionRequests(); len(reactions) != 1 || reactions[0].Emoji != "eyes" || reactions[0].ChannelID != message.ChannelID || reactions[0].MessageTS != message.MessageTS {
-		t.Fatalf("classifier acknowledgement reactions = %#v", reactions)
+	if reactions := system.transport.ReactionRequests(); len(reactions) != 0 {
+		t.Fatalf("full-agent work used a reaction instead of Thinking Steps: %#v", reactions)
+	}
+	if starts := system.transport.ProgressStarts(); len(starts) != 1 || starts[0].ChannelID != message.ChannelID || starts[0].ThreadTS != message.MessageTS || starts[0].Step.Status != types.SlackProgressInProgress {
+		t.Fatalf("Thinking Steps starts = %#v", starts)
+	}
+	activityRecords := system.activity.Snapshot(message.OrganizationID, 10)
+	if len(activityRecords) != 1 || activityRecords[0].Category != "classifier" || activityRecords[0].Message != message.Text || activityRecords[0].Details["outcome"] != string(types.OutcomeReplyInThread) {
+		t.Fatalf("classification activity = %#v", activityRecords)
 	}
 
 	jobList, err := system.jobs.List(context.Background())
@@ -205,7 +290,7 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 		t.Fatalf("deliveries = %#v, err = %v", deliveryList, err)
 	}
 	request := system.transport.Requests()[0]
-	if request.Destination.ChannelID != message.ChannelID || request.Destination.ThreadTS != message.MessageTS {
+	if request.Destination.ChannelID != message.ChannelID || request.Destination.ThreadTS != message.MessageTS || request.Destination.StreamTS == "" {
 		t.Fatalf("destination was not server-derived from the source: %#v", request.Destination)
 	}
 	if _, err := deliveries.NewRenderer().Render(request.Result); err != nil {
@@ -223,8 +308,83 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 	if got := len(system.transport.Requests()); got != 1 {
 		t.Fatalf("duplicate caused %d deliveries", got)
 	}
-	if got := len(system.transport.ReactionRequests()); got != 1 {
+	if got := len(system.transport.ReactionRequests()); got != 0 {
 		t.Fatalf("duplicate caused %d reactions", got)
+	}
+	if got := len(system.transport.ProgressStarts()); got != 1 {
+		t.Fatalf("duplicate caused %d progress streams", got)
+	}
+}
+
+func TestFullAgentHarnessAttachesMeasuredExecutionFooter(t *testing.T) {
+	cfg := config.DefaultConfiguration
+	cfg.Jobs.Lease = time.Minute
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Harness: &footerHarness{}}}
+	result, err := p.runHarness(context.Background(), jobs.Job{
+		ID: "job-footer", OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "tos-tag",
+		Input: `{"request":"investigate"}`, ResolvedModel: types.ResolvedModel{ProviderID: "openai", ModelID: "gpt-5.6-luna", Variant: "max"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AgentFooter == nil || result.AgentFooter.ModelID != "gpt-5.6-luna" || result.AgentFooter.ReasoningEffort != "max" || result.AgentFooter.TotalTokens != 20_400 || result.AgentFooter.DurationMS < 0 {
+		t.Fatalf("agent footer = %#v", result.AgentFooter)
+	}
+	payloads, err := deliveries.NewRenderer().Render(result)
+	if err != nil || len(payloads) != 1 || len(payloads[0].Blocks) != 2 || payloads[0].Blocks[1]["type"] != "context" {
+		t.Fatalf("rendered agent footer = %#v err=%v", payloads, err)
+	}
+}
+
+func TestFullAgentHarnessDeduplicatesRepeatedToolProgress(t *testing.T) {
+	cfg := config.DefaultConfiguration
+	cfg.Jobs.Lease = time.Minute
+	transport := slack.NewStubDelivery()
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Harness: &duplicateToolProgressHarness{}, Transport: transport}}
+	_, err := p.runHarness(context.Background(), jobs.Job{
+		ID: "job-progress", OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "tos-tag", ProgressMessageTS: "progress.1",
+		Input: `{"request":"inspect"}`, ResolvedModel: types.ResolvedModel{ProviderID: "openai", ModelID: "gpt-5.6-luna", Variant: "medium"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates := transport.ProgressUpdates()
+	if len(updates) != 2 || updates[0].Step.ID == "agent-work" || updates[1].Step.ID != "agent-work" {
+		t.Fatalf("progress updates = %#v", updates)
+	}
+}
+
+func TestProductSourceProgressIdentifiesCorporateWebsite(t *testing.T) {
+	tests := []struct {
+		resourceAction string
+		wantTitle      string
+	}{
+		{resourceAction: "corporate-full", wantTitle: "Read TelemetryOS corporate website"},
+		{resourceAction: "docs-index", wantTitle: "Read TelemetryOS documentation index"},
+		{resourceAction: "docs-page", wantTitle: "Read TelemetryOS documentation"},
+	}
+	for _, test := range tests {
+		t.Run(test.resourceAction, func(t *testing.T) {
+			step := safeToolProgressStep("telemetryos.product-docs", "read", test.resourceAction)
+			if step.Title != test.wantTitle {
+				t.Fatalf("title = %q, want %q", step.Title, test.wantTitle)
+			}
+		})
+	}
+}
+
+func TestClassificationActivityHidesRestrictedMessageContent(t *testing.T) {
+	activityFeed := activity.New(10)
+	pipe := &Pipeline{deps: Dependencies{Activity: activityFeed}}
+	message := envelope("restricted-activity", "private-channel", "101.001", "sensitive private message")
+	message.Restricted = true
+	pipe.publishClassificationActivity(message, classifier.DecisionRecord{
+		ID: "decision", OrganizationID: message.OrganizationID, ObservationID: "observation",
+		Result: classifier.Result{Effective: types.ClassificationDecision{Outcome: types.OutcomeSilent, Confidence: .99, DisclosureClass: types.DisclosureDestinationSafe}},
+	})
+	records := activityFeed.Snapshot(message.OrganizationID, 10)
+	if len(records) != 1 || strings.Contains(records[0].Message, "sensitive") || records[0].Details["restricted"] != true {
+		t.Fatalf("restricted activity = %#v", records)
 	}
 }
 
@@ -242,6 +402,9 @@ func TestBriefMentionDeliversInChannel(t *testing.T) {
 	requests := system.transport.Requests()
 	if requests[0].Destination.ChannelID != message.ChannelID || requests[0].Destination.ThreadTS != "" {
 		t.Fatalf("brief answer was not delivered in-channel: %#v", requests[0].Destination)
+	}
+	if starts := system.transport.ProgressStarts(); len(starts) != 0 {
+		t.Fatalf("brief in-channel answer incorrectly started Thinking Steps: %#v", starts)
 	}
 	jobList, err := system.jobs.List(context.Background())
 	if err != nil || len(jobList) != 1 || !jobList[0].ReplyInChannel {
@@ -263,6 +426,9 @@ func TestMentionedThanksCreatesDirectDurableDeliveryWithoutAgentJob(t *testing.T
 	requests := system.transport.Requests()
 	if requests[0].Destination.ChannelID != message.ChannelID || requests[0].Destination.ThreadTS != "" || requests[0].Result.Segments[0].Text != "You're welcome!" {
 		t.Fatalf("direct social delivery = %#v", requests[0])
+	}
+	if requests[0].Result.AgentFooter != nil {
+		t.Fatalf("classifier-only reply gained full-agent metadata: %#v", requests[0].Result.AgentFooter)
 	}
 	jobList, err := system.jobs.List(context.Background())
 	if err != nil || len(jobList) != 0 {
@@ -375,6 +541,36 @@ func TestReconcileJobsReleasesExpiredWorkerAdmission(t *testing.T) {
 	pipe.reconcileJobs(context.Background())
 	if len(admissions.completed) != 1 || admissions.completed[0] != "admit-test" {
 		t.Fatalf("completed admissions = %v", admissions.completed)
+	}
+}
+
+func TestCancelledWorkerPersistsDurableRetryOutsideCancelledContext(t *testing.T) {
+	cfg := config.DefaultConfiguration
+	cfg.Jobs.Poll = time.Millisecond
+	cfg.Jobs.Lease = time.Second
+	queue := jobs.NewMemoryQueue(nil)
+	job, _, err := queue.Enqueue(context.Background(), jobs.Spec{
+		OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "channel-test", RootThreadTS: "100.1",
+		SessionID: "session-test", Generation: 1, IdempotencyKey: "cancelled-worker-retry", Kind: "agent_response",
+		Input: "test", MaxAttempts: 2, ExpiresAt: time.Now().UTC().Add(time.Minute),
+		ResolvedModel: types.ResolvedModel{ProviderID: "openai", ModelID: "test", ProfileID: "test", Variant: "medium"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordingQueue := &recordingRequeueQueue{Queue: queue}
+	pipe := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Jobs: recordingQueue, Harness: &contextFailureHarness{}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !pipe.processOneJob(ctx, "worker-test") {
+		t.Fatal("cancelled worker did not claim the queued job")
+	}
+	updated, err := queue.Get(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recordingQueue.contextErr != nil || updated.State != jobs.StateRetryWait {
+		t.Fatalf("durable retry used cancelled context or was not persisted: context_err=%v job=%#v", recordingQueue.contextErr, updated)
 	}
 }
 
@@ -609,6 +805,38 @@ func TestContextSyncAutoEnrollsObserveOnlyAndPreservesExistingOutputPolicy(t *te
 	}
 }
 
+func TestContextSyncAutomaticallyAssistsOnlyBotJoinedChannels(t *testing.T) {
+	cfg := contextSyncConfig()
+	cfg.Slack.AutoAssistJoinedChannels = true
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test", EnrollmentMode: "all_observable_channels"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Scopes: scopes}}
+	joined := types.SlackContextChannel{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "joined", Name: "joined", IsChannel: true, BotMembershipKnown: true, BotIsMember: true}
+	observed := types.SlackContextChannel{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "observed", Name: "observed", IsChannel: true, BotMembershipKnown: true}
+	if authorized, err := p.RegisterContextChannel(context.Background(), joined); err != nil || !authorized {
+		t.Fatalf("register joined channel authorized=%v err=%v", authorized, err)
+	}
+	if authorized, err := p.RegisterContextChannel(context.Background(), observed); err != nil || !authorized {
+		t.Fatalf("register observed channel authorized=%v err=%v", authorized, err)
+	}
+	joinedPolicy, _ := scopes.Resolve(context.Background(), "org-test", "team-test", "joined")
+	observedPolicy, _ := scopes.Resolve(context.Background(), "org-test", "team-test", "observed")
+	if joinedPolicy.ParticipationMode != types.ModeAssist || !joinedPolicy.ParticipationManagedByMembership || !joinedPolicy.BotIsMember {
+		t.Fatalf("joined channel policy = %#v", joinedPolicy)
+	}
+	if observedPolicy.ParticipationMode != types.ModeObserve || !observedPolicy.ParticipationManagedByMembership || observedPolicy.BotIsMember {
+		t.Fatalf("unjoined channel policy = %#v", observedPolicy)
+	}
+	if err := p.UpdateBotMembership(context.Background(), slack.BotMembershipChange{OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "joined", EventID: "left", Joined: false}); err != nil {
+		t.Fatal(err)
+	}
+	joinedPolicy, _ = scopes.Resolve(context.Background(), "org-test", "team-test", "joined")
+	if joinedPolicy.ParticipationMode != types.ModeObserve || joinedPolicy.BotIsMember || authorizedOutputPolicy(joinedPolicy, time.Now().UTC()) {
+		t.Fatalf("departed channel retained output authority: %#v", joinedPolicy)
+	}
+}
+
 func TestUnknownAppMentionPrivacyIsDeferredBeforePersistence(t *testing.T) {
 	cfg := contextSyncConfig()
 	scopes := orgconfig.NewMemory()
@@ -693,6 +921,33 @@ func TestContextHistoryImportCannotCreateDecisionAndRespectsExplicitUnenrollment
 	}
 }
 
+func TestLiveSlackEnvelopeAdvancesDurableContextWatermark(t *testing.T) {
+	cfg := contextSyncConfig()
+	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	states := slack.NewMemoryContextSyncStateStore()
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
+	_, _ = scopes.PutChannel(context.Background(), orgconfig.ChannelPolicy{
+		OrganizationID: "org-test", TeamID: "team-test", ChannelID: "public", Enrolled: true,
+		ParticipationMode: types.ModeObserve, MaxResponsesPerHour: 6, MaxConcurrentJobs: 1,
+		MembershipRevision: "m1", MembershipRefreshedAt: time.Now().UTC(),
+	})
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Scopes: scopes, Observations: observations, ContextSyncState: states}}
+	message := envelope("live-watermark", "public", "401.001", "live context")
+	if _, err := p.HandleEnvelope(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := states.List(context.Background(), "org-test", "team-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := stored["public"]
+	if state.BootstrapCompleted || !state.SyncedThrough.Equal(message.EventTime) {
+		t.Fatalf("live watermark = %#v", state)
+	}
+}
+
 func TestContextQueryUsesOnlyAuthorizedChannelsAndPolicyRestriction(t *testing.T) {
 	cfg := config.DefaultConfiguration
 	builder, err := contextpacks.New(cfg.ContextPacks, contextpacks.WordTokenizer{})
@@ -728,7 +983,17 @@ func TestContextQueryUsesOnlyAuthorizedChannelsAndPolicyRestriction(t *testing.T
 			t.Fatal(err)
 		}
 	}
-	p := &Pipeline{deps: Dependencies{Config: &cfg, Observations: recording, ContextPacks: builder, Scopes: scopes}}
+	memoryStore := agentmemory.NewMemoryStore(func() time.Time { return now })
+	for _, record := range []agentmemory.Record{
+		{OrganizationID: "org-test", ChannelID: "public-status", Scope: agentmemory.ScopeChannel, ScopeKey: "public-status/channel", Text: "Public durable memory", Facts: []agentmemory.Fact{{Text: "Public durable fact"}}, SourceHash: "public", Status: agentmemory.StatusActive, ExpiresAt: now.Add(time.Hour)},
+		{OrganizationID: "org-test", ChannelID: "private-alerts", Restricted: true, Scope: agentmemory.ScopeChannel, ScopeKey: "private-alerts/channel", Text: "Other private durable memory", Facts: []agentmemory.Fact{{Text: "Other private durable fact"}}, SourceHash: "private", Status: agentmemory.StatusActive, ExpiresAt: now.Add(time.Hour)},
+		{OrganizationID: "org-test", ChannelID: "management", Restricted: true, Scope: agentmemory.ScopeChannel, ScopeKey: "management/channel", Text: "Management durable memory", Facts: []agentmemory.Fact{{Text: "Management durable fact"}}, SourceHash: "management", Status: agentmemory.StatusActive, ExpiresAt: now.Add(time.Hour)},
+	} {
+		if _, _, err := memoryStore.PutGenerated(context.Background(), record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Observations: recording, ContextPacks: builder, Scopes: scopes, Memory: memoryStore}}
 	target := envelope("target-policy", "support", "350.001", "is the system down?")
 	pack, err := p.buildContextPack(context.Background(), target, "obs-target", 3)
 	if err != nil {
@@ -741,9 +1006,12 @@ func TestContextQueryUsesOnlyAuthorizedChannelsAndPolicyRestriction(t *testing.T
 		if source.ChannelID == "not-enrolled" || source.ChannelID == "private-alerts" || source.ChannelID == "management" {
 			t.Fatalf("ineligible source leaked into public destination: %#v", source)
 		}
-		if source.ChannelID == "public-status" && (source.ChannelName != "public-status" || source.AuthorID != "user-test" || source.ObservedAt.IsZero()) {
+		if source.ChannelID == "public-status" && source.Provenance == "human_message" && (source.ChannelName != "public-status" || source.AuthorID != "user-test" || source.ObservedAt.IsZero()) {
 			t.Fatalf("public attribution metadata missing from context source: %#v", source)
 		}
+	}
+	if !contextContains(pack, "Public durable memory") || contextContains(pack, "Other private durable memory") || contextContains(pack, "Management durable memory") {
+		t.Fatalf("public memory disclosure was not destination safe: %#v", pack.Sources)
 	}
 
 	privateTarget := envelope("management-target", "management", "350.004", "Private management plan")
@@ -766,6 +1034,18 @@ func TestContextQueryUsesOnlyAuthorizedChannelsAndPolicyRestriction(t *testing.T
 	if !foundManagement {
 		t.Fatal("current private channel content was not available in its own context")
 	}
+	if !contextContains(privatePack, "Public durable memory") || !contextContains(privatePack, "Management durable memory") || contextContains(privatePack, "Other private durable memory") {
+		t.Fatalf("private memory disclosure was not destination local: %#v", privatePack.Sources)
+	}
+}
+
+func contextContains(pack types.ContextPackRevision, text string) bool {
+	for _, source := range pack.Sources {
+		if strings.Contains(source.Text, text) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestHeartbeatClassifierUsesDestinationFilteredContextAndOutputPolicy(t *testing.T) {
@@ -911,8 +1191,8 @@ func TestAgentInputContainsOnlyDestinationSafeContext(t *testing.T) {
 		{ID: "directive/1", ChannelID: "alerts", Partition: types.PartitionSystem, Provenance: "operator_directive", Text: "Investigate every alert using OTel evidence.", DisclosureClass: types.DisclosureDestinationSafe},
 		{ID: "alerts/1", ChannelID: "alerts", ChannelName: "development", AuthorID: "U_TOM", Partition: types.PartitionEvidence, Provenance: "human_message", Text: "Production incident active", ObservedAt: time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC), DisclosureClass: types.DisclosureDestinationSafe},
 		{ID: "private/2", ChannelID: "private", ChannelName: "leadership", AuthorID: "U_SECRET", Partition: types.PartitionSituation, Text: "restricted details", DisclosureClass: types.DisclosureRestrictedAwareness},
-	}}, types.ClassificationDecision{ResponseIntent: "reconcile status", ReleasableEvidenceIDs: []string{"alerts/1"}})
-	if !strings.Contains(input, "Production incident active") || !strings.Contains(input, "Investigate every alert using OTel evidence.") || !strings.Contains(input, `"response_intent":"reconcile status"`) || !strings.Contains(input, `"releasable_evidence_ids":["alerts/1"]`) || !strings.Contains(input, `"presentation_requirements":["native_table"]`) || !strings.Contains(input, `"channel_name":"development"`) || !strings.Contains(input, `"author_id":"U_TOM"`) || !strings.Contains(input, `"observed_at":"2026-08-01T12:00:00Z"`) || strings.Contains(input, "restricted details") || strings.Contains(input, "leadership") || strings.Contains(input, "U_SECRET") || strings.Contains(input, "internal classifier") {
+	}}, types.ClassificationDecision{ResponseIntent: "reconcile status", ReleasableEvidenceIDs: []string{"alerts/1"}, ProductRetrievalRequired: true})
+	if !strings.Contains(input, "Production incident active") || !strings.Contains(input, "Investigate every alert using OTel evidence.") || !strings.Contains(input, `"response_intent":"reconcile status"`) || !strings.Contains(input, `"releasable_evidence_ids":["alerts/1"]`) || !strings.Contains(input, `"authoritative_product_retrieval_required":true`) || !strings.Contains(input, `"source_write_requested":false`) || !strings.Contains(input, `"presentation_requirements":["native_table"]`) || !strings.Contains(input, `"channel_name":"development"`) || !strings.Contains(input, `"author_id":"U_TOM"`) || !strings.Contains(input, `"observed_at":"2026-08-01T12:00:00Z"`) || strings.Contains(input, "restricted details") || strings.Contains(input, "leadership") || strings.Contains(input, "U_SECRET") || strings.Contains(input, "internal classifier") {
 		t.Fatalf("unsafe agent input: %s", input)
 	}
 	allowed := trustedMentionAllowlist(input)
@@ -927,7 +1207,9 @@ func TestPresentationRequirementsPreferNativeTablesForRepeatedComparisons(t *tes
 		want    bool
 	}{
 		"three-way repeated comparison": {request: "Compare the classifier, worker, and reconciler across authority, state, and retry behavior.", want: true},
+		"natural product choice":        {request: "What would make me choose a Node Pro instead of a Node Mini?", want: true},
 		"explicit matrix":               {request: "Give me a rollout matrix for these checks.", want: true},
+		"simple substitution":           {request: "Can I use Ethernet instead of Wi-Fi?", want: false},
 		"ordinary explanation":          {request: "Explain why MongoDB owns durable state.", want: false},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -954,11 +1236,35 @@ func TestCurrentAgentRuntimeContractOutranksHistoricalContext(t *testing.T) {
 	for _, required := range []string{
 		"direct, stateless, tool-free OpenAI Responses API call",
 		"Codex App Server in a disposable worker",
+		"TelemetryOS source access is permanently read-only",
+		"authoritative_product_retrieval_required",
+		"marketing-messaging skill",
+		"telemetryos-documentation skill",
+		"read telemetryos.product-docs/read docs-index",
+		"search and index results are discovery only",
+		"Every product answer includes concise clickable links",
+		"namespace/slug is an internal lookup identifier",
+		"telemetryos.wiki/read get or url",
 		"Treat any source that conflicts with these current facts as stale context",
 	} {
 		if !strings.Contains(currentAgentRuntimeContract, required) {
 			t.Fatalf("current runtime contract is missing %q", required)
 		}
+	}
+}
+
+func TestAuthoritativeProductRetrievalRequiresReviewedOfficialReader(t *testing.T) {
+	if authoritativeProductRetrievalCompleted(map[string]struct{}{}) || authoritativeProductRetrievalCompleted(map[string]struct{}{"agent.web/search": {}}) || authoritativeProductRetrievalCompleted(map[string]struct{}{"telemetryos.wiki/read/search": {}}) || authoritativeProductRetrievalCompleted(map[string]struct{}{"telemetryos.product-docs/read/docs-index": {}}) {
+		t.Fatal("missing or arbitrary web retrieval satisfied product authority")
+	}
+	for _, operation := range []string{"telemetryos.wiki/read/get", "telemetryos.product-docs/read/docs-page", "telemetryos.product-docs/read/corporate-full"} {
+		if !authoritativeProductRetrievalCompleted(map[string]struct{}{operation: {}}) {
+			t.Fatalf("reviewed product reader %q did not satisfy retrieval", operation)
+		}
+	}
+	flags := agentInputPolicyFlags(`{"source_write_requested":true,"authoritative_product_retrieval_required":true}`)
+	if !flags.SourceWriteRequested || !flags.ProductRetrievalRequired {
+		t.Fatalf("agent policy flags=%#v", flags)
 	}
 }
 

@@ -87,6 +87,7 @@ type Job struct {
 	FailureReason          string              `json:"failure_reason,omitempty"`
 	ApprovalID             string              `json:"approval_id,omitempty"`
 	ApprovedActionHash     string              `json:"approved_action_hash,omitempty"`
+	ProgressMessageTS      string              `json:"progress_message_ts,omitempty"`
 	AvailableAt            time.Time           `json:"available_at"`
 	CreatedAt              time.Time           `json:"created_at"`
 	UpdatedAt              time.Time           `json:"updated_at"`

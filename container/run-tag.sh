@@ -23,7 +23,6 @@ export TAG__LOGGING__FILE_PATH=/workspace/state/logs/tos-tag.jsonl
 export TAG__CODEX__COMMAND=/usr/local/bin/codex
 export TAG__CODEX__HOME=/home/tag/.codex
 export TAG__CODEX__WORKER_ROOT=/workspace/state/workers
-export TAG__MARKETPLACES__HEADLESS_ROOT=/workspace/skills/telemetryos-agent-skills
 export TAG__MARKETPLACES__BASE_ROOT=/workspace/skills/tag-agent-skills
 export TAG__MARKETPLACES__TOOL_ROOT=/workspace/projects/tos-tag/tool-marketplace
 export TAG__MARKETPLACES__TOOL_PATH=/home/tag/.local/bin:/usr/local/bin:/usr/bin:/bin

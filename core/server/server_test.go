@@ -10,14 +10,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/telemetryos/tos-tag/core/activity"
 	"github.com/telemetryos/tos-tag/core/audit"
 	"github.com/telemetryos/tos-tag/core/classifier"
 	"github.com/telemetryos/tos-tag/core/config"
 	"github.com/telemetryos/tos-tag/core/deliveries"
 	"github.com/telemetryos/tos-tag/core/jobs"
 	"github.com/telemetryos/tos-tag/core/keystore"
+	agentmemory "github.com/telemetryos/tos-tag/core/memory"
+	"github.com/telemetryos/tos-tag/core/orgconfig"
 	"github.com/telemetryos/tos-tag/core/slack"
 	"github.com/telemetryos/tos-tag/core/triggers"
+	"github.com/telemetryos/tos-tag/models"
 	"github.com/telemetryos/tos-tag/types"
 )
 
@@ -93,6 +97,29 @@ func TestTenantListsRequireOrganizationAndRedactExecutionPayloads(t *testing.T) 
 	body := response.Body.String()
 	if response.Code != http.StatusOK || strings.Contains(body, "private prompt text") || strings.Contains(body, "other tenant text") || strings.Contains(body, "lease") || strings.Contains(body, "job-b") {
 		t.Fatalf("tenant job list status=%d body=%s", response.Code, body)
+	}
+}
+
+func TestOrganizationListSupportsHeaderSelector(t *testing.T) {
+	srv, _ := newTestServer(t, false)
+	organizations := orgconfig.NewMemory()
+	_, _ = organizations.PutOrganization(context.Background(), models.Organization{PublicID: "org-b", Name: "Beta", EnrollmentMode: "allowlist"})
+	_, _ = organizations.PutOrganization(context.Background(), models.Organization{PublicID: "org-a", Name: "Alpha", EnrollmentMode: "all_observable_channels"})
+	srv.deps.Organizations = organizations
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/api/organizations", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var listed []map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 2 || listed[0]["id"] != "org-a" || listed[0]["name"] != "Alpha" {
+		t.Fatalf("listed=%#v", listed)
+	}
+	if _, exists := listed[0]["created_at"]; exists {
+		t.Fatalf("organization selector response exposed internal metadata: %#v", listed[0])
 	}
 }
 
@@ -176,26 +203,67 @@ func TestDotRoutesAreRedactedAndManagementPageIsEmbedded(t *testing.T) {
 	}
 	response := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/", nil))
-	if !strings.Contains(response.Body.String(), "Stubbed Slack control plane") {
-		t.Fatal("management page missing expected scope disclosure")
+	if !strings.Contains(response.Body.String(), "Real-time control-plane activity") || !strings.Contains(response.Body.String(), "Developer and diagnostic tools") {
+		t.Fatal("management page missing primary live activity or progressive diagnostics")
+	}
+	for _, want := range []string{"--accent: #f8b334", "--page: #1b2632", `class="topstripe"`, `class="sidebar"`, `telemetry<strong>OS</strong>`} {
+		if !strings.Contains(response.Body.String(), want) {
+			t.Fatalf("management page missing Agent Wiki visual-system marker %q", want)
+		}
+	}
+	if !strings.Contains(response.Body.String(), `id="organizationSelector"`) {
+		t.Fatal("management page missing global organization selector")
+	}
+	if !strings.Contains(response.Body.String(), `new Set(['organization_id', 'workspace_id', 'team_id'])`) {
+		t.Fatal("management tables do not hide tenant identifier columns")
+	}
+}
+
+func TestActivityAPIAndSSEAreOrganizationScoped(t *testing.T) {
+	srv, _ := newTestServer(t, false)
+	srv.activity.Publish(activity.Record{OrganizationID: "org-a", Category: "classifier", Kind: "classification.completed", Title: "Classifier decision", Message: "public question", Summary: "Reply in channel"})
+	srv.activity.Publish(activity.Record{OrganizationID: "org-b", Category: "classifier", Kind: "classification.completed", Title: "Other tenant decision", Message: "other tenant message"})
+
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/api/activity", nil))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("missing organization status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/api/activity?organization_id=org-a", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "public question") || strings.Contains(response.Body.String(), "other tenant message") {
+		t.Fatalf("activity status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodGet, "/admin/events?organization_id=org-a", nil).WithContext(ctx)
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "text/event-stream" || !strings.Contains(body, "event: activity") || !strings.Contains(body, "public question") || strings.Contains(body, "other tenant message") {
+		t.Fatalf("SSE status=%d headers=%v body=%s", response.Code, response.Header(), body)
 	}
 }
 
 func TestDedicatedManagementPages(t *testing.T) {
 	srv, _ := newTestServer(t, false)
-	pages := []string{"channels", "observations", "decisions", "context", "jobs", "routes", "marketplaces", "tools", "approvals", "routines", "triggers", "notes", "directives", "keystore", "retention", "audit", "usage"}
+	pages := []string{"channels", "observations", "decisions", "context", "jobs", "routes", "marketplaces", "tools", "approvals", "routines", "triggers", "notes", "memory", "directives", "keystore", "retention", "audit", "usage"}
 	for _, page := range pages {
 		response := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/"+page, nil))
 		if response.Code != http.StatusOK {
 			t.Fatalf("%s status = %d: %s", page, response.Code, response.Body.String())
 		}
-		expectedHeading := "<h2>" + page + "</h2>"
-		if page == "keystore" {
-			expectedHeading = "<h2>Write-only keystore</h2>"
-		}
+		expectedHeading := `<h1 class="route-title">` + managementPageCopy[page].Title + `</h1>`
 		if !strings.Contains(response.Body.String(), expectedHeading) {
 			t.Fatalf("%s did not render its dedicated page", page)
+		}
+		if strings.Contains(response.Body.String(), `const page = "\"`) || strings.Contains(response.Body.String(), `const endpoint = "\"`) {
+			t.Fatalf("%s rendered double-quoted JavaScript configuration", page)
+		}
+		if page != "keystore" && (strings.Contains(response.Body.String(), `id="queryForm"`) || strings.Contains(response.Body.String(), `id="mutationForm"`)) {
+			t.Fatalf("%s rendered redundant organization or mutation forms", page)
 		}
 	}
 
@@ -203,6 +271,34 @@ func TestDedicatedManagementPages(t *testing.T) {
 	srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/not-a-page", nil))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("unknown page status = %d", response.Code)
+	}
+}
+
+func TestMemoryManagementControlsCorrectPinAndForget(t *testing.T) {
+	srv, _ := newTestServer(t, false)
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	store := agentmemory.NewMemoryStore(func() time.Time { return now })
+	record, _, err := store.PutGenerated(context.Background(), agentmemory.Record{OrganizationID: "org", ChannelID: "channel", Scope: agentmemory.ScopeChannel, ScopeKey: "org/channel", Text: "generated memory", SourceHash: "hash", Status: agentmemory.StatusActive, ExpiresAt: now.Add(time.Hour), NaturalExpiresAt: now.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.deps.Memory = store
+	mutate := func(path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-TOS-TAG-CSRF", srv.csrf)
+		response := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(response, request)
+		return response
+	}
+	response := mutate("/admin/api/memory/correct", `{"organization_id":"org","record_id":"`+record.ID+`","text":"operator correction","actor_id":"admin"}`)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "operator correction") || !strings.Contains(response.Body.String(), `"pinned":true`) {
+		t.Fatalf("correct status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = mutate("/admin/api/memory/forget", `{"organization_id":"org","record_id":"`+record.ID+`","actor_id":"admin"}`)
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "operator correction") || !strings.Contains(response.Body.String(), `"status":"forgotten"`) {
+		t.Fatalf("forget status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

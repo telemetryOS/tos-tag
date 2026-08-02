@@ -92,11 +92,11 @@ func TestModelOutputCannotSelfAuthorizeSlackMentions(t *testing.T) {
 }
 
 func TestParseModelOutputSupportsRicherTypedPalette(t *testing.T) {
-	result, err := ParseModelOutput(`{"segments":[{"kind":"header","text":"Report"},{"kind":"divider"},{"kind":"image","image":{"url":"https://example.com/chart.png","alt_text":"A chart"}}]}`)
+	result, err := ParseModelOutput(`{"segments":[{"kind":"header","text":"Report"},{"kind":"card","card":{"title":"Deployment","body":"Healthy"}},{"kind":"carousel","carousel":{"cards":[{"title":"A","body":"First"},{"title":"B","body":"Second"}]}},{"kind":"divider"},{"kind":"image","image":{"url":"https://example.com/chart.png","alt_text":"A chart"}}]}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Segments) != 3 || result.Segments[0].Kind != types.SlackSegmentHeader || result.Segments[2].Image == nil {
+	if len(result.Segments) != 5 || result.Segments[0].Kind != types.SlackSegmentHeader || result.Segments[1].Card == nil || result.Segments[2].Carousel == nil || result.Segments[4].Image == nil {
 		t.Fatalf("result = %#v", result)
 	}
 	if _, err := NewRenderer().Render(result); err != nil {

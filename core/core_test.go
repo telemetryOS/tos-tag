@@ -54,9 +54,6 @@ func TestDefaultResponseProfilesExposeLowMediumAndMaxEffort(t *testing.T) {
 
 func TestCompleteObjectGraphConstructionHasNoNetworkSideEffects(t *testing.T) {
 	cfg := config.DefaultConfiguration
-	cfg.Marketplaces.HeadlessRoot = filepath.Clean(filepath.Join("..", "..", "telemetryos-agent-skills"))
-	cfg.Marketplaces.HeadlessCatalogPath = filepath.Join(".claude-plugin", "marketplace.json")
-	cfg.Marketplaces.HeadlessPlugin = "telemetryos-automation"
 	cfg.Marketplaces.BaseRoot = filepath.Clean(filepath.Join("..", "..", "tag-agent-skills"))
 	cfg.Marketplaces.BaseCatalogPath = filepath.Join(".claude-plugin", "marketplace.json")
 	cfg.Marketplaces.BasePlugin = "base"
@@ -67,34 +64,36 @@ func TestCompleteObjectGraphConstructionHasNoNetworkSideEffects(t *testing.T) {
 
 func TestConfiguredBehavioralPluginsAreAutomaticallyInjected(t *testing.T) {
 	cfg := config.MarketplaceConfig{
-		HeadlessRoot:        filepath.Clean(filepath.Join("..", "..", "telemetryos-agent-skills")),
-		HeadlessCatalogPath: filepath.Join(".claude-plugin", "marketplace.json"),
-		HeadlessPlugin:      "telemetryos-automation",
-		BaseRoot:            filepath.Clean(filepath.Join("..", "..", "tag-agent-skills")),
-		BaseCatalogPath:     filepath.Join(".claude-plugin", "marketplace.json"),
-		BasePlugin:          "base",
+		BaseRoot:        filepath.Clean(filepath.Join("..", "..", "tag-agent-skills")),
+		BaseCatalogPath: filepath.Join(".claude-plugin", "marketplace.json"),
+		BasePlugin:      "base",
 	}
 	available, injected, err := loadBehavioralSkills(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(available) < 10 || len(injected) != len(available) {
+	if len(available) != 14 || len(injected) != len(available) {
 		t.Fatalf("available=%d injected=%d", len(available), len(injected))
 	}
-	foundTagTriggers, foundTeamAlignment := false, false
+	wantSkills := map[string]bool{
+		"bug": false, "code-change-intake": false, "codebase-read": false,
+		"feature": false, "linear-issue-manager": false, "marketing-messaging": false, "product-knowledge": false, "telemetryos-documentation": false,
+		"slack-message-design": false, "suitability": false, "tag-triggers": false,
+		"team-alignment": false, "telemetry-otel-fetch": false, "wiki": false,
+	}
 	for _, snapshot := range injected {
-		if snapshot.MarketplaceID != "telemetryos/telemetryos-automation" && snapshot.MarketplaceID != "tos-tag/base" {
+		if snapshot.MarketplaceID != "tos-tag/base" {
 			t.Fatalf("unexpected automatically injected source: %#v", snapshot)
 		}
-		if snapshot.MarketplaceID == "tos-tag/base" && snapshot.Name == "tag-triggers" {
-			foundTagTriggers = true
+		if _, ok := wantSkills[snapshot.Name]; !ok {
+			t.Fatalf("unexpected base skill: %s", snapshot.Name)
 		}
-		if snapshot.MarketplaceID == "tos-tag/base" && snapshot.Name == "team-alignment" {
-			foundTeamAlignment = true
-		}
+		wantSkills[snapshot.Name] = true
 	}
-	if !foundTagTriggers || !foundTeamAlignment {
-		t.Fatalf("base skills were not automatically injected: tag-triggers=%v team-alignment=%v", foundTagTriggers, foundTeamAlignment)
+	for name, found := range wantSkills {
+		if !found {
+			t.Fatalf("base skill %s was not automatically injected", name)
+		}
 	}
 
 	cfg.BasePlugin = "missing"

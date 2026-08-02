@@ -160,6 +160,27 @@ func TestActiveThreadSocialAcknowledgementUsesDirectReplyWithoutAgent(t *testing
 	}
 }
 
+func TestLikelyAddressedWeatherQuestionUsesDirectClassifierClarification(t *testing.T) {
+	now := time.Date(2026, 8, 2, 16, 8, 54, 0, time.UTC)
+	service, err := New(DeterministicClassifier{}, false, .9, .98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := target("what's the weather like today?")
+	got.Envelope.ChannelID = "tos-tag"
+	got.Envelope.MessageTS = "2.0"
+	got.Envelope.UserID = "U_ALEX"
+	got.Envelope.EventTime = now
+	pack := types.ContextPackRevision{Sources: []types.ContextSource{
+		{ID: "tos-tag/2.0", ChannelID: "tos-tag", AuthorID: "U_ALEX", Provenance: "human_message", Text: got.Envelope.Text, ObservedAt: now, DisclosureClass: types.DisclosureDestinationSafe},
+		{ID: "tos-tag/1.0", ChannelID: "tos-tag", AuthorID: "U_TAG", Provenance: "agent_output_unverified", Text: "Previous Tag answer", ObservedAt: now.Add(-time.Minute), DisclosureClass: types.DisclosureDestinationSafe},
+	}}
+	result := service.Decide(context.Background(), got, pack)
+	if result.Effective.Outcome != types.OutcomeReplyInChannel || result.Effective.DirectReply != weatherLocationClarificationReply || result.Effective.RequiresFullAgent || result.Effective.Reaction != "speech_balloon" {
+		t.Fatalf("weather clarification did not stay in classifier: %#v", result)
+	}
+}
+
 func TestActiveThreadNaturalSocialReplyIsDecidedByClassifierWithoutAgent(t *testing.T) {
 	calls := 0
 	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
@@ -290,6 +311,43 @@ func TestDirectReplyCannotAnswerSubstantiveQuestion(t *testing.T) {
 	result := service.Decide(context.Background(), target("is production healthy?"), types.ContextPackRevision{})
 	if result.Effective.Outcome != types.OutcomeSilent || result.Effective.ReasonCodes[0] != "classifier.invalid_direct_reply" {
 		t.Fatalf("substantive question received a classifier-direct reply: %#v", result)
+	}
+}
+
+func TestStandaloneProductComparisonSurvivesInvalidEvidenceReference(t *testing.T) {
+	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		return types.ClassificationDecision{
+			Outcome: types.OutcomeReplyInThread, Confidence: .93, ReasonCodes: []string{"product.comparison"},
+			ReleasableEvidenceIDs: []string{"invented/product-source"}, ResponseIntent: "retrieve and compare the named plans",
+			DisclosureClass: types.DisclosureDestinationSafe, RequiresFullAgent: true, Reaction: "thinking_face",
+			AgentModelProfile: "chatgpt-luna-medium", AgentModelStrength: "standard", AgentReasoningEffort: "medium",
+		}, nil
+	}), false, .9, .98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := service.Decide(context.Background(), target("What is the difference between the enterprise and premium billing plans?"), types.ContextPackRevision{})
+	if result.Effective.Outcome != types.OutcomeReplyInThread || !result.Effective.RequiresFullAgent || len(result.Effective.ReleasableEvidenceIDs) != 0 || result.Effective.AgentModelProfile != "chatgpt-luna-medium" {
+		t.Fatalf("standalone product comparison was discarded: %#v", result)
+	}
+	if !strings.Contains(strings.Join(result.Effective.ReasonCodes, ","), "policy.invalid_evidence_pruned") {
+		t.Fatalf("evidence pruning was not auditable: %#v", result.Effective.ReasonCodes)
+	}
+}
+
+func TestEvidenceSanitizerPreservesOnlyAuthorizedClasses(t *testing.T) {
+	decision := types.ClassificationDecision{
+		ReasonCodes:           []string{"test"},
+		ReleasableEvidenceIDs: []string{"public/1", "private/1", "missing/1"},
+		RestrictedSignalIDs:   []string{"private/1", "public/1", "missing/2"},
+	}
+	pack := types.ContextPackRevision{Sources: []types.ContextSource{
+		{ID: "public/1", DisclosureClass: types.DisclosureDestinationSafe},
+		{ID: "private/1", DisclosureClass: types.DisclosureRestrictedAwareness},
+	}}
+	got := sanitizeEvidenceReferences(decision, pack)
+	if len(got.ReleasableEvidenceIDs) != 1 || got.ReleasableEvidenceIDs[0] != "public/1" || len(got.RestrictedSignalIDs) != 1 || got.RestrictedSignalIDs[0] != "private/1" {
+		t.Fatalf("sanitized evidence = %#v", got)
 	}
 }
 

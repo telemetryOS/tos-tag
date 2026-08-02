@@ -57,9 +57,12 @@ type SlackConfig struct {
 	ContextSyncEnabled            bool          `config:"contextSyncEnabled"`
 	ContextSyncLookback           time.Duration `config:"contextSyncLookback"`
 	ContextSyncTimeout            time.Duration `config:"contextSyncTimeout"`
+	ContextSyncRefresh            time.Duration `config:"contextSyncRefresh"`
+	ContextSyncRequestInterval    time.Duration `config:"contextSyncRequestInterval"`
 	ContextSyncMaxChannels        int           `config:"contextSyncMaxChannels"`
 	ContextSyncMaxMessages        int           `config:"contextSyncMaxMessages"`
 	ContextSyncMessagesPerChannel int           `config:"contextSyncMessagesPerChannel"`
+	AutoAssistJoinedChannels      bool          `config:"autoAssistJoinedChannels"`
 	OutputChannelIDs              []string      `config:"outputChannelIds"`
 	StubQueueSize                 int           `config:"stubQueueSize"`
 }
@@ -102,6 +105,22 @@ type ClassifierConfig struct {
 	MaxConcurrentJobs     int           `config:"maxConcurrentJobs"`
 }
 
+type MemoryConfig struct {
+	Enabled         bool          `config:"enabled"`
+	BaseURL         string        `config:"baseUrl"`
+	OpenAIAPIKey    string        `config:"openAiApiKey"`
+	Model           string        `config:"model"`
+	ReasoningEffort string        `config:"reasoningEffort"`
+	Timeout         time.Duration `config:"timeout"`
+	Interval        time.Duration `config:"interval"`
+	Lookback        time.Duration `config:"lookback"`
+	MinMessages     int           `config:"minMessages"`
+	MaxMessages     int           `config:"maxMessages"`
+	MaxScopesPerRun int           `config:"maxScopesPerRun"`
+	MaxOutputTokens int           `config:"maxOutputTokens"`
+	MinConfidence   float64       `config:"minConfidence"`
+}
+
 type JobsConfig struct {
 	Lease             time.Duration `config:"lease"`
 	Poll              time.Duration `config:"poll"`
@@ -110,11 +129,12 @@ type JobsConfig struct {
 }
 
 type CodexConfig struct {
-	Enabled    bool          `config:"enabled"`
-	Command    string        `config:"command"`
-	Home       string        `config:"home"`
-	WorkerRoot string        `config:"workerRoot"`
-	Timeout    time.Duration `config:"timeout"`
+	Enabled       bool          `config:"enabled"`
+	Command       string        `config:"command"`
+	Home          string        `config:"home"`
+	WorkerRoot    string        `config:"workerRoot"`
+	WebSearchMode string        `config:"webSearchMode"`
+	Timeout       time.Duration `config:"timeout"`
 }
 
 type ModelConfig struct {
@@ -124,20 +144,17 @@ type ModelConfig struct {
 	DefaultVariant  string `config:"defaultVariant"`
 }
 type MarketplaceConfig struct {
-	SkillRoot           string   `config:"skillRoot"`
-	CatalogPath         string   `config:"catalogPath"`
-	InjectedSkills      []string `config:"injectedSkills"`
-	HeadlessRoot        string   `config:"headlessRoot"`
-	HeadlessCatalogPath string   `config:"headlessCatalogPath"`
-	HeadlessPlugin      string   `config:"headlessPlugin"`
-	BaseRoot            string   `config:"baseRoot"`
-	BaseCatalogPath     string   `config:"baseCatalogPath"`
-	BasePlugin          string   `config:"basePlugin"`
-	InjectedTools       []string `config:"injectedTools"`
-	ToolRoot            string   `config:"toolRoot"`
-	ToolCatalogPath     string   `config:"toolCatalogPath"`
-	ToolPath            string   `config:"toolPath"`
-	ToolsEnabled        bool     `config:"toolsEnabled"`
+	SkillRoot       string   `config:"skillRoot"`
+	CatalogPath     string   `config:"catalogPath"`
+	InjectedSkills  []string `config:"injectedSkills"`
+	BaseRoot        string   `config:"baseRoot"`
+	BaseCatalogPath string   `config:"baseCatalogPath"`
+	BasePlugin      string   `config:"basePlugin"`
+	InjectedTools   []string `config:"injectedTools"`
+	ToolRoot        string   `config:"toolRoot"`
+	ToolCatalogPath string   `config:"toolCatalogPath"`
+	ToolPath        string   `config:"toolPath"`
+	ToolsEnabled    bool     `config:"toolsEnabled"`
 }
 type KeystoreConfig struct {
 	Enabled   bool   `config:"enabled"`
@@ -155,6 +172,7 @@ type Config struct {
 	Retention    RetentionConfig   `config:"retention"`
 	ContextPacks ContextPackConfig `config:"contextPacks"`
 	Classifier   ClassifierConfig  `config:"classifier"`
+	Memory       MemoryConfig      `config:"memory"`
 	Jobs         JobsConfig        `config:"jobs"`
 	Codex        CodexConfig       `config:"codex"`
 	Models       ModelConfig       `config:"models"`
@@ -181,6 +199,8 @@ var DefaultConfiguration = Config{
 		Mode:                          "stub",
 		ContextSyncLookback:           7 * 24 * time.Hour,
 		ContextSyncTimeout:            2 * time.Hour,
+		ContextSyncRefresh:            5 * time.Minute,
+		ContextSyncRequestInterval:    1200 * time.Millisecond,
 		ContextSyncMaxChannels:        500,
 		ContextSyncMaxMessages:        5_000,
 		ContextSyncMessagesPerChannel: 100,
@@ -216,13 +236,26 @@ var DefaultConfiguration = Config{
 		MaxResponsesPerHour:   120,
 		MaxConcurrentJobs:     8,
 	},
+	Memory: MemoryConfig{
+		BaseURL:         "https://api.openai.com/v1",
+		Model:           "gpt-5.6-luna",
+		ReasoningEffort: "medium",
+		Timeout:         90 * time.Second,
+		Interval:        10 * time.Minute,
+		Lookback:        7 * 24 * time.Hour,
+		MinMessages:     6,
+		MaxMessages:     80,
+		MaxScopesPerRun: 8,
+		MaxOutputTokens: 3000,
+		MinConfidence:   0.78,
+	},
 	Jobs: JobsConfig{
 		Lease:             30 * time.Second,
 		Poll:              250 * time.Millisecond,
 		MaxAttempts:       3,
 		WorkerConcurrency: 8,
 	},
-	Codex: CodexConfig{Command: "codex", WorkerRoot: "/tmp/tos-tag-workers", Timeout: 5 * time.Minute},
+	Codex: CodexConfig{Command: "codex", WorkerRoot: "/tmp/tos-tag-workers", WebSearchMode: "disabled", Timeout: 5 * time.Minute},
 	Models: ModelConfig{
 		DefaultProfile:  "chatgpt-luna-max",
 		DefaultProvider: "openai",
@@ -243,7 +276,9 @@ func Load() (*Config, error) {
 	if err := applyCodexEnvironment(&cfg.Codex); err != nil {
 		return nil, err
 	}
-	applySlackEnvironment(&cfg.Slack)
+	if err := applySlackEnvironment(&cfg.Slack); err != nil {
+		return nil, err
+	}
 	applyMarketplaceEnvironment(&cfg.Marketplaces)
 	if err := applyClassifierEnvironment(&cfg.Classifier); err != nil {
 		return nil, err
@@ -272,10 +307,18 @@ func applyMarketplaceEnvironment(cfg *MarketplaceConfig) {
 	}
 }
 
-func applySlackEnvironment(cfg *SlackConfig) {
+func applySlackEnvironment(cfg *SlackConfig) error {
+	if raw, ok := os.LookupEnv("TAG__SLACK__AUTO_ASSIST_JOINED_CHANNELS"); ok {
+		value, err := strconv.ParseBool(strings.TrimSpace(raw))
+		if err != nil {
+			return fmt.Errorf("TAG__SLACK__AUTO_ASSIST_JOINED_CHANNELS must be a boolean: %w", err)
+		}
+		cfg.AutoAssistJoinedChannels = value
+	}
 	if raw, ok := os.LookupEnv("TAG__SLACK__OUTPUT_CHANNEL_IDS"); ok {
 		cfg.OutputChannelIDs = splitNonEmpty(raw)
 	}
+	return nil
 }
 
 func applyCodexEnvironment(cfg *CodexConfig) error {
@@ -287,9 +330,10 @@ func applyCodexEnvironment(cfg *CodexConfig) error {
 		cfg.Enabled = value
 	}
 	for name, target := range map[string]*string{
-		"TAG__CODEX__COMMAND":     &cfg.Command,
-		"TAG__CODEX__HOME":        &cfg.Home,
-		"TAG__CODEX__WORKER_ROOT": &cfg.WorkerRoot,
+		"TAG__CODEX__COMMAND":         &cfg.Command,
+		"TAG__CODEX__HOME":            &cfg.Home,
+		"TAG__CODEX__WORKER_ROOT":     &cfg.WorkerRoot,
+		"TAG__CODEX__WEB_SEARCH_MODE": &cfg.WebSearchMode,
 	} {
 		if value, ok := os.LookupEnv(name); ok {
 			*target = strings.TrimSpace(value)
@@ -424,7 +468,7 @@ func Validate(cfg *Config) error {
 	if cfg.Slack.StubQueueSize <= 0 {
 		return fmt.Errorf("slack.stubQueueSize must be positive")
 	}
-	if cfg.Slack.ContextSyncLookback <= 0 || cfg.Slack.ContextSyncTimeout <= 0 || cfg.Slack.ContextSyncMaxChannels <= 0 || cfg.Slack.ContextSyncMaxMessages <= 0 || cfg.Slack.ContextSyncMessagesPerChannel <= 0 {
+	if cfg.Slack.ContextSyncLookback <= 0 || cfg.Slack.ContextSyncTimeout <= 0 || cfg.Slack.ContextSyncRefresh <= 0 || cfg.Slack.ContextSyncRequestInterval < 0 || cfg.Slack.ContextSyncMaxChannels <= 0 || cfg.Slack.ContextSyncMaxMessages <= 0 || cfg.Slack.ContextSyncMessagesPerChannel <= 0 {
 		return fmt.Errorf("Slack context-sync bounds must be positive")
 	}
 	if cfg.Slack.ContextSyncLookback > cfg.Retention.Messages {
@@ -437,6 +481,9 @@ func Validate(cfg *Config) error {
 		if !strings.HasPrefix(cfg.Slack.UserOAuthToken, "xoxp-") {
 			return fmt.Errorf("Slack context sync requires a User OAuth xoxp token")
 		}
+	}
+	if cfg.Slack.AutoAssistJoinedChannels && !cfg.Slack.ContextSyncEnabled {
+		return fmt.Errorf("automatic assist for joined channels requires Slack context sync")
 	}
 	seenOutputChannels := make(map[string]struct{}, len(cfg.Slack.OutputChannelIDs))
 	for _, channelID := range cfg.Slack.OutputChannelIDs {
@@ -478,8 +525,24 @@ func Validate(cfg *Config) error {
 	default:
 		return fmt.Errorf("unsupported classifier.provider %q; use deterministic or openai", cfg.Classifier.Provider)
 	}
+	if cfg.Memory.Enabled {
+		if cfg.Memory.BaseURL == "" || cfg.Memory.Model == "" || cfg.Memory.ReasoningEffort == "" || (cfg.Memory.OpenAIAPIKey == "" && cfg.Classifier.OpenAIAPIKey == "") {
+			return fmt.Errorf("enabled memory curation requires an OpenAI base URL, API key, Luna model, and reasoning effort")
+		}
+		if cfg.Memory.Model != "gpt-5.6-luna" {
+			return fmt.Errorf("memory curation must use gpt-5.6-luna")
+		}
+		if cfg.Memory.Timeout <= 0 || cfg.Memory.Interval <= 0 || cfg.Memory.Lookback <= 0 || cfg.Memory.Lookback > cfg.Retention.Messages || cfg.Memory.MinMessages < 2 || cfg.Memory.MaxMessages < cfg.Memory.MinMessages || cfg.Memory.MaxScopesPerRun <= 0 || cfg.Memory.MaxOutputTokens <= 0 || cfg.Memory.MinConfidence < 0 || cfg.Memory.MinConfidence > 1 {
+			return fmt.Errorf("invalid memory curation bounds")
+		}
+	}
 	if cfg.Models.DefaultProfile == "" || cfg.Models.DefaultProvider == "" || cfg.Models.DefaultModel == "" {
 		return fmt.Errorf("default model profile, provider, and model are required")
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Codex.WebSearchMode)) {
+	case "disabled", "cached", "indexed", "live":
+	default:
+		return fmt.Errorf("unsupported codex.webSearchMode %q; use disabled, cached, indexed, or live", cfg.Codex.WebSearchMode)
 	}
 	if cfg.Codex.Enabled {
 		if cfg.Codex.Timeout <= 0 || strings.TrimSpace(cfg.Codex.Command) == "" || strings.TrimSpace(cfg.Codex.Home) == "" || strings.TrimSpace(cfg.Codex.WorkerRoot) == "" {
@@ -491,9 +554,6 @@ func Validate(cfg *Config) error {
 	}
 	if (cfg.Marketplaces.SkillRoot == "") != (cfg.Marketplaces.CatalogPath == "") {
 		return fmt.Errorf("marketplace skill root and catalog path must be configured together")
-	}
-	if err := validatePluginSource("headless", cfg.Marketplaces.HeadlessRoot, cfg.Marketplaces.HeadlessCatalogPath, cfg.Marketplaces.HeadlessPlugin); err != nil {
-		return err
 	}
 	if err := validatePluginSource("base", cfg.Marketplaces.BaseRoot, cfg.Marketplaces.BaseCatalogPath, cfg.Marketplaces.BasePlugin); err != nil {
 		return err
@@ -553,34 +613,42 @@ func isLoopbackHost(host string) bool {
 
 func (c *Config) RedactedStatus() map[string]any {
 	return map[string]any{
-		"environment":                     c.Environment,
-		"http_addr":                       c.HTTP.Addr,
-		"mongo_database":                  c.Mongo.Database,
-		"slack_mode":                      c.Slack.Mode,
-		"slack_live_enabled":              c.Slack.LiveEnabled,
-		"slack_context_sync_enabled":      c.Slack.ContextSyncEnabled,
-		"slack_context_sync_lookback":     c.Slack.ContextSyncLookback.String(),
-		"slack_context_sync_max_channels": c.Slack.ContextSyncMaxChannels,
-		"slack_context_sync_max_messages": c.Slack.ContextSyncMaxMessages,
-		"slack_output_channel_count":      len(c.Slack.OutputChannelIDs),
-		"classifier_mode":                 c.Classifier.Mode,
-		"classifier_provider":             c.Classifier.Provider,
-		"classifier_model":                c.Classifier.Model,
-		"classifier_reasoning_effort":     c.Classifier.ReasoningEffort,
-		"classifier_max_responses_hour":   c.Classifier.MaxResponsesPerHour,
-		"classifier_max_concurrent_jobs":  c.Classifier.MaxConcurrentJobs,
-		"job_worker_concurrency":          c.Jobs.WorkerConcurrency,
-		"auth_enabled":                    c.Auth.Enabled,
-		"log_file_enabled":                c.Logging.FilePath != "",
-		"message_retention":               c.Retention.Messages.String(),
-		"context_max_tokens":              c.ContextPacks.MaxTokens,
-		"codex_app_server_enabled":        c.Codex.Enabled,
-		"default_model_profile":           c.Models.DefaultProfile,
-		"skill_marketplace_configured":    c.Marketplaces.SkillRoot != "" || c.Marketplaces.HeadlessRoot != "" || c.Marketplaces.BaseRoot != "",
-		"headless_plugin":                 c.Marketplaces.HeadlessPlugin,
-		"base_plugin":                     c.Marketplaces.BasePlugin,
-		"tool_marketplace_configured":     c.Marketplaces.ToolRoot != "",
-		"marketplace_tools_enabled":       c.Marketplaces.ToolsEnabled,
-		"keystore_enabled":                c.Keystore.Enabled,
+		"environment":                         c.Environment,
+		"http_addr":                           c.HTTP.Addr,
+		"mongo_database":                      c.Mongo.Database,
+		"slack_mode":                          c.Slack.Mode,
+		"slack_live_enabled":                  c.Slack.LiveEnabled,
+		"slack_context_sync_enabled":          c.Slack.ContextSyncEnabled,
+		"slack_context_sync_lookback":         c.Slack.ContextSyncLookback.String(),
+		"slack_context_sync_refresh":          c.Slack.ContextSyncRefresh.String(),
+		"slack_context_sync_request_interval": c.Slack.ContextSyncRequestInterval.String(),
+		"slack_context_sync_max_channels":     c.Slack.ContextSyncMaxChannels,
+		"slack_context_sync_max_messages":     c.Slack.ContextSyncMaxMessages,
+		"slack_auto_assist_joined_channels":   c.Slack.AutoAssistJoinedChannels,
+		"slack_output_channel_count":          len(c.Slack.OutputChannelIDs),
+		"classifier_mode":                     c.Classifier.Mode,
+		"classifier_provider":                 c.Classifier.Provider,
+		"classifier_model":                    c.Classifier.Model,
+		"classifier_reasoning_effort":         c.Classifier.ReasoningEffort,
+		"classifier_max_responses_hour":       c.Classifier.MaxResponsesPerHour,
+		"classifier_max_concurrent_jobs":      c.Classifier.MaxConcurrentJobs,
+		"memory_enabled":                      c.Memory.Enabled,
+		"memory_model":                        c.Memory.Model,
+		"memory_reasoning_effort":             c.Memory.ReasoningEffort,
+		"memory_interval":                     c.Memory.Interval.String(),
+		"memory_lookback":                     c.Memory.Lookback.String(),
+		"job_worker_concurrency":              c.Jobs.WorkerConcurrency,
+		"auth_enabled":                        c.Auth.Enabled,
+		"log_file_enabled":                    c.Logging.FilePath != "",
+		"message_retention":                   c.Retention.Messages.String(),
+		"context_max_tokens":                  c.ContextPacks.MaxTokens,
+		"codex_app_server_enabled":            c.Codex.Enabled,
+		"codex_web_search_mode":               c.Codex.WebSearchMode,
+		"default_model_profile":               c.Models.DefaultProfile,
+		"skill_marketplace_configured":        c.Marketplaces.SkillRoot != "" || c.Marketplaces.BaseRoot != "",
+		"base_plugin":                         c.Marketplaces.BasePlugin,
+		"tool_marketplace_configured":         c.Marketplaces.ToolRoot != "",
+		"marketplace_tools_enabled":           c.Marketplaces.ToolsEnabled,
+		"keystore_enabled":                    c.Keystore.Enabled,
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/RobertWHurst/blackbox"
 
+	"github.com/telemetryos/tos-tag/core/activity"
 	"github.com/telemetryos/tos-tag/core/admission"
 	"github.com/telemetryos/tos-tag/core/approvals"
 	"github.com/telemetryos/tos-tag/core/audit"
@@ -25,6 +26,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/keystore"
 	"github.com/telemetryos/tos-tag/core/management"
 	"github.com/telemetryos/tos-tag/core/marketplace"
+	agentmemory "github.com/telemetryos/tos-tag/core/memory"
 	"github.com/telemetryos/tos-tag/core/modelrouter"
 	"github.com/telemetryos/tos-tag/core/observer"
 	"github.com/telemetryos/tos-tag/core/orgconfig"
@@ -48,19 +50,23 @@ type Core struct {
 	Config *config.Config
 	Logger *blackbox.Logger
 
-	database    *database.Database
-	pipeline    *pipeline.Pipeline
-	server      *server.Server
-	retention   *retention.Janitor
-	router      *modelrouter.Registry
-	toolBridge  *tools.Bridge
-	toolIDs     []string
-	routines    *routines.Service
-	triggers    *triggers.Service
-	contextSync *slack.ContextSyncer
-	contextRun  *slack.ContextSyncRun
-	contextStop context.CancelFunc
-	contextDone chan struct{}
+	database           *database.Database
+	pipeline           *pipeline.Pipeline
+	server             *server.Server
+	retention          *retention.Janitor
+	router             *modelrouter.Registry
+	toolBridge         *tools.Bridge
+	toolIDs            []string
+	routines           *routines.Service
+	triggers           *triggers.Service
+	contextSync        *slack.ContextSyncer
+	contextRun         *slack.ContextSyncRun
+	contextStop        context.CancelFunc
+	contextDone        chan struct{}
+	contextRefreshStop context.CancelFunc
+	contextRefreshDone chan struct{}
+	activity           *activity.Hub
+	memoryCurator      *agentmemory.Curator
 }
 
 // New builds the full object graph but performs no network I/O.
@@ -71,6 +77,8 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	if logger == nil {
 		logger = blackbox.New()
 	}
+	activityFeed := activity.New(500)
+	logger.AddTarget(activityFeed)
 	db := database.New(cfg, logger)
 	observations := observer.NewMongoStore(db, cfg.Retention.Messages)
 	sessionStore := sessions.NewMongoStore(db)
@@ -101,7 +109,24 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	}
 	admissionController := admission.NewMongo(db)
 	usageRecorder := usage.NewMongo(db)
+	memoryStore := agentmemory.NewMongoStore(db)
+	var memoryCurator *agentmemory.Curator
+	if cfg.Memory.Enabled {
+		apiKey := cfg.Memory.OpenAIAPIKey
+		if apiKey == "" {
+			apiKey = cfg.Classifier.OpenAIAPIKey
+		}
+		memorySummarizer, memoryErr := agentmemory.NewOpenAISummarizer(agentmemory.OpenAIOptions{BaseURL: cfg.Memory.BaseURL, APIKey: apiKey, Model: cfg.Memory.Model, ReasoningEffort: cfg.Memory.ReasoningEffort, Timeout: cfg.Memory.Timeout, MaxOutputTokens: cfg.Memory.MaxOutputTokens})
+		if memoryErr != nil {
+			return nil, fmt.Errorf("construct memory summarizer: %w", memoryErr)
+		}
+		memoryCurator, memoryErr = agentmemory.NewCurator(db, memoryStore, memorySummarizer, usageRecorder, logger, agentmemory.CuratorOptions{Interval: cfg.Memory.Interval, Lookback: cfg.Memory.Lookback, MinMessages: cfg.Memory.MinMessages, MaxMessages: cfg.Memory.MaxMessages, MaxScopesPerRun: cfg.Memory.MaxScopesPerRun, MinConfidence: cfg.Memory.MinConfidence, Timeout: cfg.Memory.Timeout})
+		if memoryErr != nil {
+			return nil, fmt.Errorf("construct memory curator: %w", memoryErr)
+		}
+	}
 	channelConfiguration := channelconfig.NewMongoStore(db)
+	contextSyncState := slack.NewMongoContextSyncStateStore(db)
 	managementRecords := management.NewMongo(db)
 	routineStore := routines.NewMongoStore(db)
 	triggerStore := triggers.NewMongoStore(db)
@@ -188,7 +213,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 		if workerErr != nil {
 			return nil, fmt.Errorf("construct Codex worker manager: %w", workerErr)
 		}
-		responseHarness, err = harness.NewWorkerCodex(harness.WorkerCodexOptions{Manager: workerManager, Command: cfg.Codex.Command, CodexHome: cfg.Codex.Home, Skills: injectedSkillSnapshots, Timeout: cfg.Codex.Timeout, ToolBridge: toolBridge, ToolIDs: allowedToolIDs})
+		responseHarness, err = harness.NewWorkerCodex(harness.WorkerCodexOptions{Manager: workerManager, Command: cfg.Codex.Command, CodexHome: cfg.Codex.Home, Skills: injectedSkillSnapshots, Timeout: cfg.Codex.Timeout, WebSearchMode: cfg.Codex.WebSearchMode, ToolBridge: toolBridge, ToolIDs: allowedToolIDs, Activity: activityFeed})
 		if err != nil {
 			return nil, err
 		}
@@ -245,12 +270,15 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 				OrganizationID:     cfg.Slack.OrganizationID,
 				TeamID:             cfg.Slack.TeamID,
 				UserOAuthToken:     cfg.Slack.UserOAuthToken,
+				BotUserOAuthToken:  cfg.Slack.BotUserOAuthToken,
 				BotUserID:          cfg.Slack.BotUserID,
 				Lookback:           cfg.Slack.ContextSyncLookback,
 				Timeout:            cfg.Slack.ContextSyncTimeout,
 				MaxChannels:        cfg.Slack.ContextSyncMaxChannels,
 				MaxMessages:        cfg.Slack.ContextSyncMaxMessages,
 				MessagesPerChannel: cfg.Slack.ContextSyncMessagesPerChannel,
+				RequestInterval:    cfg.Slack.ContextSyncRequestInterval,
+				StateStore:         contextSyncState,
 				Logger:             logger,
 			})
 			if liveErr != nil {
@@ -273,17 +301,22 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 		)
 	}
 	pipe, err := pipeline.New(pipeline.Dependencies{
-		Config: cfg, Logger: logger, Ingress: ingress, Transport: transport,
+		Config: cfg, Logger: logger, Activity: activityFeed, Ingress: ingress, Transport: transport,
 		Observations: observations, Sessions: sessionStore, Jobs: jobQueue,
 		Decisions: decisionStore, Deliveries: deliveryQueue, ContextPacks: contextBuilder, ContextStore: contextStore,
-		Classifier: classificationService, Renderer: renderer, Scopes: scopeResolver, Intelligence: intelligenceProjector, Admissions: admissionController, ModelRouter: responseRouter, Harness: responseHarness, Usage: usageRecorder, ChannelConfig: channelConfiguration, Audit: auditChain, Approvals: approvalStore,
+		Classifier: classificationService, Renderer: renderer, Scopes: scopeResolver, Intelligence: intelligenceProjector, Admissions: admissionController, ModelRouter: responseRouter, Harness: responseHarness, Usage: usageRecorder, ChannelConfig: channelConfiguration, Audit: auditChain, Approvals: approvalStore, ContextSyncState: contextSyncState, Memory: memoryStore,
 	})
 	if err != nil {
 		return nil, err
 	}
+	if liveIngress != nil {
+		liveIngress.SetBotMembershipHandler(pipe.UpdateBotMembership)
+	}
 	triggerScheduler, err := triggers.NewScheduler(triggerStore, jobQueue, triggers.GateFunc(pipe.EvaluateHeartbeat), triggers.AuthorizerFunc(func(ctx context.Context, subscription triggers.Subscription) error {
 		policy, resolveErr := organizationStore.Resolve(ctx, subscription.OrganizationID, subscription.WorkspaceID, subscription.ChannelID)
-		if resolveErr != nil || !policy.Enrolled || policy.KillSwitch || !policy.MembershipRefreshedAt.After(time.Now().UTC().Add(-24*time.Hour)) || !slackOutputChannelAllowedConfig(cfg, subscription.ChannelID) {
+		participating := policy.ParticipationMode == types.ModeMention || policy.ParticipationMode == types.ModeAssist || policy.ParticipationMode == types.ModeProactive
+		membershipAuthorized := !policy.ParticipationManagedByMembership || (policy.BotMembershipKnown && policy.BotIsMember)
+		if resolveErr != nil || !policy.Enrolled || policy.KillSwitch || !participating || !membershipAuthorized || !policy.MembershipRefreshedAt.After(time.Now().UTC().Add(-24*time.Hour)) || !slackOutputChannelAllowedConfig(cfg, subscription.ChannelID) {
 			return fmt.Errorf("trigger scope denied")
 		}
 		return nil
@@ -301,14 +334,14 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 		statusTransport = stubTransport
 	}
 	srv, err := server.New(server.Dependencies{
-		Config: cfg, Logger: logger, Health: db, Ingress: statusIngress, Transport: statusTransport,
+		Config: cfg, Logger: logger, Activity: activityFeed, Health: db, Ingress: statusIngress, Transport: statusTransport,
 		Jobs: jobQueue, Deliveries: deliveryQueue, Decisions: decisionStore, Version: Version,
-		Routes: responseRouter, Organizations: organizationStore, Retention: retentionJanitor, Records: managementRecords, ChannelConfig: channelConfiguration, Marketplaces: marketplaceRegistry, ToolMarketplaces: toolMarketplaceRegistry, Intelligence: intelligenceProjector, Secrets: secretStore, Audit: auditChain, Approvals: approvalStore, ApprovalCoordinator: approvalCoordinator, Routines: routineStore, Triggers: triggerStore,
+		Routes: responseRouter, Organizations: organizationStore, Retention: retentionJanitor, Records: managementRecords, ChannelConfig: channelConfiguration, Marketplaces: marketplaceRegistry, ToolMarketplaces: toolMarketplaceRegistry, Intelligence: intelligenceProjector, Memory: memoryStore, Secrets: secretStore, Audit: auditChain, Approvals: approvalStore, ApprovalCoordinator: approvalCoordinator, Routines: routineStore, Triggers: triggerStore,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &Core{Config: cfg, Logger: logger, database: db, pipeline: pipe, server: srv, retention: retentionJanitor, router: responseRouter, toolBridge: toolBridge, toolIDs: allowedToolIDs, routines: routineService, triggers: triggerService, contextSync: slackContextSync}, nil
+	return &Core{Config: cfg, Logger: logger, database: db, pipeline: pipe, server: srv, retention: retentionJanitor, router: responseRouter, toolBridge: toolBridge, toolIDs: allowedToolIDs, routines: routineService, triggers: triggerService, contextSync: slackContextSync, activity: activityFeed, memoryCurator: memoryCurator}, nil
 }
 
 func defaultResponseProfiles(cfg config.ModelConfig) []types.ModelProfile {
@@ -433,21 +466,10 @@ func loadBehavioralSkills(cfg config.MarketplaceConfig) ([]marketplace.SkillSnap
 		}
 		available = append(available, loaded...)
 	}
-	for _, source := range []struct {
-		label       string
-		root        string
-		catalogPath string
-		plugin      string
-	}{
-		{label: "headless", root: cfg.HeadlessRoot, catalogPath: cfg.HeadlessCatalogPath, plugin: cfg.HeadlessPlugin},
-		{label: "base", root: cfg.BaseRoot, catalogPath: cfg.BaseCatalogPath, plugin: cfg.BasePlugin},
-	} {
-		if source.root == "" {
-			continue
-		}
-		loaded, err := marketplace.LoadPlugin(source.root, source.catalogPath, source.plugin)
+	if cfg.BaseRoot != "" {
+		loaded, err := marketplace.LoadPlugin(cfg.BaseRoot, cfg.BaseCatalogPath, cfg.BasePlugin)
 		if err != nil {
-			return nil, nil, fmt.Errorf("load %s behavioral plugin: %w", source.label, err)
+			return nil, nil, fmt.Errorf("load base behavioral plugin: %w", err)
 		}
 		available = append(available, loaded...)
 		automaticallyInjected = append(automaticallyInjected, loaded...)
@@ -559,8 +581,60 @@ func (c *Core) Start(ctx context.Context) error {
 		return fmt.Errorf("start Slack ingress: %w", err)
 	}
 	c.startContextBackfill(ctx)
+	c.startContextRefresh(ctx)
+	if c.memoryCurator != nil {
+		c.memoryCurator.Start(ctx)
+	}
 	c.Logger.Infof("tos-tag started at %s with Slack mode %s and %s %s classifier", c.server.Addr(), c.Config.Slack.Mode, c.Config.Classifier.Mode, c.Config.Classifier.Provider)
 	return nil
+}
+
+func (c *Core) startContextRefresh(parent context.Context) {
+	if c.contextSync == nil || c.contextRefreshStop != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(parent)
+	c.contextRefreshStop = cancel
+	c.contextRefreshDone = make(chan struct{})
+	go func() {
+		defer close(c.contextRefreshDone)
+		ticker := time.NewTicker(c.Config.Slack.ContextSyncRefresh)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				run, err := c.contextSync.Discover(ctx, c.pipeline.RegisterContextChannel)
+				if err != nil {
+					if ctx.Err() == nil {
+						c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Warn("Slack membership reconciliation failed; prior policy retained")
+					}
+					continue
+				}
+				stats := run.Stats()
+				c.Logger.WithCtx(blackbox.Ctx{"channels_discovered": stats.ChannelsDiscovered, "channels_registered": stats.ChannelsRegistered}).Info("Slack membership reconciliation completed")
+				if _, err := c.contextSync.Backfill(ctx, run, c.pipeline.ImportContextEnvelope); err != nil && ctx.Err() == nil {
+					c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Warn("Slack incremental context bootstrap stopped before completion")
+				}
+			}
+		}
+	}()
+}
+
+func (c *Core) stopContextRefresh(ctx context.Context) error {
+	if c.contextRefreshStop == nil {
+		return nil
+	}
+	c.contextRefreshStop()
+	select {
+	case <-c.contextRefreshDone:
+		c.contextRefreshStop = nil
+		c.contextRefreshDone = nil
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (c *Core) startContextBackfill(parent context.Context) {
@@ -597,6 +671,9 @@ func (c *Core) stopContextBackfill(ctx context.Context) error {
 // Stop closes ingress and workers first, then HTTP, then MongoDB.
 func (c *Core) Stop(ctx context.Context) error {
 	var first error
+	if err := c.stopContextRefresh(ctx); err != nil && first == nil {
+		first = err
+	}
 	if err := c.pipeline.Stop(ctx); err != nil && first == nil {
 		first = err
 	}
@@ -616,6 +693,11 @@ func (c *Core) Stop(ctx context.Context) error {
 	}
 	if err := c.triggers.Stop(ctx); err != nil && first == nil {
 		first = err
+	}
+	if c.memoryCurator != nil {
+		if err := c.memoryCurator.Stop(ctx); err != nil && first == nil {
+			first = err
+		}
 	}
 	if err := c.server.Shutdown(ctx); err != nil && first == nil {
 		first = err

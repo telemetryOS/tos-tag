@@ -1,15 +1,16 @@
 # tos-tag implementation status
 
-Date: 2026-08-01
+Date: 2026-08-02
 Version: `0.1.0-dev`
-Scope: development Slack control plane, output constrained to `#tos-tag`
+Scope: development Slack control plane, membership-managed assist with live
+regression traffic constrained to `#tos-tag`
 
 ## Current verdict
 
 The direct classifier, privacy-filtered context, durable jobs, Codex App Server
-worker, typed Slack output, reviewed tools, Slack-native approval/resume,
-channel directives, routines, triggers, logging, audit, and persistent container
-workspace are implemented.
+worker, typed Slack output, Slack-native Thinking Steps, reviewed tools, Slack-native approval/resume,
+channel directives, source-linked durable memory, routines, triggers, logging,
+audit, and persistent container workspace are implemented.
 
 The full-agent runtime is now exclusively Codex App Server. The previous agent
 runtime, its adapter, provider proxy, dependency, config variables, container
@@ -40,8 +41,10 @@ commands, tests, and active documentation have been removed.
   events; completion and cancellation use `turn/completed` and
   `turn/interrupt`.
 - Skills are hash-verified and materialized read-only under `.agents/skills`.
-- Shell, direct source mounts, file mutation, web, MCP, plugins, and subagents
-  are disabled for Slack jobs. The turn is read-only and network-disabled.
+- Shell, direct source mounts, file mutation, MCP, plugins, and subagents are
+  disabled for Slack jobs. The turn is read-only and subprocess networking is
+  disabled; first-party Codex web search is separately configurable and `live`
+  in the local Slack runtime.
 - The only model-visible tools are job-scoped `tos_tag_tool` and
   `tos_tag_trigger` dynamic functions.
 - Dynamic tool requests are executed by the Go client through the existing
@@ -54,22 +57,42 @@ commands, tests, and active documentation have been removed.
 
 - Socket Mode ingress with durable-before-ack observation and duplicate
   suppression.
-- Message/edit/delete/thread handling and user-authorized context backfill.
+- Message/edit/delete/thread handling and user-authorized context bootstrap,
+  with durable per-conversation completion/live watermarks, new-channel-only
+  refresh work, and proactive per-method Slack pacing.
 - Destination-local privacy for private channels, DMs, and group DMs.
 - Public cross-channel context for classifier decisions when authorized.
+- Asynchronous Luna memory curation for changed channel/thread scopes, with
+  source hashes, confidence, source-bound facts, source-limited expiry, and
+  content-free usage accounting. The development effort is `medium`.
+- Privacy-filtered memory recall into context packs, including public
+  cross-channel recall, destination-local restricted recall, root-thread-local
+  thread recall, and independently recalled public incident facts.
+- Agent memory management UI/API for correction, pin/unpin, and content-erasing
+  forget operations. Human corrections become pinned operator memory; model
+  summaries remain explicitly derived context.
 - Conservative ambient team-alignment decisions from recent destination-safe
   public facts, with trusted author/channel/time metadata and privacy-safe
   attribution.
-- Mention, observe, assist, proactive, kill-switch, membership freshness, and
+- Mention, observe, assist, proactive, kill-switch, independently reconciled
+  bot membership, membership freshness, and
   output-channel policy.
 - Configurable concurrent leased jobs with per-thread one-writer generations.
-- Native Block Kit tables and typed message segments.
+- Native Block Kit Tables, sortable/paginated Data Tables, presentation-only
+  Cards and Carousels, expanded AI sections, and typed message segments.
+- Control-plane-owned full-agent context footer with resolved model, effort,
+  provider-reported turn tokens, and elapsed worker time; classifier-only
+  replies remain unadorned.
 - Durable delivery reconciliation and special-mention rejection.
+- Slack Thinking Steps for admitted full-agent thread jobs, with durable stream
+  timestamps, safe reviewed-event task updates, same-message finalization, and
+  ordinary-delivery fallback. Intentional reaction-only/direct classifier
+  outcomes remain outside the stream path.
 - Slack-native exact-action approval and fresh-worker resume.
 - `/tag-directive` Slack modal with revisioned Mongo persistence and audit.
 - Scheduled routines and classifier-gated heartbeat trigger subscriptions.
-- Complete behavioral plugins from `telemetryos-agent-skills` and
-  `tag-agent-skills`, including the `team-alignment` worker behavior.
+- Complete behavioral `base` plugin from `tag-agent-skills`, including
+  read-only code, Linear, Wiki, OTel, and `team-alignment` worker behavior.
 - Reviewed Linear, Wiki, OTel, DLA, optional Mongo, and bounded source-code
   helper bundles with encrypted environment bindings where required.
 - Wiki inline-body publication for source-derived documents, with the complete
@@ -79,31 +102,48 @@ commands, tests, and active documentation have been removed.
   surfaces are unavailable.
 - `telemetryos.code` provides only bounded list/search/read operations below a
   server-owned Aion root and rejects traversal, symlinks, runtime environment
-  files, credential ledgers, and private tool state.
+  files, credential ledgers, and private tool state. Bundle load and execution
+  independently enforce that every code operation is read-only; mutation
+  requests are redirected to Linear bug/feature intake with no approval path.
+- Classifier-marked product answers are rejected unless the same worker attempt
+  successfully reads a full Primer Wiki page, public docs page, or corporate
+  full-content source. Search/index/web/Slack context and model memory are not
+  sufficient retrieval evidence.
+- The injected `telemetryos-documentation` skill reads the live public
+  `llms.txt` index for discovery, then fetches an exact indexed guide or API
+  reference page and supplies its human documentation link.
 - Correlated redacted file logging, usage records, audit chains, TTL cleanup,
-  and management endpoints.
+  and an activity-first management UI. Its organization-scoped SSE feed pairs
+  bounded public Slack excerpts with classifier outcomes and shows payload-free
+  Codex protocol lifecycle; restricted content remains hidden.
 - Persistent Compose workspace/home/Mongo with disposable per-job roots.
 - Graduated response delivery: short/medium answers remain Slack-native, while
   genuinely document-sized expository work is published to Agent Wiki
   `artifacts` by a strong/max worker and linked only from a successful write;
   failed publication falls back to a compact Slack answer without a guessed
   link. Artifact segments are rejected unless the URL has successful
-  same-attempt reviewed-tool provenance.
+  same-attempt reviewed-tool provenance. References to existing Wiki pages use
+  exact human HTTPS URLs returned by the reviewed `get` or `url` read operation;
+  every reviewed `get` includes that URL in its full page envelope, and bare
+  Wiki slugs are rejected before rendering.
 
 ## Verification evidence
 
 Current migration evidence:
 
-- full `make verify`: pass, including all Go packages, the race detector, vet,
-  and `35/35` deterministic behavioral evals;
-- opt-in direct OpenAI classifier eval: `35/35`, with `25` real provider calls,
-  eight pre-provider hard suppressions, and approximately `1.26s` mean case
+- full verification components: pass, including all Go packages, the race
+  detector, vet, security scans, and the expanded `41/41` deterministic
+  behavioral eval;
+- opt-in direct OpenAI classifier eval: `41/41`, with `31` real provider calls,
+  eight pre-provider hard suppressions, and approximately `1.56s` mean case
   latency; natural Slack text contained no evaluator outcome, placement,
   reaction, model, effort, or method hints;
-- `gosec`: `0` issues across `81` files and `19,460` lines;
+- `gosec`: `0` issues across `81` files and `19,907` lines;
 - `govulncheck`: no called vulnerabilities (one vulnerable required module is
   not reached by the program);
 - real installed Codex CLI `0.146.0` App Server smoke: pass;
+- real authenticated live-web App Server smoke: pass in `6.7s`, with a native
+  web-search event against an external IANA page;
 - authenticated `gpt-5.6-luna` turn at low effort: pass;
 - experimental dynamic-tool registration: pass;
 - structured Slack output and authoritative final-event normalization: pass;
@@ -127,18 +167,33 @@ Current migration evidence:
   `hammer_and_wrench`; the job made `13` paired read-only
   `telemetryos.code` calls and delivered a native four-column, three-row table
   in approximately `86s` end to end;
+- Premium Trial regression root cause: the classifier correctly selected
+  authoritative product retrieval, but the first worker completed with zero
+  tool calls and improvised a weak answer; a user prompt then caused a second
+  worker to retrieve the Primer pricing page. The new delivery gate makes that
+  zero-retrieval result non-deliverable.
 - live active-thread social reply: pass. The direct classifier handled
   `Appreciate the clear matrix, Tag!` in `4.00s`, selected a
   `white_check_mark` reaction and direct `You're welcome!` thread reply, and no
   Codex job was enqueued;
+- live Slack Thinking Steps finalization: pass. A natural product follow-up in
+  `#tos-tag` opened a timeline in `480ms`, showed safe Agent Wiki milestones,
+  and finalized the validated Block Kit answer in the same Slack message
+  (`1785706647.008769`) without a fallback post. The classifier took `2.61s`;
+  the full answer completed in approximately `32s`. Brief in-channel work stays
+  direct because Slack requires `thread_ts` for streamed agent messages;
 - live Tag-authored Wiki publication: pass. A max-effort Codex worker read the
   current tos-tag architecture through reviewed source access, published an
   18,017-byte `artifacts` page through the no-prompt Wiki write policy, and
   posted the revision-1 Wiki link and summary in the originating Slack thread;
-- latest user-authorized context sync: `378` conversations discovered, `527`
+- previous user-authorized context sync: `378` conversations discovered, `527`
   bounded messages imported, and `1` inaccessible conversation skipped without
-  failing the sync; newly discovered conversations remained observe-only and
-  private/DM context remained destination-local;
+  failing the sync. The current policy additionally reconciles bot membership:
+  joined public/private channels derive assist, other conversations stay
+  observe-only, and private/DM context remains destination-local;
+- restart-wide context rescans have been removed: completed conversations are
+  skipped from durable Mongo state, interrupted/new conversations resume in the
+  periodic discovery pass, and live Socket Mode events advance each watermark;
 - tracked source/config dependency search for the removed runtime: clean.
 
 The host runtime is live on the migrated binary. A fresh persistent container

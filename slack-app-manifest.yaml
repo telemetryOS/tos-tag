@@ -109,6 +109,8 @@ settings:
       - message.groups
       - message.im
       - message.mpim
+      - member_joined_channel
+      - member_left_channel
     user_events:
       - message.channels
       - message.groups

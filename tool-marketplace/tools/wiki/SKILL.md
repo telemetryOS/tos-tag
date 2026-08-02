@@ -19,6 +19,13 @@ The contract in this skill is complete. Do not call `--help`, `put --help`, or a
 {"tool_id":"telemetryos.wiki","operation_id":"write","arguments":["put","artifacts/tos-tag-architecture","--title","tos-tag architecture","--tags","tos-tag,architecture,slack","--note","Published from the current source.","--body","# tos-tag architecture\n\nComplete Markdown body","--md","--json"]}
 ```
 
+Every successful `get` through `operation_id=read` returns the full page JSON,
+including `body_html` and the server-derived opaque human `url`, even if the
+arguments omit `--json`. If you reference that page in Slack, use the exact
+returned `url` as a descriptive clickable link. Never present its
+`namespace/slug` lookup identifier as a citation and never reconstruct a page
+URL.
+
 ## Long-form Slack delivery
 
 When the requested answer becomes genuinely expository or document-shaped,

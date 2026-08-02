@@ -38,6 +38,24 @@ type Mongo struct {
 }
 
 func NewMongo(db *database.Database) *Mongo { return &Mongo{db: db, now: time.Now} }
+
+// Recall returns only destination-safe organization facts. Restricted signals
+// intentionally have no equivalent recall path outside their source channel.
+func (p *Mongo) Recall(ctx context.Context, organizationID string, now time.Time, limit int) ([]models.SituationFact, error) {
+	if organizationID == "" {
+		return nil, fmt.Errorf("organization ID is required")
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 40
+	}
+	cursor, err := p.db.Collection(models.CollectionSituationFacts).Find(ctx, bson.M{"organization_id": organizationID, "status": "active", "expires_at": bson.M{"$gt": now.UTC()}}, options.Find().SetSort(bson.D{{Key: "updated_at", Value: -1}}).SetLimit(int64(limit)))
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+	var facts []models.SituationFact
+	return facts, cursor.All(ctx, &facts)
+}
 func (p *Mongo) Status(ctx context.Context, organizationID string) (Status, error) {
 	var watermark models.ProjectorWatermark
 	err := p.db.Collection(models.CollectionProjectorWatermarks).FindOne(ctx, bson.M{"_id": organizationID}).Decode(&watermark)
