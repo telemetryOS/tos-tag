@@ -1703,6 +1703,12 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 						status = types.SlackProgressError
 					}
 					step := safeToolProgressLifecycleStep(toolID, operationID, resourceAction, callID, status)
+					// Slack closes a Thinking Steps stream when its single step reaches
+					// complete or error. Tool lifecycle events are intermediate agent
+					// activity, so retain their truthful past-tense/failure title while
+					// keeping the shared card open. Only the terminal job transition below
+					// completes the stream.
+					step.Status = types.SlackProgressInProgress
 					signature := string(step.Status) + "\x00" + step.Title
 					if reportedToolProgressSteps[step.ID] != signature {
 						reportedToolProgressSteps[step.ID] = signature
@@ -1717,7 +1723,7 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 			} else if event.Type == "artifact.produced" {
 				if artifactURL, ok := event.Data["url"].(string); ok && artifactURL != "" {
 					producedArtifactURLs[artifactURL] = struct{}{}
-					step := types.SlackProgressStep{ID: "agent-work", Title: "Published Agent Wiki artifact", Status: types.SlackProgressComplete}
+					step := types.SlackProgressStep{ID: "agent-work", Title: "Published Agent Wiki artifact", Status: types.SlackProgressInProgress}
 					if strings.HasPrefix(artifactURL, "https://") {
 						step.Sources = []types.SlackProgressSource{{URL: artifactURL, Text: "Agent Wiki artifact"}}
 					}

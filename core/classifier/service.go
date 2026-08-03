@@ -155,7 +155,7 @@ func looksLikeExplicitRequest(text string) bool {
 	for _, prefix := range []string{
 		"please ",
 		"tell me", "show me", "give me", "help me", "check ", "investigate ",
-		"look into ", "review ", "explain ", "compare ", "summarize ", "find ",
+		"look into ", "look at ", "take a look", "have a look", "review ", "explain ", "compare ", "summarize ", "find ",
 		"create ", "update ", "edit ", "add ", "remove ", "delete ", "run ",
 	} {
 		if strings.HasPrefix(normalized, prefix) {

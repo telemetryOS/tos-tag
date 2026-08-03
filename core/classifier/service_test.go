@@ -658,6 +658,42 @@ func TestAssistInitiativeRequiresARealInvocationSignal(t *testing.T) {
 	}
 }
 
+func TestTimeProximateConversationalFollowupRequestIsAdmitted(t *testing.T) {
+	decision := types.ClassificationDecision{
+		Outcome: types.OutcomeReplyInChannel, Confidence: .99,
+		ReasonCodes: []string{"likely_addressed_to_agent"}, ResponseIntent: "look up the requested pricing source and answer",
+		DisclosureClass: types.DisclosureDestinationSafe, RequiresFullAgent: true, Reaction: "speech_balloon",
+		AgentModelProfile: "standard", AgentModelStrength: "standard", AgentReasoningEffort: "medium",
+	}
+	now := time.Date(2026, 8, 3, 21, 21, 15, 0, time.UTC)
+	target := Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{
+		ChannelID: "tos-tag", MessageTS: "3.0", UserID: "U_ALEX",
+		Text: "Take a look at OpenAI pricing page for Luna", EventTime: now,
+	}}
+	pack := types.ContextPackRevision{Sources: []types.ContextSource{
+		{ID: "tos-tag/3.0", ChannelID: "tos-tag", AuthorID: "U_ALEX", Provenance: "human_message", Text: target.Envelope.Text, ObservedAt: now, DisclosureClass: types.DisclosureDestinationSafe},
+		{ID: "tos-tag/2.0", ChannelID: "tos-tag", AuthorID: "U_TAG", Provenance: "agent_output_unverified", Text: "Share the applicable Luna rate and I can calculate it immediately.", ObservedAt: now.Add(-time.Minute), DisclosureClass: types.DisclosureDestinationSafe},
+		{ID: "tos-tag/1.0", ChannelID: "tos-tag", AuthorID: "U_ALEX", Provenance: "human_message", Text: "<@U_TAG> what would 100k Luna low tokens cost?", ObservedAt: now.Add(-2 * time.Minute), DisclosureClass: types.DisclosureDestinationSafe},
+	}}
+	if !likelyConversationallyAddressedToAgent(target, pack) {
+		t.Fatal("fixture must be a recent continuation of Tag's immediately preceding turn")
+	}
+	result := EnforceParticipation(Result{Predicted: decision, Effective: decision}, target, pack)
+	if result.Effective.Outcome != types.OutcomeReplyInChannel || result.Shadowed || len(result.Effective.ReasonCodes) == 0 || result.Effective.ReasonCodes[0] != "likely_addressed_to_agent" {
+		t.Fatalf("time-proximate follow-up request was suppressed: %#v", result)
+	}
+	stale := pack
+	stale.Sources = append([]types.ContextSource(nil), pack.Sources...)
+	stale.Sources[1].ObservedAt = now.Add(-16 * time.Minute)
+	if likelyConversationallyAddressedToAgent(target, stale) {
+		t.Fatal("stale Tag turn was treated as the same conversation")
+	}
+	staleResult := EnforceParticipation(Result{Predicted: decision, Effective: decision}, target, stale)
+	if staleResult.Effective.Outcome != types.OutcomeSilent || !staleResult.Shadowed {
+		t.Fatalf("stale follow-up request bypassed assist initiative policy: %#v", staleResult)
+	}
+}
+
 func TestObserveModeSilencesDirectMentionAndActiveThread(t *testing.T) {
 	for _, activeThread := range []bool{false, true} {
 		got := target("@tag help")

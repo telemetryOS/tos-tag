@@ -319,6 +319,13 @@ func destinationConversationFocus(target Target, sources []types.ContextSource, 
 	targetID := target.Envelope.ChannelID + "/" + target.Envelope.MessageTS
 	focus := make([]types.ContextSource, 0, limit)
 	for _, source := range sources {
+		// An active thread is its own conversational surface. Channel-wide
+		// messages can still remain in the larger source set for material facts,
+		// but they must not become the chronological conversation focus or
+		// resolve a thread follow-up by accident.
+		if target.ActiveThread && source.Partition != types.PartitionThread {
+			continue
+		}
 		if source.ChannelID != target.Envelope.ChannelID || source.ID == targetID || source.DisclosureClass != types.DisclosureDestinationSafe || (source.Provenance != "human_message" && source.Provenance != "agent_output_unverified") {
 			continue
 		}
@@ -496,7 +503,7 @@ func isMissingLocationWeatherQuestion(text string) bool {
 
 const classifierInstructions = `You are tos-tag's stateless, tool-free Slack classifier. Using only the immutable input, decide whether to remain silent, react only, answer in the current thread, answer in the channel, start background agent work, or request approval. Choose the least disruptive placement. A direct mention is a hard participation trigger but not automatically a thread: choose reply_in_channel when the expected answer is brief, self-contained, useful to the channel, and unlikely to invite follow-up; choose reply_in_thread when the answer itself is likely to become a deeper dive, needs multiple explanatory steps, code, a table, an artifact, concerns a narrow side topic, or is likely to continue as a conversation. Internal retrieval or tool use alone does not force a thread: judge placement by the expected final Slack message. A requested table, structured report, code sample, artifact, research result, multi-part comparison, implementation plan, migration plan, or question asking what would need to change is not a brief answer and must use reply_in_thread with at least standard/medium routing even when it can be self-contained. Honor an explicit request to reply in the channel or in a thread. When active_thread is true, keep any substantive response in that thread. For ambient messages, default to silent on ambiguity, repetition, or an already-answered question.
 
-likely_addressed_to_agent is a deterministic conversational signal, not a direct mention: it is true only when the current author is the sole recent human participant represented in destination context and the immediately preceding destination message came from Tag. Treat a clear question with this signal as likely directed to Tag even when it omits a mention. conversation_focus is a short chronological view of the latest destination-local human and Tag turns; use it before the larger source set to resolve conversational pronouns and short follow-ups. When a question such as "are we using it?" has one clear referent in the immediately preceding Tag turn, answer the underlying question instead of asking what "it" means or merely describing the referent. When a short active-thread message answers a Tag clarification, compose it with the earlier unresolved human request and answer that composed request. Do not claim the channel has only one human member; recent context is not a complete membership roster. If such a weather or forecast question omits the location needed to answer, reply directly in the channel with one short location clarification rather than staying silent or starting a worker.
+likely_addressed_to_agent is a deterministic conversational signal, not a direct mention: it is true only when the current author is the sole recent human participant represented in destination context and the immediately preceding destination message came from Tag. Treat a clear question or imperative request with this signal as likely directed to Tag even when it omits a mention. conversation_focus is a short chronological view of the latest destination-local human and Tag turns; use it before the larger source set to resolve conversational pronouns and short follow-ups. In an active thread, conversation_focus contains only thread-partition turns: do not reinterpret a short thread follow-up using an unrelated channel or other-thread message from the larger source set. When a question such as "are we using it?" has one clear referent in the immediately preceding Tag turn, answer the underlying question instead of asking what "it" means or merely describing the referent. A time-proximate follow-up such as "Take a look at the OpenAI pricing page" continues the same conversation: admit full-agent retrieval of the named public source, and do not ask the user to provide a URL when that authoritative source is readily discoverable with web search. When a short active-thread message answers a Tag clarification, compose it with the earlier unresolved human request and answer that composed request. Do not claim the channel has only one human member; recent context is not a complete membership roster. If such a weather or forecast question omits the location needed to answer, reply directly in the channel with one short location clarification rather than staying silent or starting a worker.
 
 Set source_write_requested true when the message asks tos-tag to edit, implement, fix, patch, refactor, commit, push, merge, deploy, or otherwise mutate TelemetryOS source code or a TelemetryOS repository. Set it false for read-only investigation, code explanation or review, code samples or pseudocode, Linear issue CRUD, Wiki page CRUD, Slack configuration, and non-source actions. Requested Wiki page text may itself mention code, source writes, source-write redirection, regressions, or implementation; those are document contents, not source-mutation instructions. Source access is permanently read-only: a source-write request must receive only the control-plane redirect to create a Linear bug for broken existing behavior or a Linear feature for new or changed behavior. Do not propose or recommend a source mutation workflow.
 
@@ -826,8 +833,8 @@ func isObviousReadOnlyCodeAnalysisRequest(text string) bool {
 	if lower == "" || isObviousSourceWriteRequest(lower) {
 		return false
 	}
-	readOnlyAction := containsAny(lower, "read the", "inspect the", "review the", "explain the", "analyze the", "investigate", "trace the", "show me the")
-	codeSurface := containsAny(lower, " code", "codebase", " source", " repository", " repo", "package", "module", "component", "service", "authentication", "handler", "implementation", "context boundary", "context construction", "privacy boundary", "security boundary", "delivery reconciliation")
+	readOnlyAction := containsAny(lower, "read ", "inspect ", "review ", "explain ", "analyze ", "investigate", "trace ", "show me ")
+	codeSurface := containsAny(lower, " code", "codebase", " source", " repository", " repo", "package", "module", "component", "service", "authentication", "handler", "implementation", "classifier", "classification", "admission gate", "context boundary", "context construction", "privacy boundary", "security boundary", "delivery reconciliation")
 	ownershipQuestion := containsAny(lower,
 		"which package", "what package", "which module", "what module", "which component", "what component",
 		"which repository", "what repository", "which repo", "what repo", "where in the code",
@@ -861,6 +868,16 @@ func withBriefMentionPolicyCorrections(decision types.ClassificationDecision, ta
 }
 
 func withProductKnowledgePolicyCorrections(decision types.ClassificationDecision, target Target, profiles []advertisedAgentProfile) types.ClassificationDecision {
+	// Product-topic labels such as "pricing" are not sufficient on their own:
+	// a request that explicitly names an external authoritative source belongs
+	// to public-web retrieval, not the TelemetryOS Primer/product-doc path.
+	if isClearlyExternalPublicSourceQuestion(target.Envelope.Text) {
+		if decision.ProductRetrievalRequired || isObviousProductKnowledgeQuestion(target.Envelope.Text, decision) {
+			decision.ProductRetrievalRequired = false
+			decision.ReasonCodes = append(decision.ReasonCodes, "policy.external_public_source")
+		}
+		return decision
+	}
 	// The request text is authoritative here. Context about a feature regression
 	// can legitimately produce a "feature" topic, but that must not turn an
 	// unmistakable operational-status question into product-document retrieval.
@@ -904,6 +921,20 @@ func withProductKnowledgePolicyCorrections(decision types.ClassificationDecision
 		corrected.Outcome = types.OutcomeReplyInChannel
 	}
 	return withCanonicalAgentProfile(corrected, profiles)
+}
+
+func isClearlyExternalPublicSourceQuestion(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if !containsAny(lower, "openai", "open ai") {
+		return false
+	}
+	if containsAny(lower,
+		"telemetryos", "telemetry os", "premium trial", "premium plan", "enterprise plan", "billing plan",
+		"subscription plan", "subscription tier", "node pro", "node mini", "tos node", "device tier", "product tier",
+	) {
+		return false
+	}
+	return containsAny(lower, "pricing", "price", "cost", "token rate", "per million", "official", "website", "web page", "page")
 }
 
 func isBriefProductDefinitionQuestion(text string) bool {

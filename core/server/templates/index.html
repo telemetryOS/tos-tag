@@ -162,8 +162,10 @@
     .data-table.page-channels th:first-child, .data-table.page-channels td:first-child { min-width: 180px; }
     .data-table.page-memory { table-layout: fixed; }
     .data-table.page-memory .memory-context-column { width: 240px; }
-    .data-table.page-memory .detail-column { width: 76px; min-width: 76px; }
     .data-table.page-memory .memory-context-cell { padding: 15px 18px; }
+    .data-table.page-memory tbody tr { cursor: pointer; }
+    .data-table.page-memory tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
+    .data-table.page-memory tbody tr:focus-visible { position: relative; z-index: 1; outline: 2px solid var(--accent); outline-offset: -2px; }
     .memory-context { display: grid; gap: 8px; min-width: 0; }
     .memory-context-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
     .memory-channel { min-width: 0; color: var(--ink); font-size: 13px; font-weight: 620; overflow-wrap: anywhere; }
@@ -186,6 +188,20 @@
     .job-timeline { display: flex; flex-wrap: wrap; gap: 5px 18px; color: var(--faint); font-size: 10.5px; }
     .job-timeline span { white-space: nowrap; }
     .job-failure { padding: 8px 10px; border-left: 2px solid var(--destructive); background: color-mix(in srgb, var(--destructive) 7%, transparent); color: var(--muted); font-size: 11.5px; line-height: 1.45; overflow-wrap: anywhere; }
+    .data-table.page-usage { table-layout: fixed; }
+    .data-table.page-usage .usage-activity-column { width: 300px; }
+    .data-table.page-usage .detail-column { width: 76px; min-width: 76px; }
+    .data-table.page-usage .usage-activity-cell, .data-table.page-usage .usage-metrics-cell { padding: 15px 18px; }
+    .usage-activity { display: grid; gap: 8px; min-width: 0; }
+    .usage-activity-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .usage-activity-time { flex: 0 0 auto; color: var(--faint); font-size: 10.5px; }
+    .usage-activity-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 12px; color: var(--faint); font-size: 10.5px; }
+    .usage-activity-job { min-width: 0; max-width: 100%; overflow: hidden; }
+    .usage-activity-job code { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .usage-metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; min-width: 0; }
+    .usage-metric { min-width: 0; }
+    .usage-metric-label { display: block; margin-bottom: 3px; color: var(--faint); font-size: 9px; font-weight: 550; letter-spacing: .09em; text-transform: uppercase; }
+    .usage-metric-value { display: block; min-width: 0; color: var(--ink); font-size: 12px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .value-true { color: var(--success); }
     .value-false { color: var(--faint); }
     .data-state { padding: 22px; border: 1px solid var(--border); border-top: 2px solid var(--accent); border-radius: 0 0 6px 6px; background: var(--well); color: var(--muted); font-size: 13px; }
@@ -342,6 +358,8 @@
     .data-table .detail-column { width: 1%; min-width: 68px; }
     .row-action, .pagination button, .icon-button { width: auto; margin: 0; padding: 5px 9px; border-color: var(--border); background: transparent; color: var(--muted); font-size: 11px; white-space: nowrap; }
     .row-action:hover, .pagination button:hover, .icon-button:hover { border-color: var(--accent); background: var(--elevated); color: var(--ink); }
+    button.destructive-button { border-color: color-mix(in srgb, var(--destructive) 72%, var(--border)); color: #ff8176; }
+    button.destructive-button:hover { border-color: var(--destructive); background: color-mix(in srgb, var(--destructive) 13%, transparent); color: #ff9a91; }
     .pagination { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 14px; color: var(--muted); font-size: 11px; }
     .pagination button:disabled { cursor: not-allowed; opacity: .35; }
     .record-dialog { width: min(720px, calc(100vw - 32px)); max-height: min(82vh, 860px); padding: 0; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--page); color: var(--ink); box-shadow: 0 24px 80px #000b; }
@@ -449,7 +467,6 @@
       .data-table.page-memory td { border-bottom: 0; }
       .data-table.page-memory .memory-context-cell { grid-column: 1; grid-row: 2; padding-top: 4px; }
       .data-table.page-memory .memory-text-cell { grid-column: 1 / -1; grid-row: 1; padding-bottom: 8px; }
-      .data-table.page-memory .detail-column { grid-column: 2; grid-row: 2; align-self: center; }
       .memory-context-head { justify-content: flex-start; flex-wrap: wrap; }
       .data-table.page-jobs { table-layout: auto; }
       .data-table.page-jobs thead { display: none; }
@@ -461,6 +478,17 @@
       .data-table.page-jobs .job-execution-cell { grid-column: 1 / -1; grid-row: 2; padding-top: 4px; }
       .data-table.page-jobs .detail-column { grid-column: 2; grid-row: 1; align-self: center; }
       .job-context-head { justify-content: flex-start; flex-wrap: wrap; }
+      .data-table.page-usage { table-layout: auto; }
+      .data-table.page-usage thead { display: none; }
+      .data-table.page-usage, .data-table.page-usage tbody { display: block; }
+      .data-table.page-usage tr { display: grid; grid-template-columns: minmax(0,1fr) auto; border-bottom: 1px solid var(--border); }
+      .data-table.page-usage tbody tr:last-child { border-bottom: 0; }
+      .data-table.page-usage td { border-bottom: 0; }
+      .data-table.page-usage .usage-activity-cell { grid-column: 1; grid-row: 1; }
+      .data-table.page-usage .usage-metrics-cell { grid-column: 1 / -1; grid-row: 2; padding-top: 4px; }
+      .data-table.page-usage .detail-column { grid-column: 2; grid-row: 1; align-self: center; }
+      .usage-activity-head { justify-content: flex-start; flex-wrap: wrap; }
+      .usage-metrics { grid-template-columns: repeat(2, minmax(0,1fr)); }
     }
   </style>
 </head>
@@ -789,7 +817,7 @@
         ]
       },
       memory: {
-        guidance:'Source-linked summaries are generated asynchronously by Luna. Open a record to correct, pin, or forget it.',
+        guidance:'Source-linked summaries are generated asynchronously by Luna. Select a row to review, correct, pin, or delete it.',
         empty:'Nothing has been remembered yet. Durable memory is consolidated asynchronously from observed conversations.',
         search:'Find remembered context…', filter:{key:'status',label:'status'},
         columns:[{key:'memory_context',label:'Context',derived:true},{key:'text',label:'Memory'}],
@@ -806,7 +834,7 @@
       usage: {
         guidance:'Filter by activity type to compare classifier, model, tool, worker, reaction, and delivery costs.',
         empty:'No usage has been recorded yet.',
-        search:'Find usage by job, model, or category…', filter:{key:'category',label:'category'}, columns:['created_at','category','calls','job_id',{key:'duration_ms',label:'Duration'},'input_tokens','output_tokens','model_id'],
+        search:'Find usage by job, model, or category…', filter:{key:'category',label:'category'}, columns:[{key:'usage_activity',label:'Activity',derived:true},{key:'usage_metrics',label:'Cost and latency',derived:true}],
         summaries: rows => {
           const total = key => rows.reduce((sum, row) => sum + (Number(row[key]) || 0), 0);
           const counts = {};
@@ -882,6 +910,19 @@
       state.className = 'data-state';
       state.textContent = message;
       container.append(state);
+    }
+    function conversationLabel(row) {
+      if (row?.name) return String(row.name);
+      const id = String(row?.channel_id || '');
+      if (id.startsWith('D')) return 'Direct message';
+      if (id.startsWith('G')) return 'Private conversation';
+      if (id.startsWith('C')) return 'Unavailable Slack channel';
+      return 'Slack conversation';
+    }
+    function recordLabel(row) {
+      if (page === 'channels') return conversationLabel(row);
+      if (page === 'usage') return `${sentenceCase(humanize(row.category || 'usage'))} usage${row.job_id ? ' · ' + row.job_id : ''}`;
+      return row.name || row.id || row.public_id || humanize(page) + ' record';
     }
     function cellValue(value, key = '', full = false) {
       if (key === 'name' && (value === null || value === undefined || value === '')) return document.createTextNode('Unnamed conversation');
@@ -963,7 +1004,7 @@
       container.replaceChildren(table);
     }
     function openRecordDetails(row) {
-      recordDialogTitle.textContent = row.name || row.id || row.public_id || humanize(page) + ' record';
+      recordDialogTitle.textContent = recordLabel(row);
       recordDetails.replaceChildren();
       for (const key of Object.keys(row).filter(key => !hiddenTableColumns.has(key))) {
         const term = document.createElement('dt'); term.textContent = humanize(key);
@@ -983,10 +1024,14 @@
         const pin = document.createElement('button'); pin.type = 'button'; pin.className = 'secondary-button'; pin.textContent = row.pinned ? 'Unpin' : 'Pin';
         pin.disabled = row.status === 'forgotten';
         pin.addEventListener('click', () => mutateMemory('/admin/api/memory/pin', {record_id:row.id, pinned:!row.pinned}));
-        const forget = document.createElement('button'); forget.type = 'button'; forget.className = 'secondary-button'; forget.textContent = 'Forget';
-        forget.disabled = row.status === 'forgotten';
-        forget.addEventListener('click', () => { if (window.confirm('Forget this memory? Its text, facts, and source references will be erased.')) mutateMemory('/admin/api/memory/forget', {record_id:row.id}); });
-        controls.append(correct, pin, forget); recordDetails.append(term, controls);
+        const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'secondary-button destructive-button'; remove.textContent = 'Delete memory';
+        remove.disabled = row.status === 'forgotten';
+        remove.addEventListener('click', () => {
+          if (window.confirm('Delete this memory? Its recalled text, facts, and source references will be permanently erased. A content-free audit tombstone will remain.')) {
+            mutateMemory('/admin/api/memory/forget', {record_id:row.id});
+          }
+        });
+        controls.append(correct, pin, remove); recordDetails.append(term, controls);
       }
       recordDialog.showModal();
     }
@@ -1014,6 +1059,7 @@
     function participationModeControl(row) {
       const select = document.createElement('select');
       select.className = 'mode-select';
+      select.setAttribute('aria-label', 'Change participation mode for ' + conversationLabel(row));
       for (const mode of ['observe', 'assist', 'proactive']) select.add(new Option(humanize(mode), mode, false, row.participation_mode === mode));
       select.addEventListener('change', async () => {
         select.disabled = true;
@@ -1087,6 +1133,38 @@
       }
       return execution;
     }
+    function usageActivity(row) {
+      const activity = document.createElement('div'); activity.className = 'usage-activity';
+      const head = document.createElement('div'); head.className = 'usage-activity-head';
+      head.append(cellValue(row.category, 'category'));
+      const time = document.createElement('span'); time.className = 'usage-activity-time'; time.append(cellValue(row.created_at, 'created_at'));
+      head.append(time);
+      const meta = document.createElement('div'); meta.className = 'usage-activity-meta';
+      const calls = Number(row.calls) || 0;
+      const callText = document.createElement('span'); callText.textContent = `${calls.toLocaleString()} ${calls === 1 ? 'call' : 'calls'}`;
+      meta.append(callText);
+      if (row.job_id) {
+        const job = document.createElement('span'); job.className = 'usage-activity-job'; job.append(cellValue(row.job_id, 'job_id'));
+        meta.append(job);
+      }
+      activity.append(head, meta); return activity;
+    }
+    function usageMetrics(row) {
+      const metrics = document.createElement('div'); metrics.className = 'usage-metrics';
+      const values = [
+        ['Duration', Number.isFinite(Number(row.duration_ms)) ? formatDurationMs(Number(row.duration_ms)) : '—'],
+        ['Input tokens', Number.isFinite(Number(row.input_tokens)) ? Number(row.input_tokens).toLocaleString() : '—'],
+        ['Output tokens', Number.isFinite(Number(row.output_tokens)) ? Number(row.output_tokens).toLocaleString() : '—'],
+        ['Model', row.model_id || '—']
+      ];
+      for (const [labelText, valueText] of values) {
+        const metric = document.createElement('div'); metric.className = 'usage-metric';
+        const label = document.createElement('span'); label.className = 'usage-metric-label'; label.textContent = labelText;
+        const value = document.createElement('span'); value.className = 'usage-metric-value'; value.textContent = String(valueText); value.title = String(valueText);
+        metric.append(label, value); metrics.append(metric);
+      }
+      return metrics;
+    }
     function renderTablePage() {
       pageData.replaceChildren();
       const total = tableState.filtered.length;
@@ -1104,23 +1182,39 @@
           const th = document.createElement('th'); th.scope = 'col'; th.textContent = column.label;
           if (page === 'memory' && column.key === 'memory_context') th.className = 'memory-context-column';
           if (page === 'jobs' && column.key === 'job_context') th.className = 'job-summary-column';
+          if (page === 'usage' && column.key === 'usage_activity') th.className = 'usage-activity-column';
           head.append(th);
         }
-        const detailHead = document.createElement('th'); detailHead.scope = 'col'; detailHead.className = 'detail-column'; detailHead.textContent = 'Details'; head.append(detailHead);
+        if (page !== 'memory') {
+          const detailHead = document.createElement('th'); detailHead.scope = 'col'; detailHead.className = 'detail-column'; detailHead.textContent = 'Details'; head.append(detailHead);
+        }
         const body = table.createTBody();
         for (const row of rows) {
           const tr = body.insertRow();
+          if (page === 'memory') {
+            tr.className = 'clickable-record'; tr.tabIndex = 0; tr.setAttribute('role', 'button');
+            tr.setAttribute('aria-label', 'Open memory details');
+            tr.addEventListener('click', () => openRecordDetails(row));
+            tr.addEventListener('keydown', event => {
+              if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openRecordDetails(row); }
+            });
+          }
           for (const column of tableState.columns) {
             const cell = tr.insertCell();
             if (page === 'channels' && column.key === 'participation_mode') cell.append(participationModeControl(row));
+            else if (page === 'channels' && column.key === 'name') cell.append(document.createTextNode(conversationLabel(row)));
             else if (page === 'memory' && column.key === 'memory_context') { cell.className = 'memory-context-cell'; cell.append(memoryContext(row)); }
             else if (page === 'memory' && column.key === 'text') { cell.className = 'memory-text-cell'; cell.append(cellValue(row.text, 'text')); }
             else if (page === 'jobs' && column.key === 'job_context') { cell.className = 'job-context-cell'; cell.append(jobContext(row)); }
             else if (page === 'jobs' && column.key === 'job_execution') { cell.className = 'job-execution-cell'; cell.append(jobExecution(row)); }
+            else if (page === 'usage' && column.key === 'usage_activity') { cell.className = 'usage-activity-cell'; cell.append(usageActivity(row)); }
+            else if (page === 'usage' && column.key === 'usage_metrics') { cell.className = 'usage-metrics-cell'; cell.append(usageMetrics(row)); }
             else cell.append(cellValue(valueAt(row, column.key), column.key));
           }
-          const actionCell = tr.insertCell(); actionCell.className = 'detail-column';
-          const action = document.createElement('button'); action.type = 'button'; action.className = 'row-action'; action.textContent = 'Open'; action.addEventListener('click', () => openRecordDetails(row)); actionCell.append(action);
+          if (page !== 'memory') {
+            const actionCell = tr.insertCell(); actionCell.className = 'detail-column';
+            const action = document.createElement('button'); action.type = 'button'; action.className = 'row-action'; action.textContent = 'Open'; action.setAttribute('aria-label', 'Open details for ' + recordLabel(row)); action.addEventListener('click', () => openRecordDetails(row)); actionCell.append(action);
+          }
         }
         pageData.append(table);
       }
@@ -1133,10 +1227,11 @@
       if (page === 'keystore') return renderSimpleData(container, value);
       const config = pageViews[page] || {};
       const normalized = page === 'routes' && Array.isArray(value?.profiles) ? value.profiles : value;
-      let rows = Array.isArray(normalized) ? [...normalized] : [normalized];
+      let rows = normalized === null || normalized === undefined ? [] : (Array.isArray(normalized) ? [...normalized] : [normalized]);
       if (page === 'channels') rows.sort((left, right) => {
         const participation = Number(['assist','proactive'].includes(right.participation_mode)) - Number(['assist','proactive'].includes(left.participation_mode));
-        return participation || String(left.name || '').localeCompare(String(right.name || ''));
+        const named = Number(Boolean(right.name)) - Number(Boolean(left.name));
+        return participation || named || String(left.name || '').localeCompare(String(right.name || ''));
       });
       if (!rows.length) {
         tableState.rows = []; tableState.filtered = []; tableState.page = 1; tableState.columns = [];
@@ -1901,7 +1996,7 @@
           ['Agent harness', configuration.codex_app_server_enabled ? 'Enabled' : 'Disabled'],
           ['Worker capacity', `${configuration.job_worker_concurrency || 0} concurrent jobs`],
           ['Context sync', configuration.slack_context_sync_enabled ? 'Enabled' : 'Paused'],
-          ['Allowed outputs', `${configuration.slack_output_channel_count || 0} channel${configuration.slack_output_channel_count === 1 ? '' : 's'}`]
+          ['Output scope', configuration.slack_output_channel_count ? `${configuration.slack_output_channel_count} channel${configuration.slack_output_channel_count === 1 ? '' : 's'} in the extra allowlist` : 'Channel policy · no extra allowlist']
         ];
         healthSummary.replaceChildren();
         for (const [labelText, valueText] of health) { const item = document.createElement('div'); item.className = 'health-item'; const label = document.createElement('div'); label.className = 'health-label'; label.textContent = labelText; const value = document.createElement('div'); value.className = 'health-value'; value.textContent = valueText; item.append(label, value); healthSummary.append(item); }

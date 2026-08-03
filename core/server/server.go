@@ -278,7 +278,7 @@ var managementPageCopy = map[string]pageData{
 	"context":      {Section: "Intelligence", Title: "Context health", Description: "Monitor the freshness and source coverage of the context packs Tag uses to reason."},
 	"directives":   {Section: "Intelligence", Title: "Channel directives", Description: "Review, create, edit, and restore the instructions that shape Tag's behavior in each channel."},
 	"notes":        {Section: "Intelligence", Title: "Learned channel notes", Description: "Review durable channel-specific knowledge proposed or approved for future conversations."},
-	"memory":       {Section: "Intelligence", Title: "Agent memory", Description: "Review, correct, pin, or forget source-linked summaries and facts recalled in future conversations."},
+	"memory":       {Section: "Intelligence", Title: "Agent memory", Description: "Review, correct, pin, or delete source-linked summaries and facts recalled in future conversations."},
 	"routines":     {Section: "Automation", Title: "Automations", Description: "Create and monitor cron schedules that let Tag check fresh channel context and act only when useful."},
 	"triggers":     {Section: "Automation", Title: "Event triggers", Description: "See the event subscriptions that can launch agent work when their conditions match."},
 	"routes":       {Section: "Configuration", Title: "Model routing", Description: "Understand the available model profiles and how work is routed by strength and effort."},

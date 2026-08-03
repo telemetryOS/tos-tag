@@ -324,6 +324,23 @@ func TestDedicatedManagementPages(t *testing.T) {
 		if page == "usage" && !strings.Contains(response.Body.String(), `<details class="nav-more" open>`) {
 			t.Fatal("advanced navigation did not open for the current advanced page")
 		}
+		if page == "usage" {
+			for _, marker := range []string{`key:'usage_activity'`, `key:'usage_metrics'`, `function usageActivity`, `function usageMetrics`, `.data-table.page-usage`} {
+				if !strings.Contains(response.Body.String(), marker) {
+					t.Fatalf("usage page missing compact layout marker %s", marker)
+				}
+			}
+		}
+		if page == "notes" && !strings.Contains(response.Body.String(), `normalized === null || normalized === undefined ? []`) {
+			t.Fatal("learned notes page does not normalize a null collection into its empty state")
+		}
+		if page == "channels" {
+			for _, marker := range []string{`function conversationLabel`, `Unavailable Slack channel`, `Change participation mode for`} {
+				if !strings.Contains(response.Body.String(), marker) {
+					t.Fatalf("channel page missing fallback-label marker %s", marker)
+				}
+			}
+		}
 		if page == "directives" {
 			for _, marker := range []string{`id="directiveOverview"`, `id="directiveChannel"`, `id="directivePrompt"`, `id="saveDirective"`, `id="directiveHistory"`} {
 				if !strings.Contains(response.Body.String(), marker) {
@@ -344,12 +361,25 @@ func TestDedicatedManagementPages(t *testing.T) {
 				t.Fatal("automation page still renders the generic table placeholder")
 			}
 		}
+		if page == "memory" {
+			for _, marker := range []string{`className = 'clickable-record'`, `page !== 'memory'`, `Delete memory`, `destructive-button`} {
+				if !strings.Contains(response.Body.String(), marker) {
+					t.Fatalf("memory management page missing %s", marker)
+				}
+			}
+			if strings.Contains(response.Body.String(), "correct, pin, or forget") {
+				t.Fatal("memory page still exposes the old forget wording")
+			}
+		}
 	}
 
 	dashboard := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(dashboard, httptest.NewRequest(http.MethodGet, "/admin", nil))
 	if dashboard.Code != http.StatusOK || !strings.Contains(dashboard.Body.String(), `>Dashboard</h1>`) {
 		t.Fatalf("dashboard status=%d body=%s", dashboard.Code, dashboard.Body.String())
+	}
+	if !strings.Contains(dashboard.Body.String(), `Channel policy · no extra allowlist`) {
+		t.Fatal("dashboard does not explain the empty output-allowlist policy")
 	}
 	if strings.Contains(dashboard.Body.String(), `id="liveActivity"`) {
 		t.Fatal("dashboard still embeds the live activity feed")

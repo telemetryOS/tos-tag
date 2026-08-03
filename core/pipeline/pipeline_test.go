@@ -425,9 +425,9 @@ func TestFullAgentHarnessShowsSkillAndEveryToolLifecycle(t *testing.T) {
 	}{
 		{types.SlackProgressInProgress, "Using product knowledge skill"},
 		{types.SlackProgressInProgress, "Reading Agent Wiki"},
-		{types.SlackProgressComplete, "Read Agent Wiki"},
+		{types.SlackProgressInProgress, "Read Agent Wiki"},
 		{types.SlackProgressInProgress, "Searching the web"},
-		{types.SlackProgressError, "Web search failed"},
+		{types.SlackProgressInProgress, "Web search failed"},
 		{types.SlackProgressComplete, "Completed agent work"},
 	}
 	for index, expected := range want {
@@ -438,6 +438,11 @@ func TestFullAgentHarnessShowsSkillAndEveryToolLifecycle(t *testing.T) {
 	for _, update := range updates {
 		if update.Step.ID != "agent-work" {
 			t.Fatalf("progress did not reuse the single transient card: %#v", updates)
+		}
+	}
+	for index, update := range updates[:len(updates)-1] {
+		if update.Step.Status == types.SlackProgressComplete || update.Step.Status == types.SlackProgressError {
+			t.Fatalf("intermediate progress update %d prematurely closed the stream: %#v", index, update.Step)
 		}
 	}
 	if result.AgentFooter == nil || len(result.AgentFooter.Activities) != 1 || result.AgentFooter.Activities[0] != "wiki" {
