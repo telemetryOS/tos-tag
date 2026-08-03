@@ -127,7 +127,7 @@ func (s *MongoStore) ActiveDirective(ctx context.Context, organizationID, channe
 
 func (s *MongoStore) ListDirectives(ctx context.Context, organizationID, channelID string) ([]DirectiveRevision, error) {
 	filter := scopeFilter(organizationID, channelID)
-	cursor, err := s.db.Collection(models.CollectionDirectiveRevisions).Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "revision", Value: 1}}))
+	cursor, err := s.db.Collection(models.CollectionDirectiveRevisions).Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "channel_id", Value: 1}, {Key: "revision", Value: 1}}))
 	if err != nil {
 		return nil, err
 	}
@@ -136,10 +136,21 @@ func (s *MongoStore) ListDirectives(ctx context.Context, organizationID, channel
 	if err := cursor.All(ctx, &revisions); err != nil {
 		return nil, err
 	}
-	var state projection
-	_ = s.db.Collection(models.CollectionDirectives).FindOne(ctx, filter).Decode(&state)
+	stateCursor, err := s.db.Collection(models.CollectionDirectives).Find(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	defer stateCursor.Close(ctx)
+	var states []projection
+	if err := stateCursor.All(ctx, &states); err != nil {
+		return nil, err
+	}
+	activeByChannel := make(map[string]string, len(states))
+	for _, state := range states {
+		activeByChannel[state.ChannelID] = state.ActiveRevisionID
+	}
 	for index := range revisions {
-		revisions[index].Active = revisions[index].ID == state.ActiveRevisionID
+		revisions[index].Active = revisions[index].ID == activeByChannel[revisions[index].ChannelID]
 	}
 	return revisions, nil
 }
@@ -213,7 +224,11 @@ func (s *MongoStore) findNotes(ctx context.Context, filter bson.M) ([]NoteRevisi
 }
 
 func scopeFilter(organizationID, channelID string) bson.M {
-	return bson.M{"organization_id": organizationID, "channel_id": channelID}
+	filter := bson.M{"organization_id": organizationID}
+	if channelID != "" {
+		filter["channel_id"] = channelID
+	}
+	return filter
 }
 
 func normalizeNotFound(err error, resource string) error {

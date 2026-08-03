@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/telemetryos/tos-tag/core/jobs"
+	"github.com/telemetryos/tos-tag/core/schedule"
 	"github.com/telemetryos/tos-tag/types"
 	"sort"
 	"sync"
@@ -24,6 +25,8 @@ type Routine struct {
 	Generation     int64           `json:"generation" bson:"generation"`
 	OwnerID        string          `json:"owner_id" bson:"owner_id"`
 	Input          string          `json:"input" bson:"input"`
+	Cron           string          `json:"cron,omitempty" bson:"cron,omitempty"`
+	Timezone       string          `json:"timezone,omitempty" bson:"timezone,omitempty"`
 	Interval       time.Duration   `json:"interval" bson:"interval"`
 	NextRun        time.Time       `json:"next_run" bson:"next_run"`
 	Enabled        bool            `json:"enabled" bson:"enabled"`
@@ -63,8 +66,10 @@ type Repository interface {
 
 func NewStore() *Store { return &Store{routines: make(map[string]Routine)} }
 func (s *Store) Put(r Routine) (Routine, error) {
-	if r.ID == "" || r.OrganizationID == "" || r.WorkspaceID == "" || r.ChannelID == "" || r.SessionID == "" || r.Generation <= 0 || r.OwnerID == "" || r.Interval < time.Minute || r.NextRun.IsZero() {
-		return Routine{}, fmt.Errorf("invalid routine")
+	var err error
+	r, err = normalize(r, time.Now().UTC())
+	if err != nil {
+		return Routine{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -107,9 +112,11 @@ func (s *Store) Advance(organizationID, id string, from time.Time) error {
 	if !ok || r.OrganizationID != organizationID {
 		return fmt.Errorf("routine not found")
 	}
-	for !r.NextRun.After(from) {
-		r.NextRun = r.NextRun.Add(r.Interval)
+	spec, err := schedule.Parse(r.Cron, r.Timezone, r.Interval)
+	if err != nil {
+		return err
 	}
+	r.NextRun = spec.Advance(r.NextRun, from)
 	r.Version++
 	s.routines[id] = r
 	return nil
@@ -120,7 +127,7 @@ func (s *Store) AdvanceContext(_ context.Context, organizationID, id string, fro
 func (s *Store) List(_ context.Context, organizationID string) ([]Routine, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var result []Routine
+	result := make([]Routine, 0)
 	for _, routine := range s.routines {
 		if routine.OrganizationID == organizationID {
 			result = append(result, routine)
@@ -155,7 +162,11 @@ func (s *Scheduler) RunDue(ctx context.Context) error {
 			continue
 		}
 		window := routine.NextRun.UTC().Format(time.RFC3339Nano)
-		_, _, err := s.jobs.Enqueue(ctx, jobs.Spec{OrganizationID: routine.OrganizationID, WorkspaceID: routine.WorkspaceID, ChannelID: routine.ChannelID, RootThreadTS: routine.RootThreadTS, SessionID: routine.SessionID, Generation: routine.Generation, IdempotencyKey: "routine/" + routine.ID + "/" + window, Kind: "routine", Input: routine.Input, MaxAttempts: 3, ExpiresAt: now.Add(routine.Interval)})
+		spec, specErr := schedule.Parse(routine.Cron, routine.Timezone, routine.Interval)
+		if specErr != nil {
+			return specErr
+		}
+		_, _, err := s.jobs.Enqueue(ctx, jobs.Spec{OrganizationID: routine.OrganizationID, WorkspaceID: routine.WorkspaceID, ChannelID: routine.ChannelID, RootThreadTS: routine.RootThreadTS, SessionID: routine.SessionID, Generation: routine.Generation, IdempotencyKey: "routine/" + routine.ID + "/" + window, Kind: "routine", Input: routine.Input, MaxAttempts: 3, ExpiresAt: now.Add(spec.Window(routine.NextRun))})
 		if err != nil {
 			return err
 		}
@@ -164,6 +175,24 @@ func (s *Scheduler) RunDue(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func normalize(r Routine, now time.Time) (Routine, error) {
+	if r.ID == "" || r.OrganizationID == "" || r.WorkspaceID == "" || r.ChannelID == "" || r.SessionID == "" || r.Generation <= 0 || r.OwnerID == "" || r.Input == "" {
+		return Routine{}, fmt.Errorf("invalid routine")
+	}
+	spec, err := schedule.Parse(r.Cron, r.Timezone, r.Interval)
+	if err != nil {
+		return Routine{}, fmt.Errorf("invalid routine: %w", err)
+	}
+	r.Cron = spec.Cron
+	r.Timezone = spec.Timezone
+	if r.NextRun.IsZero() {
+		r.NextRun = spec.Next(now)
+	} else {
+		r.NextRun = r.NextRun.UTC()
+	}
+	return r, nil
 }
 
 type Service struct {

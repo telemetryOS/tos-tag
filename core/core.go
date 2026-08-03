@@ -299,6 +299,29 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 				return slack.DirectiveConfiguration{Prompt: result.Prompt, Revision: result.Revision}, saveErr
 			},
 		)
+		liveIngress.SetModeChangeHandler(func(ctx context.Context, request slack.ModeChangeRequest) (slack.ModeChangeResult, error) {
+			policy, resolveErr := organizationStore.Resolve(ctx, request.OrganizationID, request.WorkspaceID, request.ChannelID)
+			if resolveErr != nil {
+				return slack.ModeChangeResult{}, fmt.Errorf("resolve channel policy: %w", resolveErr)
+			}
+			previous := string(policy.ParticipationMode)
+			if request.Mode == "" || request.Mode == previous {
+				return slack.ModeChangeResult{Mode: previous, Previous: previous}, nil
+			}
+			policy.ParticipationMode = types.ParticipationMode(request.Mode)
+			// An explicit operator choice must survive membership reconciliation.
+			policy.ParticipationManagedByMembership = false
+			saved, putErr := organizationStore.PutChannel(ctx, policy)
+			if putErr != nil {
+				return slack.ModeChangeResult{}, fmt.Errorf("persist channel policy: %w", putErr)
+			}
+			_, _ = auditChain.Append(ctx, audit.AppendRequest{
+				OrganizationID: request.OrganizationID, Type: "channel_policy.mode_command", ActorID: request.UserID,
+				ResourceID: request.ChannelID, IdempotencyKey: "channel-mode/" + request.ChannelID + "/" + types.NewID("mode"),
+				Metadata: map[string]any{"previous_mode": previous, "mode": string(saved.ParticipationMode), "surface": "slack_slash_command"},
+			})
+			return slack.ModeChangeResult{Mode: string(saved.ParticipationMode), Previous: previous, Changed: true}, nil
+		})
 	}
 	pipe, err := pipeline.New(pipeline.Dependencies{
 		Config: cfg, Logger: logger, Activity: activityFeed, Ingress: ingress, Transport: transport,
@@ -336,7 +359,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	srv, err := server.New(server.Dependencies{
 		Config: cfg, Logger: logger, Activity: activityFeed, Health: db, Ingress: statusIngress, Transport: statusTransport,
 		Jobs: jobQueue, Deliveries: deliveryQueue, Decisions: decisionStore, Version: Version,
-		Routes: responseRouter, Organizations: organizationStore, Retention: retentionJanitor, Records: managementRecords, ChannelConfig: channelConfiguration, Marketplaces: marketplaceRegistry, ToolMarketplaces: toolMarketplaceRegistry, Intelligence: intelligenceProjector, Memory: memoryStore, Secrets: secretStore, Audit: auditChain, Approvals: approvalStore, ApprovalCoordinator: approvalCoordinator, Routines: routineStore, Triggers: triggerStore,
+		Routes: responseRouter, Organizations: organizationStore, Retention: retentionJanitor, Records: managementRecords, ChannelConfig: channelConfiguration, Marketplaces: marketplaceRegistry, ToolMarketplaces: toolMarketplaceRegistry, Intelligence: intelligenceProjector, Memory: memoryStore, Secrets: secretStore, Audit: auditChain, Approvals: approvalStore, ApprovalCoordinator: approvalCoordinator, Routines: routineStore, Triggers: triggerStore, Sessions: sessionStore,
 	})
 	if err != nil {
 		return nil, err

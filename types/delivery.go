@@ -34,14 +34,15 @@ type SlackMentionAllowlist struct {
 // SlackAgentFooter is control-plane-owned execution metadata for a full-agent
 // response. Model JSON cannot set it, and classifier-only replies omit it.
 type SlackAgentFooter struct {
-	ModelID               string `json:"-" bson:"model_id,omitempty"`
-	ReasoningEffort       string `json:"-" bson:"reasoning_effort,omitempty"`
-	InputTokens           int64  `json:"-" bson:"input_tokens,omitempty"`
-	OutputTokens          int64  `json:"-" bson:"output_tokens,omitempty"`
-	CachedInputTokens     int64  `json:"-" bson:"cached_input_tokens,omitempty"`
-	ReasoningOutputTokens int64  `json:"-" bson:"reasoning_output_tokens,omitempty"`
-	TotalTokens           int64  `json:"-" bson:"total_tokens,omitempty"`
-	DurationMS            int64  `json:"-" bson:"duration_ms,omitempty"`
+	ModelID               string   `json:"-" bson:"model_id,omitempty"`
+	ReasoningEffort       string   `json:"-" bson:"reasoning_effort,omitempty"`
+	InputTokens           int64    `json:"-" bson:"input_tokens,omitempty"`
+	OutputTokens          int64    `json:"-" bson:"output_tokens,omitempty"`
+	CachedInputTokens     int64    `json:"-" bson:"cached_input_tokens,omitempty"`
+	ReasoningOutputTokens int64    `json:"-" bson:"reasoning_output_tokens,omitempty"`
+	TotalTokens           int64    `json:"-" bson:"total_tokens,omitempty"`
+	DurationMS            int64    `json:"-" bson:"duration_ms,omitempty"`
+	Activities            []string `json:"-" bson:"activities,omitempty"`
 }
 
 type SlackSegment struct {

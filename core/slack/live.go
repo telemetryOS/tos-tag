@@ -25,6 +25,7 @@ const (
 	directiveCallbackID     = "tos_tag_channel_directive_v1"
 	directivePromptBlockID  = "channel_directive"
 	directivePromptActionID = "prompt"
+	modeSlashCommand        = "/tag-mode"
 )
 
 type LiveOptions struct {
@@ -50,6 +51,7 @@ type LiveIngress struct {
 	membershipHandler  BotMembershipHandler
 	directiveLoad      DirectiveLoadHandler
 	directiveSave      DirectiveSaveHandler
+	modeChange         ModeChangeHandler
 }
 
 func (s *LiveIngress) SetApprovalInteractionHandler(handler ApprovalInteractionHandler) {
@@ -68,6 +70,12 @@ func (s *LiveIngress) SetDirectiveConfigurationHandlers(load DirectiveLoadHandle
 	s.mu.Lock()
 	s.directiveLoad = load
 	s.directiveSave = save
+	s.mu.Unlock()
+}
+
+func (s *LiveIngress) SetModeChangeHandler(handler ModeChangeHandler) {
+	s.mu.Lock()
+	s.modeChange = handler
 	s.mu.Unlock()
 }
 
@@ -304,6 +312,16 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 					eventLogger.Error("Slack slash command missing request metadata")
 					continue
 				}
+				modeRequest, modeEligible, modeErr := NormalizeModeCommand(s.options, event.Data)
+				if modeErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", modeErr)}).Error("Slack mode command rejected")
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralCommandResponse("This command is not available in this workspace or channel."))
+					continue
+				}
+				if modeEligible {
+					s.handleModeCommand(ctx, eventLogger, event.Request.EnvelopeID, modeRequest)
+					continue
+				}
 				command, eligible, normalizeErr := NormalizeDirectiveCommand(s.options, event.Data)
 				if normalizeErr != nil {
 					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", normalizeErr)}).Error("Slack directive command rejected")
@@ -458,7 +476,11 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 				continue
 			}
 			if accepted.Ignored {
-				envelopeLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "ignored": true}).Info("Slack policy-excluded envelope acknowledged without persistence")
+				if accepted.ResolvedContext {
+					envelopeLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "ignored": true, "resolved_context": true}).Debug("Slack self-authored context acknowledged without decision admission")
+				} else {
+					envelopeLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "ignored": true}).Info("Slack policy-excluded envelope acknowledged without persistence")
+				}
 				continue
 			}
 			envelopeLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "duplicate": accepted.Duplicate, "ignored": false}).Info("Slack event durably accepted and acknowledged")
@@ -528,6 +550,41 @@ func approvalInteractionDiagnosticCode(err error) string {
 	return "persistence_failed"
 }
 
+func (s *LiveIngress) handleModeCommand(ctx context.Context, eventLogger *blackbox.Logger, envelopeID string, request ModeChangeRequest) {
+	commandLogger := eventLogger.WithCtx(blackbox.Ctx{"channel_id": request.ChannelID, "actor_id": request.UserID, "requested_mode": request.Mode})
+	switch request.Mode {
+	case "", "observe", "assist", "proactive":
+	default:
+		_ = s.client.AckCtx(ctx, envelopeID, ephemeralCommandResponse("Usage: `/tag-mode observe | assist | proactive` — or run it with no argument to see the current mode."))
+		return
+	}
+	s.mu.Lock()
+	changeMode := s.modeChange
+	s.mu.Unlock()
+	if changeMode == nil {
+		commandLogger.Error("Slack mode command has no configuration handler")
+		_ = s.client.AckCtx(ctx, envelopeID, ephemeralCommandResponse("Participation mode changes are not available right now."))
+		return
+	}
+	result, changeErr := changeMode(ctx, request)
+	if changeErr != nil {
+		commandLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", changeErr)}).Warn("Slack mode command failed")
+		_ = s.client.AckCtx(ctx, envelopeID, ephemeralCommandResponse("The participation mode could not be changed for this channel."))
+		return
+	}
+	response := "Tag is in *" + result.Mode + "* mode in this channel. Use `/tag-mode observe | assist | proactive` to change it."
+	if result.Changed {
+		response = "Tag participation mode for this channel is now *" + result.Mode + "* (was " + result.Previous + ")."
+	} else if request.Mode != "" {
+		response = "Tag is already in *" + result.Mode + "* mode in this channel."
+	}
+	if ackErr := s.client.AckCtx(ctx, envelopeID, ephemeralCommandResponse(response)); ackErr != nil {
+		commandLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", ackErr)}).Error("Slack mode command acknowledgement failed")
+		return
+	}
+	commandLogger.WithCtx(blackbox.Ctx{"effective_mode": result.Mode, "changed": result.Changed}).Info("Slack mode command handled")
+}
+
 type directiveCommand struct {
 	Request   DirectiveConfigurationRequest
 	TriggerID string
@@ -538,18 +595,44 @@ type directiveModalMetadata struct {
 	ChannelID   string `json:"channel_id"`
 }
 
-func NormalizeDirectiveCommand(options LiveOptions, data any) (directiveCommand, bool, error) {
-	var command slackapi.SlashCommand
+func normalizeSlashCommand(data any) (slackapi.SlashCommand, bool, error) {
 	switch value := data.(type) {
 	case slackapi.SlashCommand:
-		command = value
+		return value, true, nil
 	case *slackapi.SlashCommand:
 		if value == nil {
-			return directiveCommand{}, false, errors.New("Slack slash command payload is nil")
+			return slackapi.SlashCommand{}, false, errors.New("Slack slash command payload is nil")
 		}
-		command = *value
+		return *value, true, nil
 	default:
-		return directiveCommand{}, false, nil
+		return slackapi.SlashCommand{}, false, nil
+	}
+}
+
+// NormalizeModeCommand validates a /tag-mode slash command's installation
+// scope. The requested mode text is passed through for the handler to
+// validate so unknown values can receive a usage reply.
+func NormalizeModeCommand(options LiveOptions, data any) (ModeChangeRequest, bool, error) {
+	command, ok, err := normalizeSlashCommand(data)
+	if err != nil || !ok || command.Command != modeSlashCommand {
+		return ModeChangeRequest{}, false, err
+	}
+	if command.TeamID != options.TeamID || (command.APIAppID != "" && command.APIAppID != options.AppID) || command.ChannelID == "" || command.UserID == "" {
+		return ModeChangeRequest{}, false, errors.New("Slack mode command scope is invalid")
+	}
+	return ModeChangeRequest{
+		OrganizationID: options.OrganizationID,
+		WorkspaceID:    command.TeamID,
+		ChannelID:      command.ChannelID,
+		UserID:         command.UserID,
+		Mode:           strings.ToLower(strings.TrimSpace(command.Text)),
+	}, true, nil
+}
+
+func NormalizeDirectiveCommand(options LiveOptions, data any) (directiveCommand, bool, error) {
+	command, ok, err := normalizeSlashCommand(data)
+	if err != nil || !ok {
+		return directiveCommand{}, false, err
 	}
 	if command.Command != directiveSlashCommand {
 		return directiveCommand{}, false, nil
@@ -750,6 +833,7 @@ func NormalizeEventsAPI(organizationID, botUserID, envelopeID string, data any) 
 	case *slackevents.MessageEvent:
 		base.ChannelID, base.MessageTS, base.ThreadTS = inner.Channel, inner.TimeStamp, inner.ThreadTimeStamp
 		base.UserID, base.BotID, base.Text, base.Subtype = inner.User, inner.BotID, inner.Text, inner.SubType
+		base.ChannelKind = inner.ChannelType
 		base.Restricted = inner.ChannelType == slackevents.ChannelTypeGroup || inner.ChannelType == slackevents.ChannelTypeIM || inner.ChannelType == slackevents.ChannelTypeMPIM
 		base.Kind, base.OriginTag = types.SlackEventMessage, "slack_message"
 		switch inner.SubType {
@@ -836,6 +920,8 @@ func (d *LiveDelivery) Send(ctx context.Context, request types.SlackDeliveryRequ
 		options := []slackapi.MsgOption{
 			slackapi.MsgOptionText(payload.Text, false),
 			slackapi.MsgOptionBlocks(regularBlocks...),
+			slackapi.MsgOptionDisableLinkUnfurl(),
+			slackapi.MsgOptionDisableMediaUnfurl(),
 			slackapi.MsgOptionMetadata(slackapi.SlackMetadata{EventType: "tos_tag_delivery", EventPayload: map[string]any{"delivery_id": string(request.ID), "part": index + 1}}),
 		}
 		if request.Destination.ThreadTS != "" && request.Destination.UpdateTS == "" && !(request.Destination.StreamTS != "" && index == 0) {
@@ -856,7 +942,12 @@ func (d *LiveDelivery) Send(ctx context.Context, request types.SlackDeliveryRequ
 			if len(nativeBlocks) > 0 {
 				finalChunk = slackapi.NewBlocksChunk(nativeBlocks...)
 			}
-			streamOptions := []slackapi.MsgOption{slackapi.MsgOptionChunks(finalChunk), slackapi.MsgOptionMetadata(slackapi.SlackMetadata{EventType: "tos_tag_delivery", EventPayload: map[string]any{"delivery_id": string(request.ID), "part": index + 1}})}
+			streamOptions := []slackapi.MsgOption{
+				slackapi.MsgOptionChunks(finalChunk),
+				slackapi.MsgOptionDisableLinkUnfurl(),
+				slackapi.MsgOptionDisableMediaUnfurl(),
+				slackapi.MsgOptionMetadata(slackapi.SlackMetadata{EventType: "tos_tag_delivery", EventPayload: map[string]any{"delivery_id": string(request.ID), "part": index + 1}}),
+			}
 			_, timestamp, err = d.api.StopStreamContext(ctx, request.Destination.ChannelID, request.Destination.StreamTS, streamOptions...)
 			if timestamp == "" {
 				timestamp = request.Destination.StreamTS
@@ -875,6 +966,8 @@ func (d *LiveDelivery) Send(ctx context.Context, request types.SlackDeliveryRequ
 					request.Destination.StreamTS,
 					slackapi.MsgOptionText(expiredStreamText, false),
 					slackapi.MsgOptionBlocks(expiredStreamBlock),
+					slackapi.MsgOptionDisableLinkUnfurl(),
+					slackapi.MsgOptionDisableMediaUnfurl(),
 				); updateErr != nil {
 					requestLogger.WithCtx(blackbox.Ctx{"part": index + 1, "error_type": fmt.Sprintf("%T", updateErr)}).Warn("Slack expired stream cleanup failed; continuing with final fallback delivery")
 				}

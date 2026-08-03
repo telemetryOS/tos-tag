@@ -82,16 +82,20 @@ commands, tests, and active documentation have been removed.
 - Native Block Kit Tables, sortable/paginated Data Tables, presentation-only
   Cards and Carousels, expanded AI sections, and typed message segments.
 - Control-plane-owned full-agent context footer with resolved model, effort,
-  provider-reported turn tokens, and elapsed worker time; classifier-only
+  provider-reported turn tokens, elapsed worker time, and compact successfully
+  used capability categories; classifier-only
   replies remain unadorned.
 - Durable delivery reconciliation and special-mention rejection.
 - Slack Thinking Steps for admitted full-agent thread jobs, with durable stream
-  timestamps, safe reviewed-event task updates, same-message finalization, and
-  ordinary-delivery fallback. Intentional reaction-only/direct classifier
-  outcomes remain outside the stream path.
+  timestamps, one rotating current-action card for validated skills and every
+  native or reviewed tool call, same-message finalization, and ordinary-delivery
+  fallback. Intentional reaction-only/direct classifier outcomes remain outside
+  the stream path.
 - Slack-native exact-action approval and fresh-worker resume.
 - `/tag-directive` Slack modal with revisioned Mongo persistence and audit.
-- Scheduled routines and classifier-gated heartbeat trigger subscriptions.
+- Standard five-field cron routines and classifier-gated heartbeat trigger
+  subscriptions with explicit IANA timezones, legacy interval compatibility,
+  and a combined management Automation view/editor.
 - Complete behavioral `base` plugin from `tag-agent-skills`, including
   read-only code, Linear, Wiki, OTel, and `team-alignment` worker behavior.
 - Reviewed Linear, Wiki, OTel, DLA, optional Mongo, and bounded source-code
@@ -133,10 +137,10 @@ commands, tests, and active documentation have been removed.
 Current migration evidence:
 
 - full verification components: pass, including all Go packages, the race
-  detector, vet, security scans, and the expanded `46/46` deterministic
+  detector, vet, security scans, and the expanded `48/48` deterministic
   behavioral eval;
-- opt-in direct OpenAI classifier eval: `46/46`, with `36` real provider calls
-  and approximately `1.82s` mean case
+- opt-in direct OpenAI classifier eval: `48/48`, with `38` real provider calls
+  and approximately `1.84s` mean case
   latency; natural Slack text contained no evaluator outcome, placement,
   reaction, model, effort, or method hints;
 - live `#tos-tag` assist-initiative canary: the direct provider recommended
@@ -206,6 +210,39 @@ Current migration evidence:
   resolved context, completed bot-joined channels scan only after their durable
   watermark, missed human mentions re-enter the decision queue, and all ambient
   catch-up remains context-only;
+- 2026-08-03 self-authored ingress proof: pass. A live classifier-only reply was
+  echoed by Slack, stored as `authorized` / `resolved` destination-local context,
+  acknowledged without decision admission, and produced no classifier activity
+  record or provider call;
+- 2026-08-03 live acknowledgement and rendering matrix: pass after one fix.
+  Natural `#tos-tag` probes covered classifier-only social reply, irrelevant
+  silence, source-write redirection, light/low in-channel work, standard/medium
+  product retrieval, native table delivery, destination-local privacy refusal,
+  reaction-only acknowledgement, and strong/max operational routing. The
+  observed emoji set was `white_check_mark`, `speech_balloon`, `thinking_face`,
+  `warning`, `rotating_light`, and `eyes`. Threaded work opened Thinking Steps
+  roughly one second after classification. A malformed product-comparison table first
+  failed with `table_row_shape`; model-boundary row normalization was added,
+  and the natural retry completed as `mrkdwn_text + table + mrkdwn_text` with
+  two reviewed product reads and same-message stream finalization. A subsequent
+  read-only source review exposed a disposable local-path link as
+  `mrkdwn_unsafe_link`; unsupported model-created link targets now degrade to
+  their visible label while valid HTTP(S) links retain normal validation;
+- 2026-08-03 implementation-plan follow-up retry: pass. The first natural
+  follow-up was incorrectly admitted as a light/low channel reply. The new
+  natural eval and policy correction route implementation and migration plans
+  to standard/medium threaded work. The live retry received a classifier emoji,
+  opened Thinking Steps in `559ms`, showed two read-only source milestones, and
+  finalized the same threaded message in `1m 4s` with durable delivery. The
+  complete direct provider matrix passed `48/48` at `1.84s` mean classifier
+  latency;
+- 2026-08-03 `#tos-tag` context hygiene: the channel policy is now
+  `session_only`. Historical import and offline catch-up are skipped; context is
+  restricted to same-channel events observed since process startup; durable
+  memory and incident facts are neither recalled nor newly derived. The exact
+  `TEST-*` purge removed 12 observations, 10 message projections, 8 incident
+  facts, 1 durable summary, 10 derivation links, and 338 context-pack revisions;
+  all four retrieval-text checks returned zero afterward;
 - tracked source/config dependency search for the removed runtime: clean.
 
 The host runtime is live on the migrated binary. A fresh persistent container

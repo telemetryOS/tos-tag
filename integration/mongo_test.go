@@ -63,6 +63,10 @@ func TestMongoChannelDirectiveAndNotePersistence(t *testing.T) {
 	if _, err := first.ActivateDirective(ctx, "org", "support", directive.ID); err != nil {
 		t.Fatal(err)
 	}
+	alerts, err := first.PublishDirective(ctx, "org", "alerts", "Investigate every alert.", "admin", "admin-alerts-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	note, err := first.ProposeNote(ctx, "org", "support", "The status page is canonical.", []string{"support/1.0"}, "agent")
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +80,10 @@ func TestMongoChannelDirectiveAndNotePersistence(t *testing.T) {
 	activeDirective, err := second.ActiveDirective(ctx, "org", "support")
 	if err != nil || activeDirective.ID != directive.ID {
 		t.Fatalf("directive=%#v err=%v", activeDirective, err)
+	}
+	allDirectives, err := second.ListDirectives(ctx, "org", "")
+	if err != nil || len(allDirectives) != 2 || !allDirectives[0].Active || !allDirectives[1].Active {
+		t.Fatalf("organization directives=%#v alerts=%#v err=%v", allDirectives, alerts, err)
 	}
 	activeNotes, err := second.ActiveNotes(ctx, "org", "support")
 	if err != nil || len(activeNotes) != 1 || activeNotes[0].ID != note.ID {

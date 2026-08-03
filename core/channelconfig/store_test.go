@@ -52,6 +52,26 @@ func TestPublishDirectiveIsIdempotentAndActive(t *testing.T) {
 	}
 }
 
+func TestListDirectivesWithoutChannelReturnsOrganizationHistory(t *testing.T) {
+	store := NewStore()
+	first, err := store.PublishDirective(context.Background(), "org", "alerts", "Investigate alerts.", "U1", "source-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.PublishDirective(context.Background(), "org", "support", "Answer support questions.", "U1", "source-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = store.PublishDirective(context.Background(), "other-org", "alerts", "Do not include this.", "U1", "source-3")
+	values, err := store.ListDirectives(context.Background(), "org", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 2 || values[0].ID != first.ID || values[1].ID != second.ID || !values[0].Active || !values[1].Active {
+		t.Fatalf("organization directives=%#v", values)
+	}
+}
+
 func TestEditorRequiresChannelApproverAndAuditsContentCommitment(t *testing.T) {
 	ctx := context.Background()
 	scopes := orgconfig.NewMemory()

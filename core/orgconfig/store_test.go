@@ -20,6 +20,9 @@ func TestMemoryChannelPolicy(t *testing.T) {
 	if saved.Version != 1 {
 		t.Fatal(saved.Version)
 	}
+	if saved.ContextHistoryMode != types.ContextHistoryDurable {
+		t.Fatalf("default context history mode = %q", saved.ContextHistoryMode)
+	}
 	got, err := store.Resolve(context.Background(), "org", "team", "alerts")
 	if err != nil || got.ParticipationMode != types.ModeAssist {
 		t.Fatalf("got=%#v err=%v", got, err)
@@ -74,6 +77,13 @@ func TestChannelPolicyValidation(t *testing.T) {
 	}
 }
 
+func TestChannelPolicyRejectsInvalidContextHistoryMode(t *testing.T) {
+	err := ValidateChannel(ChannelPolicy{OrganizationID: "o", TeamID: "t", ChannelID: "c", ParticipationMode: types.ModeObserve, ContextHistoryMode: "forever", MembershipRevision: "m", MembershipRefreshedAt: time.Now(), MaxResponsesPerHour: 1, MaxConcurrentJobs: 1})
+	if err == nil {
+		t.Fatal("invalid context history mode accepted")
+	}
+}
+
 func TestUpsertContextChannelPreservesOperatorPolicyAndNeverUnrestricts(t *testing.T) {
 	store := NewMemory()
 	now := time.Now().UTC()
@@ -81,7 +91,7 @@ func TestUpsertContextChannelPreservesOperatorPolicyAndNeverUnrestricts(t *testi
 		OrganizationID: "org", TeamID: "team", ChannelID: "tos-tag", Name: "old",
 		Enrolled: false, Restricted: true, ParticipationMode: types.ModeProactive,
 		KillSwitch: true, Cooldown: time.Minute, MaxResponsesPerHour: 2, MaxConcurrentJobs: 3,
-		DefaultModelProfile: "custom", ApproverUserIDs: []string{"U_OPERATOR"}, MembershipRevision: "old", MembershipRefreshedAt: now.Add(-time.Hour),
+		DefaultModelProfile: "custom", ContextHistoryMode: types.ContextHistorySessionOnly, ApproverUserIDs: []string{"U_OPERATOR"}, MembershipRevision: "old", MembershipRefreshedAt: now.Add(-time.Hour),
 	}
 	if _, err := store.PutChannel(context.Background(), existing); err != nil {
 		t.Fatal(err)
@@ -96,7 +106,7 @@ func TestUpsertContextChannelPreservesOperatorPolicyAndNeverUnrestricts(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if refreshed.Enrolled || !refreshed.Restricted || refreshed.ParticipationMode != types.ModeProactive || !refreshed.KillSwitch || refreshed.Cooldown != time.Minute || refreshed.MaxResponsesPerHour != 2 || refreshed.MaxConcurrentJobs != 3 || refreshed.DefaultModelProfile != "custom" || len(refreshed.ApproverUserIDs) != 1 || refreshed.ApproverUserIDs[0] != "U_OPERATOR" {
+	if refreshed.Enrolled || !refreshed.Restricted || refreshed.ParticipationMode != types.ModeProactive || !refreshed.KillSwitch || refreshed.Cooldown != time.Minute || refreshed.MaxResponsesPerHour != 2 || refreshed.MaxConcurrentJobs != 3 || refreshed.DefaultModelProfile != "custom" || refreshed.ContextHistoryMode != types.ContextHistorySessionOnly || len(refreshed.ApproverUserIDs) != 1 || refreshed.ApproverUserIDs[0] != "U_OPERATOR" {
 		t.Fatalf("context refresh widened operator policy: %#v", refreshed)
 	}
 	if refreshed.Name != "renamed" || refreshed.MembershipRevision != "slack-user-context/v1" || !refreshed.MembershipRefreshedAt.Equal(now) {

@@ -401,8 +401,13 @@ func TestContextSyncDiscoversAllConversationTypesAndImportsThreads(t *testing.T)
 	if stats.ChannelsDiscovered != 2 || stats.ChannelsRegistered != 2 || stats.MessagesImported != 3 {
 		t.Fatalf("context sync stats = %#v", stats)
 	}
-	if api.conversationIn == nil || api.conversationIn.TeamID != "team" || len(api.conversationIn.Types) != 4 {
+	if api.conversationIn == nil || api.conversationIn.TeamID != "team" || len(api.conversationIn.Types) != 3 {
 		t.Fatalf("conversation discovery request = %#v", api.conversationIn)
+	}
+	for _, conversationType := range api.conversationIn.Types {
+		if conversationType == "mpim" {
+			t.Fatal("group DMs must be excluded from context discovery")
+		}
 	}
 	if channels[0].Restricted || !channels[1].Restricted {
 		t.Fatalf("channel disclosure classes = %#v", channels)

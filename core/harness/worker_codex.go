@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,7 @@ type codexWorkerSession struct {
 	client         *codexAppServer
 	workspace      workers.Workspace
 	access         tools.Access
+	allowedSkills  map[string]struct{}
 	activity       activity.Publisher
 	organizationID string
 	jobID          string
@@ -168,7 +170,11 @@ func (w *WorkerCodex) createSession(ctx context.Context, spec JobSessionSpec) (S
 	}
 	w.publish(spec.OrganizationID, jobID, attemptID, "worker.provision", "inbound", "completed", "Disposable Codex worker ready")
 	sessionID := types.NewID("codex")
-	session := &codexWorkerSession{workspace: connection.Workspace, events: make(chan Event, 128), errs: make(chan error, 4), activity: w.activity, organizationID: spec.OrganizationID, jobID: jobID, attemptID: attemptID}
+	allowedSkills := make(map[string]struct{}, len(w.skills))
+	for _, skill := range w.skills {
+		allowedSkills[skill.Name] = struct{}{}
+	}
+	session := &codexWorkerSession{workspace: connection.Workspace, allowedSkills: allowedSkills, events: make(chan Event, 128), errs: make(chan error, 4), activity: w.activity, organizationID: spec.OrganizationID, jobID: jobID, attemptID: attemptID}
 	client, err := newCodexAppServer(connection.Stdin, connection.Stdout, session.notification, func(callCtx context.Context, method string, params json.RawMessage) (any, error) {
 		return w.serverRequest(callCtx, session, method, params)
 	}, session.fail)
@@ -218,7 +224,7 @@ func (w *WorkerCodex) Prompt(ctx context.Context, sessionID string, prompt Promp
 	}
 	dynamicTools := []map[string]any{}
 	if session.access.Capability != "" {
-		dynamicTools = codexDynamicTools()
+		dynamicTools = codexDynamicTools(w.skills)
 	}
 	var threadResponse struct {
 		Thread struct {
@@ -411,6 +417,20 @@ func (s *codexWorkerSession) notification(method string, raw json.RawMessage) {
 	s.mu.Unlock()
 	s.publish(method, "inbound", "received", "Received "+method+" from Codex App Server")
 	switch method {
+	case "item/started":
+		var params struct {
+			ThreadID string         `json:"threadId"`
+			Item     map[string]any `json:"item"`
+		}
+		if json.Unmarshal(raw, &params) != nil || params.ThreadID != threadID {
+			return
+		}
+		for _, skillName := range nativeSkillNames(params.Item) {
+			s.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "skill.execution.started", Data: map[string]any{"skill_name": skillName}, CreatedAt: time.Now().UTC()})
+		}
+		if data := nativeToolEventData(params.Item); data != nil {
+			s.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "tool.execution.started", Data: data, CreatedAt: time.Now().UTC()})
+		}
 	case "item/completed":
 		var params struct {
 			ThreadID string         `json:"threadId"`
@@ -433,6 +453,9 @@ func (s *codexWorkerSession) notification(method string, raw json.RawMessage) {
 				data["action"] = action
 			}
 			s.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "web.search.completed", Data: data, CreatedAt: time.Now().UTC()})
+		}
+		if data := nativeToolEventData(params.Item); data != nil {
+			s.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: nativeToolCompletionEventType(params.Item), Data: data, CreatedAt: time.Now().UTC()})
 		}
 	case "thread/tokenUsage/updated":
 		var params struct {
@@ -513,11 +536,16 @@ func (w *WorkerCodex) serverRequest(ctx context.Context, session *codexWorkerSes
 	case "item/tool/call":
 		var request struct {
 			ThreadID  string          `json:"threadId"`
+			CallID    string          `json:"callId"`
 			Tool      string          `json:"tool"`
 			Arguments json.RawMessage `json:"arguments"`
 		}
-		if err := json.Unmarshal(raw, &request); err != nil || request.ThreadID != threadID {
+		if err := json.Unmarshal(raw, &request); err != nil || request.ThreadID != threadID || request.CallID == "" {
 			return nil, errors.New("invalid dynamic tool request")
+		}
+		invocation, bridgeArguments, err := session.prepareToolInvocation(request.CallID, request.Tool, request.Arguments)
+		if err != nil {
+			return nil, err
 		}
 		endpoint := ""
 		switch request.Tool {
@@ -528,20 +556,22 @@ func (w *WorkerCodex) serverRequest(ctx context.Context, session *codexWorkerSes
 		default:
 			return nil, errors.New("dynamic tool is not admitted")
 		}
-		output, success := w.callBridge(ctx, session.access.Capability, endpoint, request.Arguments)
+		for _, skillName := range invocation.SkillNames {
+			session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "skill.execution.started", Data: map[string]any{"skill_name": skillName, "call_id": request.CallID}, CreatedAt: time.Now().UTC()})
+		}
+		session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "tool.execution.started", Data: invocation.EventData(), CreatedAt: time.Now().UTC()})
+		output, success := w.callBridge(ctx, session.access.Capability, endpoint, bridgeArguments)
 		status := "failed"
 		if success {
 			status = "completed"
 		}
 		session.publishToolResult(method, status, request.Tool, request.Arguments)
+		resultType := "tool.execution.failed"
 		if success {
-			if toolID, operationID, resourceAction := completedToolOperation(request.Tool, request.Arguments); toolID != "" {
-				data := map[string]any{"tool_id": toolID, "operation_id": operationID}
-				if resourceAction != "" {
-					data["resource_action"] = resourceAction
-				}
-				session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "tool.execution.completed", Data: data, CreatedAt: time.Now().UTC()})
-			}
+			resultType = "tool.execution.completed"
+		}
+		session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: resultType, Data: invocation.EventData(), CreatedAt: time.Now().UTC()})
+		if success {
 			if artifactURL := producedWikiArtifactURL(request.Tool, request.Arguments, output); artifactURL != "" {
 				session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "artifact.produced", Data: map[string]any{"url": artifactURL}, CreatedAt: time.Now().UTC()})
 			}
@@ -655,6 +685,138 @@ func completedToolOperation(tool string, arguments json.RawMessage) (string, str
 	return request.ToolID, request.OperationID, resourceAction
 }
 
+type declaredToolInvocation struct {
+	CallID         string
+	ToolID         string
+	OperationID    string
+	ResourceAction string
+	SkillNames     []string
+}
+
+func (i declaredToolInvocation) EventData() map[string]any {
+	data := map[string]any{"call_id": i.CallID, "tool_id": i.ToolID, "operation_id": i.OperationID}
+	if i.ResourceAction != "" {
+		data["resource_action"] = i.ResourceAction
+	}
+	return data
+}
+
+func (s *codexWorkerSession) prepareToolInvocation(callID, tool string, arguments json.RawMessage) (declaredToolInvocation, json.RawMessage, error) {
+	var declaration struct {
+		ToolID      string   `json:"tool_id"`
+		OperationID string   `json:"operation_id"`
+		Operation   string   `json:"operation"`
+		SkillNames  []string `json:"skill_names"`
+	}
+	if json.Unmarshal(arguments, &declaration) != nil || len(declaration.SkillNames) == 0 {
+		return declaredToolInvocation{}, nil, errors.New("dynamic tool call must declare its active skills")
+	}
+	seen := make(map[string]struct{}, len(declaration.SkillNames))
+	validatedSkills := make([]string, 0, len(declaration.SkillNames))
+	for _, skillName := range declaration.SkillNames {
+		skillName = strings.TrimSpace(skillName)
+		if _, allowed := s.allowedSkills[skillName]; !allowed {
+			return declaredToolInvocation{}, nil, errors.New("dynamic tool call declared an unavailable skill")
+		}
+		if _, duplicate := seen[skillName]; duplicate {
+			continue
+		}
+		seen[skillName] = struct{}{}
+		validatedSkills = append(validatedSkills, skillName)
+	}
+	invocation := declaredToolInvocation{CallID: callID, SkillNames: validatedSkills}
+	switch tool {
+	case "tos_tag_tool":
+		invocation.ToolID, invocation.OperationID, invocation.ResourceAction = completedToolOperation(tool, arguments)
+	case "tos_tag_trigger":
+		invocation.ToolID, invocation.OperationID = "tos-tag-triggers", declaration.Operation
+	default:
+		return declaredToolInvocation{}, nil, errors.New("dynamic tool is not admitted")
+	}
+	if invocation.ToolID == "" || invocation.OperationID == "" {
+		return declaredToolInvocation{}, nil, errors.New("dynamic tool identity is incomplete")
+	}
+	var forwarded map[string]json.RawMessage
+	if json.Unmarshal(arguments, &forwarded) != nil {
+		return declaredToolInvocation{}, nil, errors.New("dynamic tool arguments are invalid")
+	}
+	delete(forwarded, "skill_names")
+	bridgeArguments, err := json.Marshal(forwarded)
+	if err != nil {
+		return declaredToolInvocation{}, nil, errors.New("dynamic tool arguments could not be forwarded")
+	}
+	return invocation, bridgeArguments, nil
+}
+
+func nativeSkillNames(item map[string]any) []string {
+	if item["type"] != "userMessage" {
+		return nil
+	}
+	content, _ := item["content"].([]any)
+	var names []string
+	for _, value := range content {
+		entry, _ := value.(map[string]any)
+		name, _ := entry["name"].(string)
+		if entry["type"] == "skill" && safeProgressIdentifier(name) {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func nativeToolEventData(item map[string]any) map[string]any {
+	kind, _ := item["type"].(string)
+	callID, _ := item["id"].(string)
+	if callID == "" {
+		return nil
+	}
+	toolID, operationID := "", ""
+	switch kind {
+	case "webSearch":
+		toolID, operationID = "openai.web-search", "search"
+	case "mcpToolCall":
+		toolID, operationID = "openai.integration", "call"
+	case "commandExecution":
+		toolID, operationID = "openai.command", "execute"
+	case "fileChange":
+		toolID, operationID = "openai.file-change", "apply"
+	case "imageView":
+		toolID, operationID = "openai.image-view", "view"
+	case "imageGeneration":
+		toolID, operationID = "openai.image-generation", "generate"
+	case "collabAgentToolCall":
+		toolID, operationID = "openai.subagent", "delegate"
+	case "sleep":
+		toolID, operationID = "openai.wait", "wait"
+	default:
+		return nil
+	}
+	return map[string]any{"call_id": callID, "tool_id": toolID, "operation_id": operationID}
+}
+
+func nativeToolCompletionEventType(item map[string]any) string {
+	status, _ := item["status"].(string)
+	if status == "failed" || status == "error" || status == "declined" || item["success"] == false || item["error"] != nil {
+		return "tool.execution.failed"
+	}
+	if exitCode, ok := item["exitCode"].(float64); ok && exitCode != 0 {
+		return "tool.execution.failed"
+	}
+	return "tool.execution.completed"
+}
+
+func safeProgressIdentifier(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' && char != '.' {
+			return false
+		}
+	}
+	return true
+}
+
 func producedWikiArtifactURL(tool string, arguments json.RawMessage, bridgeOutput string) string {
 	if tool != "tos_tag_tool" {
 		return ""
@@ -745,20 +907,26 @@ func resolvedWikiReference(tool string, arguments json.RawMessage, bridgeOutput 
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(reference))), pageURL
 }
 
-func codexDynamicTools() []map[string]any {
+func codexDynamicTools(skills []marketplace.SkillSnapshot) []map[string]any {
+	skillNames := make([]string, 0, len(skills))
+	for _, skill := range skills {
+		skillNames = append(skillNames, skill.Name)
+	}
+	sort.Strings(skillNames)
+	skillNamesSchema := map[string]any{"type": "array", "minItems": 1, "uniqueItems": true, "items": map[string]any{"type": "string", "enum": skillNames}}
 	return []map[string]any{
 		{
 			"type": "function", "name": "tos_tag_tool",
-			"description": "Run one reviewed tos-tag marketplace operation through the current job capability. Calls must be sequential, narrowly scoped, and complete within the callback deadline; never fan out parallel source searches. For a Go version/adoption question, call telemetryos.code read once with arguments [\"versions\",\"<repo>\",\"go\"] before any broader source lookup. Write, destructive, and admin operations require an independently approved approval_id.",
-			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"tool_id", "operation_id", "arguments"}, "properties": map[string]any{
-				"tool_id": map[string]any{"type": "string"}, "operation_id": map[string]any{"type": "string", "enum": []string{"read", "write", "delete"}}, "arguments": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"},
+			"description": "Run one reviewed tos-tag marketplace operation through the current job capability. Declare every injected skill actively being followed in skill_names so Slack can show safe live progress. Calls must be sequential, narrowly scoped, and complete within the callback deadline; never fan out parallel source searches. For a Go version/adoption question, call telemetryos.code read once with arguments [\"versions\",\"<repo>\",\"go\"] before any broader source lookup. Write, destructive, and admin operations require an independently approved approval_id.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"skill_names", "tool_id", "operation_id", "arguments"}, "properties": map[string]any{
+				"skill_names": skillNamesSchema, "tool_id": map[string]any{"type": "string"}, "operation_id": map[string]any{"type": "string", "enum": []string{"read", "write", "delete"}}, "arguments": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"},
 			}},
 		},
 		{
 			"type": "function", "name": "tos_tag_trigger",
-			"description": "List, inspect, create, update, pause, or resume classifier-gated tos-tag heartbeat subscriptions in the current Slack channel. Mutations require an independently approved approval_id.",
-			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"operation"}, "properties": map[string]any{
-				"operation": map[string]any{"type": "string", "enum": []string{"list", "get", "put", "disable"}}, "id": map[string]any{"type": "string"}, "instruction": map[string]any{"type": "string"}, "interval_seconds": map[string]any{"type": "integer"}, "next_run": map[string]any{"type": "string"}, "min_confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1}, "enabled": map[string]any{"type": "boolean"}, "root_thread_ts": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"},
+			"description": "List, inspect, create, update, pause, or resume classifier-gated tos-tag heartbeat subscriptions in the current Slack channel. Declare every injected skill actively being followed in skill_names so Slack can show safe live progress. Mutations require an independently approved approval_id.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"skill_names", "operation"}, "properties": map[string]any{
+				"skill_names": skillNamesSchema, "operation": map[string]any{"type": "string", "enum": []string{"list", "get", "put", "disable"}}, "id": map[string]any{"type": "string"}, "instruction": map[string]any{"type": "string"}, "cron": map[string]any{"type": "string"}, "timezone": map[string]any{"type": "string"}, "interval_seconds": map[string]any{"type": "integer"}, "next_run": map[string]any{"type": "string"}, "min_confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1}, "enabled": map[string]any{"type": "boolean"}, "root_thread_ts": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"},
 			}},
 		},
 	}

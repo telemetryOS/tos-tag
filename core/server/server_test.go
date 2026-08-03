@@ -12,6 +12,7 @@ import (
 
 	"github.com/telemetryos/tos-tag/core/activity"
 	"github.com/telemetryos/tos-tag/core/audit"
+	"github.com/telemetryos/tos-tag/core/channelconfig"
 	"github.com/telemetryos/tos-tag/core/classifier"
 	"github.com/telemetryos/tos-tag/core/config"
 	"github.com/telemetryos/tos-tag/core/deliveries"
@@ -19,6 +20,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/keystore"
 	agentmemory "github.com/telemetryos/tos-tag/core/memory"
 	"github.com/telemetryos/tos-tag/core/orgconfig"
+	"github.com/telemetryos/tos-tag/core/sessions"
 	"github.com/telemetryos/tos-tag/core/slack"
 	"github.com/telemetryos/tos-tag/core/triggers"
 	"github.com/telemetryos/tos-tag/models"
@@ -123,6 +125,55 @@ func TestOrganizationListSupportsHeaderSelector(t *testing.T) {
 	}
 }
 
+func TestDirectiveManagementAPICreatesActivatesAndListsAcrossChannels(t *testing.T) {
+	srv, _ := newTestServer(t, false)
+	store := channelconfig.NewStore()
+	srv.deps.ChannelConfig = store
+
+	create := func(channelID, prompt string) channelconfig.DirectiveRevision {
+		t.Helper()
+		body, _ := json.Marshal(map[string]string{"organization_id": "org", "channel_id": channelID, "prompt": prompt, "actor_id": "management-ui"})
+		request := httptest.NewRequest(http.MethodPost, "/admin/api/directives", bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-TOS-TAG-CSRF", srv.csrf)
+		response := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %s status=%d body=%s", channelID, response.Code, response.Body.String())
+		}
+		var revision channelconfig.DirectiveRevision
+		if err := json.Unmarshal(response.Body.Bytes(), &revision); err != nil {
+			t.Fatal(err)
+		}
+		return revision
+	}
+	alerts := create("alerts", "Investigate every alert.")
+	_ = create("support", "Answer support questions concisely.")
+
+	body, _ := json.Marshal(map[string]string{"organization_id": "org", "channel_id": "alerts", "revision_id": alerts.ID})
+	request := httptest.NewRequest(http.MethodPost, "/admin/api/directives/activate", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-TOS-TAG-CSRF", srv.csrf)
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("activate status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/api/directives?organization_id=org", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", response.Code, response.Body.String())
+	}
+	var listed []channelconfig.DirectiveRevision
+	if err := json.Unmarshal(response.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 2 || !listed[0].Active || listed[1].Active {
+		t.Fatalf("listed=%#v", listed)
+	}
+}
+
 func TestManagementRequiresBearerWhenEnabled(t *testing.T) {
 	srv, _ := newTestServer(t, true)
 	req := httptest.NewRequest(http.MethodGet, "/admin/api/status", nil)
@@ -203,8 +254,8 @@ func TestDotRoutesAreRedactedAndManagementPageIsEmbedded(t *testing.T) {
 	}
 	response := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/", nil))
-	if !strings.Contains(response.Body.String(), "Real-time control-plane activity") || !strings.Contains(response.Body.String(), "Developer and diagnostic tools") {
-		t.Fatal("management page missing primary live activity or progressive diagnostics")
+	if !strings.Contains(response.Body.String(), `id="overviewMetrics"`) || !strings.Contains(response.Body.String(), "Developer and diagnostic tools") {
+		t.Fatal("management dashboard missing operational summary or progressive diagnostics")
 	}
 	for _, want := range []string{"--accent: #f8b334", "--page: #1b2632", `class="topstripe"`, `class="sidebar"`, `telemetry<strong>OS</strong>`} {
 		if !strings.Contains(response.Body.String(), want) {
@@ -213,6 +264,11 @@ func TestDotRoutesAreRedactedAndManagementPageIsEmbedded(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), `id="organizationSelector"`) {
 		t.Fatal("management page missing global organization selector")
+	}
+	activityPage := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(activityPage, httptest.NewRequest(http.MethodGet, "/admin/activity", nil))
+	if activityPage.Code != http.StatusOK || !strings.Contains(activityPage.Body.String(), `id="liveActivity"`) {
+		t.Fatal("dedicated activity page missing primary live activity")
 	}
 	if !strings.Contains(response.Body.String(), `new Set(['organization_id', 'workspace_id', 'team_id'])`) {
 		t.Fatal("management tables do not hide tenant identifier columns")
@@ -248,7 +304,7 @@ func TestActivityAPIAndSSEAreOrganizationScoped(t *testing.T) {
 
 func TestDedicatedManagementPages(t *testing.T) {
 	srv, _ := newTestServer(t, false)
-	pages := []string{"channels", "observations", "decisions", "context", "jobs", "routes", "marketplaces", "tools", "approvals", "routines", "triggers", "notes", "memory", "directives", "keystore", "retention", "audit", "usage"}
+	pages := []string{"activity", "channels", "observations", "decisions", "context", "jobs", "routes", "marketplaces", "tools", "approvals", "routines", "triggers", "notes", "memory", "directives", "keystore", "retention", "audit", "usage"}
 	for _, page := range pages {
 		response := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/"+page, nil))
@@ -265,6 +321,49 @@ func TestDedicatedManagementPages(t *testing.T) {
 		if page != "keystore" && (strings.Contains(response.Body.String(), `id="queryForm"`) || strings.Contains(response.Body.String(), `id="mutationForm"`)) {
 			t.Fatalf("%s rendered redundant organization or mutation forms", page)
 		}
+		if page == "usage" && !strings.Contains(response.Body.String(), `<details class="nav-more" open>`) {
+			t.Fatal("advanced navigation did not open for the current advanced page")
+		}
+		if page == "directives" {
+			for _, marker := range []string{`id="directiveOverview"`, `id="directiveChannel"`, `id="directivePrompt"`, `id="saveDirective"`, `id="directiveHistory"`} {
+				if !strings.Contains(response.Body.String(), marker) {
+					t.Fatalf("directive management page missing %s", marker)
+				}
+			}
+			if strings.Contains(response.Body.String(), `<details class="nav-more" open>`) {
+				t.Fatal("primary directive page unnecessarily opened advanced navigation")
+			}
+		}
+		if page == "routines" {
+			for _, marker := range []string{`id="automationSummary"`, `id="automationSchedules"`, `id="newAutomation"`, `id="automationCron"`, `id="automationTimezone"`, `id="automationForm"`} {
+				if !strings.Contains(response.Body.String(), marker) {
+					t.Fatalf("automation management page missing %s", marker)
+				}
+			}
+			if strings.Contains(response.Body.String(), `Loading organization data`) {
+				t.Fatal("automation page still renders the generic table placeholder")
+			}
+		}
+	}
+
+	dashboard := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(dashboard, httptest.NewRequest(http.MethodGet, "/admin", nil))
+	if dashboard.Code != http.StatusOK || !strings.Contains(dashboard.Body.String(), `>Dashboard</h1>`) {
+		t.Fatalf("dashboard status=%d body=%s", dashboard.Code, dashboard.Body.String())
+	}
+	if strings.Contains(dashboard.Body.String(), `id="liveActivity"`) {
+		t.Fatal("dashboard still embeds the live activity feed")
+	}
+	activityPage := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(activityPage, httptest.NewRequest(http.MethodGet, "/admin/activity", nil))
+	if activityPage.Code != http.StatusOK || !strings.Contains(activityPage.Body.String(), `id="liveActivity"`) {
+		t.Fatalf("activity status=%d body=%s", activityPage.Code, activityPage.Body.String())
+	}
+	if strings.Contains(activityPage.Body.String(), `id="overviewMetrics"`) {
+		t.Fatal("activity page still embeds dashboard metrics")
+	}
+	if !strings.Contains(activityPage.Body.String(), `<summary>Advanced</summary>`) {
+		t.Fatal("lower-priority navigation is not consolidated")
 	}
 
 	response := httptest.NewRecorder()
@@ -333,5 +432,23 @@ func TestTriggerSubscriptionAPIIsTenantScopedAndValidated(t *testing.T) {
 	srv.Handler().ServeHTTP(response, req)
 	if response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("ungated heartbeat status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestAutomationAPIResolvesChannelScopeForCronSchedule(t *testing.T) {
+	srv, _ := newTestServer(t, false)
+	organizations := orgconfig.NewMemory()
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	_, _ = organizations.PutChannel(context.Background(), orgconfig.ChannelPolicy{OrganizationID: "org-a", TeamID: "team", ChannelID: "channel", Name: "tos-tag", Enrolled: true, ParticipationMode: types.ModeAssist, Cooldown: time.Second, MaxResponsesPerHour: 10, MaxConcurrentJobs: 2, MembershipRevision: "m1", MembershipRefreshedAt: now})
+	srv.deps.Organizations = organizations
+	srv.deps.Sessions = sessions.NewMemoryStore(func() time.Time { return now })
+	body := []byte(`{"id":"weekday-check","organization_id":"org-a","channel_id":"channel","instruction":"Check whether anything needs attention.","cron":"0 9 * * 1-5","timezone":"America/Vancouver","min_confidence":0.8,"enabled":true}`)
+	req := httptest.NewRequest(http.MethodPut, "/admin/api/trigger-subscriptions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-TOS-TAG-CSRF", srv.csrf)
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, req)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"cron":"0 9 * * 1-5"`) || !strings.Contains(response.Body.String(), `"workspace_id":"team"`) || !strings.Contains(response.Body.String(), `"classifier_gate":true`) {
+		t.Fatalf("put status=%d body=%s", response.Code, response.Body.String())
 	}
 }

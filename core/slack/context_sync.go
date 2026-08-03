@@ -377,8 +377,10 @@ func (s *ContextSyncer) listChannels(ctx context.Context) ([]slackapi.Channel, e
 			return nil, fmt.Errorf("Slack context channel count exceeds configured maximum %d", s.options.MaxChannels)
 		}
 		result, err := withSlackRateLimitRetry(ctx, s, "users.conversations", func() (contextChannelPage, error) {
+			// Group DMs (mpim) are deliberately excluded: tos-tag ignores them
+			// across discovery, ingress, and coverage.
 			page, next, callErr := s.api.GetConversationsForUserContext(ctx, &slackapi.GetConversationsForUserParameters{
-				Cursor: cursor, Types: []string{"public_channel", "private_channel", "mpim", "im"},
+				Cursor: cursor, Types: []string{"public_channel", "private_channel", "im"},
 				Limit: limit, ExcludeArchived: true, TeamID: s.options.TeamID,
 			})
 			return contextChannelPage{channels: page, nextCursor: next}, callErr

@@ -31,8 +31,8 @@ are disabled, the classifier is shadowed, and automatic membership
 participation is disabled. The approved local development posture observes all
 user-authorized conversations and derives `assist` for public/private channels
 where the bot-token inventory or a membership event confirms Tag is a member.
-All other conversations remain `observe`; DMs and group DMs are not
-auto-enabled. The optional output allowlist is an additional narrowing control.
+All other conversations remain `observe`; DMs are not auto-enabled, and group
+DMs (mpim) are ignored entirely. The optional output allowlist is an additional narrowing control.
 Never encode live IDs/secrets in tracked files.
 
 ## Implementation map
@@ -48,13 +48,15 @@ Never encode live IDs/secrets in tracked files.
   resolution.
 - `core/jobs`, `core/sessions`, `core/deliveries`: leased execution,
   generations, typed output, and durable Slack delivery.
-- `core/slack`: Socket Mode ingress, Block Kit rendering, interactions, and
-  `/tag-directive` modal, plus Slack-native Thinking Steps streaming for
+- `core/slack`: Socket Mode ingress, Block Kit rendering, interactions, the
+  `/tag-directive` modal, and the `/tag-mode` participation-mode command, plus
+  Slack-native Thinking Steps streaming for
   admitted full-agent work; durable one-time context bootstrap and proactively
   paced post-watermark catch-up for direct messages missed while offline.
 - `core/approvals`: exact-action Slack approval/resume.
-- `core/routines`, `core/triggers`: scheduled and classifier-gated background
-  work.
+- `core/schedule`, `core/routines`, `core/triggers`: standard five-field cron,
+  timezone-aware advancement, and classifier-gated background work with
+  legacy fixed-interval compatibility.
 - `core/audit`, `core/usage`, `core/retention`: receipts, metrics, and deletion.
 
 ## Classifier rules
@@ -87,7 +89,8 @@ declarative failure or incident as initiative by itself.
 Admitted full-agent thread jobs use a collapsed Slack Thinking Steps timeline. The Go
 control plane owns `chat.startStream`, safe task updates, and `chat.stopStream`;
 the model does not write progress text. Emit only allowlisted operational
-milestones and validated HTTPS sources. Never stream model reasoning, deltas,
+milestones and validated HTTPS sources through one rotating current-action card,
+rather than retaining a card for every completed step. Never stream model reasoning, deltas,
 prompts, tool arguments, raw tool output, secrets, or private context. Keep
 reaction-only decisions and lightweight direct replies on their existing path.
 Slack requires `thread_ts` for agent streams; preserve classifier-selected
@@ -113,6 +116,14 @@ consequential claims or cross-human conflict. `operator_memory` is reviewed
 data. Correction pins it, unpin restores natural expiry, and forget erases
 content/facts/source references while retaining only the relearning tombstone.
 All management mutations require CSRF, audit, and tenant scope.
+
+Channels configured with `context_history_mode=session_only` are deliberate
+ephemeral destinations. Do not import or recover Slack history for them; build
+context only from that destination's messages observed since process startup,
+exclude cross-channel history and durable derived memory/facts, and prevent
+their live messages from generating new durable memory or incident facts.
+Operational event persistence remains enabled for acknowledgement,
+idempotency, job recovery, and audit.
 
 ## Codex App Server rules
 
@@ -280,7 +291,7 @@ Before completion:
 make verify
 ```
 
-The deterministic classifier gate contains 44 natural messages plus context-cap
+The deterministic classifier gate contains 46 natural messages plus context-cap
 and deduplication invariants. To run the same cases through the configured real
 OpenAI classifier, with expected behavior kept outside provider input:
 

@@ -3,6 +3,7 @@ package deliveries
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/telemetryos/tos-tag/types"
@@ -32,7 +33,7 @@ func ParseModelOutput(output string) (types.SlackResult, error) {
 	if strings.HasPrefix(raw, "{") {
 		if err := json.Unmarshal([]byte(raw), &result); err == nil && len(result.Segments) > 0 {
 			if modelSegmentsAllowed(result.Segments) {
-				return promoteMarkdownTables(normalizeModelSlackMarkdown(result)), nil
+				return normalizeModelSlackResult(result), nil
 			}
 			return types.SlackResult{}, fmt.Errorf("model output cannot emit privileged Slack segments")
 		}
@@ -53,18 +54,109 @@ func ParseModelOutput(output string) (types.SlackResult, error) {
 				kind = legacy.Type
 			}
 			if kind != "" && kind != types.SlackSegmentApproval && kind != types.SlackSegmentNotice && legacy.Notice == nil {
-				return promoteMarkdownTables(normalizeModelSlackMarkdown(types.SlackResult{Segments: []types.SlackSegment{{Kind: kind, Text: legacy.Text, Table: legacy.Table, Card: legacy.Card, Carousel: legacy.Carousel, Image: legacy.Image, Artifact: legacy.Artifact}}})), nil
+				return normalizeModelSlackResult(types.SlackResult{Segments: []types.SlackSegment{{Kind: kind, Text: legacy.Text, Table: legacy.Table, Card: legacy.Card, Carousel: legacy.Carousel, Image: legacy.Image, Artifact: legacy.Artifact}}}), nil
 			}
 		}
 	}
 	var segments []types.SlackSegment
 	if err := json.Unmarshal([]byte(raw), &segments); err == nil && len(segments) > 0 {
 		if modelSegmentsAllowed(segments) {
-			return promoteMarkdownTables(normalizeModelSlackMarkdown(types.SlackResult{Segments: segments})), nil
+			return normalizeModelSlackResult(types.SlackResult{Segments: segments}), nil
 		}
 		return types.SlackResult{}, fmt.Errorf("model output cannot emit privileged Slack segments")
 	}
 	return types.SlackResult{}, fmt.Errorf("model output violates %s", SlackOutputContractVersion)
+}
+
+func normalizeModelSlackResult(result types.SlackResult) types.SlackResult {
+	return promoteMarkdownTables(normalizeModelTableRows(normalizeModelSlackLinks(normalizeModelSlackMarkdown(result))))
+}
+
+// normalizeModelSlackLinks keeps provider-generated local paths and malformed
+// link targets from invalidating an entire otherwise safe response. HTTP(S)
+// links remain clickable; unsupported Slack-style targets degrade to their
+// visible label. The renderer still validates every surviving link.
+func normalizeModelSlackLinks(result types.SlackResult) types.SlackResult {
+	normalize := func(text string) string {
+		return slackLinkPattern.ReplaceAllStringFunc(text, func(candidate string) string {
+			match := slackLinkPattern.FindStringSubmatch(candidate)
+			if len(match) != 3 {
+				return candidate
+			}
+			parsed, err := url.Parse(match[1])
+			if err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http") && parsed.Host != "" {
+				return candidate
+			}
+			if label := strings.TrimSpace(match[2]); label != "" {
+				return label
+			}
+			return strings.TrimSpace(match[1])
+		})
+	}
+	for segmentIndex := range result.Segments {
+		segment := &result.Segments[segmentIndex]
+		segment.Text = normalize(segment.Text)
+		if segment.Table != nil {
+			for rowIndex := range segment.Table.Rows {
+				for cellIndex := range segment.Table.Rows[rowIndex] {
+					segment.Table.Rows[rowIndex][cellIndex].Text = normalize(segment.Table.Rows[rowIndex][cellIndex].Text)
+				}
+			}
+		}
+		if segment.Card != nil {
+			segment.Card.Title = normalize(segment.Card.Title)
+			segment.Card.Subtitle = normalize(segment.Card.Subtitle)
+			segment.Card.Body = normalize(segment.Card.Body)
+			segment.Card.Subtext = normalize(segment.Card.Subtext)
+		}
+		if segment.Carousel != nil {
+			for cardIndex := range segment.Carousel.Cards {
+				card := &segment.Carousel.Cards[cardIndex]
+				card.Title = normalize(card.Title)
+				card.Subtitle = normalize(card.Subtitle)
+				card.Body = normalize(card.Body)
+				card.Subtext = normalize(card.Subtext)
+			}
+		}
+	}
+	return result
+}
+
+// normalizeModelTableRows repairs a common typed-output mistake without
+// discarding an otherwise useful answer. Slack requires every native table row
+// to have exactly the declared number of columns. Missing cells are padded;
+// surplus cells are folded into the final column so their content remains
+// visible. The renderer still applies every normal cell, size, link, mention,
+// and formatting validation after this model-boundary normalization.
+func normalizeModelTableRows(result types.SlackResult) types.SlackResult {
+	for segmentIndex := range result.Segments {
+		table := result.Segments[segmentIndex].Table
+		if result.Segments[segmentIndex].Kind != types.SlackSegmentTable || table == nil || len(table.Columns) == 0 {
+			continue
+		}
+		columnCount := len(table.Columns)
+		for rowIndex := range table.Rows {
+			row := table.Rows[rowIndex]
+			switch {
+			case len(row) < columnCount:
+				table.Rows[rowIndex] = append(row, make([]types.SlackTableCell, columnCount-len(row))...)
+			case len(row) > columnCount:
+				last := row[columnCount-1]
+				for _, extra := range row[columnCount:] {
+					if extra.Text != "" {
+						if last.Text != "" {
+							last.Text += " · "
+						}
+						last.Text += extra.Text
+					}
+				}
+				normalized := append([]types.SlackTableCell(nil), row[:columnCount]...)
+				normalized[columnCount-1] = last
+				table.Rows[rowIndex] = normalized
+			}
+		}
+	}
+	return result
 }
 
 // normalizeModelSlackMarkdown repairs the common GitHub-Markdown bold form at

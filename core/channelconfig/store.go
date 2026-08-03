@@ -143,6 +143,22 @@ func (s *Store) ActiveDirective(_ context.Context, organizationID, channelID str
 func (s *Store) ListDirectives(_ context.Context, organizationID, channelID string) ([]DirectiveRevision, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if channelID == "" {
+		var result []DirectiveRevision
+		prefix := organizationID + "/"
+		for key, revisions := range s.directives {
+			if strings.HasPrefix(key, prefix) {
+				result = append(result, revisions...)
+			}
+		}
+		sort.Slice(result, func(i, j int) bool {
+			if result[i].ChannelID == result[j].ChannelID {
+				return result[i].Revision < result[j].Revision
+			}
+			return result[i].ChannelID < result[j].ChannelID
+		})
+		return result, nil
+	}
 	return append([]DirectiveRevision(nil), s.directives[scopeKey(organizationID, channelID)]...), nil
 }
 func (s *Store) ListNotes(_ context.Context, organizationID, channelID string) ([]NoteRevision, error) {

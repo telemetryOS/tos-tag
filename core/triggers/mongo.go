@@ -10,6 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/telemetryos/tos-tag/core/database"
+	"github.com/telemetryos/tos-tag/core/schedule"
 	"github.com/telemetryos/tos-tag/models"
 )
 
@@ -21,13 +22,15 @@ type MongoStore struct {
 func NewMongoStore(db *database.Database) *MongoStore { return &MongoStore{db: db, now: time.Now} }
 
 func (s *MongoStore) PutContext(ctx context.Context, subscription Subscription) (Subscription, error) {
-	if err := Validate(subscription); err != nil {
+	now := s.now().UTC()
+	var err error
+	subscription, err = Normalize(subscription, now)
+	if err != nil {
 		return Subscription{}, err
 	}
-	now := s.now().UTC()
 	after := options.After
 	var saved Subscription
-	err := s.db.Collection(models.CollectionEventSubscriptions).FindOneAndUpdate(ctx,
+	err = s.db.Collection(models.CollectionEventSubscriptions).FindOneAndUpdate(ctx,
 		bson.M{"organization_id": subscription.OrganizationID, "public_id": subscription.ID, "$or": bson.A{
 			bson.M{"workspace_id": subscription.WorkspaceID, "channel_id": subscription.ChannelID},
 			bson.M{"workspace_id": bson.M{"$exists": false}, "channel_id": bson.M{"$exists": false}},
@@ -37,6 +40,7 @@ func (s *MongoStore) PutContext(ctx context.Context, subscription Subscription) 
 			"root_thread_ts": subscription.RootThreadTS, "session_id": subscription.SessionID,
 			"generation": subscription.Generation, "owner_id": subscription.OwnerID,
 			"kind": subscription.Kind, "instruction": subscription.Instruction,
+			"cron": subscription.Cron, "timezone": subscription.Timezone,
 			"interval": subscription.Interval, "next_run": subscription.NextRun,
 			"classifier_gate": subscription.ClassifierGate, "min_confidence": subscription.MinConfidence,
 			"enabled": subscription.Enabled, "updated_at": now,
@@ -78,7 +82,7 @@ func (s *MongoStore) find(ctx context.Context, filter bson.M, limit int) ([]Subs
 		return nil, err
 	}
 	defer cursor.Close(ctx)
-	var values []Subscription
+	values := make([]Subscription, 0)
 	err = cursor.All(ctx, &values)
 	return values, err
 }
@@ -88,10 +92,11 @@ func (s *MongoStore) AdvanceContext(ctx context.Context, organizationID, id stri
 	if err != nil {
 		return err
 	}
-	next := current.NextRun
-	for !next.After(from) {
-		next = next.Add(current.Interval)
+	spec, err := schedule.Parse(current.Cron, current.Timezone, current.Interval)
+	if err != nil {
+		return err
 	}
+	next := spec.Advance(current.NextRun, from)
 	result, err := s.db.Collection(models.CollectionEventSubscriptions).UpdateOne(ctx,
 		bson.M{"organization_id": organizationID, "public_id": id, "version": current.Version},
 		bson.M{"$set": bson.M{"next_run": next, "updated_at": s.now().UTC()}, "$inc": bson.M{"version": 1}})

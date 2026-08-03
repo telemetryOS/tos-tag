@@ -18,6 +18,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/database"
 	"github.com/telemetryos/tos-tag/core/usage"
 	"github.com/telemetryos/tos-tag/models"
+	"github.com/telemetryos/tos-tag/types"
 )
 
 type CuratorOptions struct {
@@ -181,6 +182,20 @@ func (c *Curator) RunOnce(ctx context.Context) (int, error) {
 
 func (c *Curator) candidates(ctx context.Context) ([]Batch, error) {
 	now := c.now().UTC()
+	excluded := make(map[string]struct{})
+	channelCursor, err := c.db.Collection(models.CollectionChannels).Find(ctx, bson.M{"context_history_mode": string(types.ContextHistorySessionOnly)})
+	if err != nil {
+		return nil, err
+	}
+	var sessionOnlyChannels []models.Channel
+	if err := channelCursor.All(ctx, &sessionOnlyChannels); err != nil {
+		_ = channelCursor.Close(ctx)
+		return nil, err
+	}
+	_ = channelCursor.Close(ctx)
+	for _, channel := range sessionOnlyChannels {
+		excluded[channel.OrganizationID+"/"+channel.ChannelID] = struct{}{}
+	}
 	cursor, err := c.db.Collection(models.CollectionMessages).Find(ctx, bson.M{"deleted": false, "bot_id": bson.M{"$in": bson.A{"", nil}}, "text": bson.M{"$ne": ""}, "original_at": bson.M{"$gte": now.Add(-c.options.Lookback)}, "expires_at": bson.M{"$gt": now}}, options.Find().SetSort(bson.D{{Key: "updated_at", Value: -1}}).SetLimit(5000))
 	if err != nil {
 		return nil, err
@@ -201,6 +216,9 @@ func (c *Curator) candidates(ctx context.Context) ([]Batch, error) {
 	groups := make(map[string]*group)
 	byMessage := make(map[string]models.ChannelMessage, len(messages))
 	for _, message := range messages {
+		if _, skip := excluded[message.OrganizationID+"/"+message.ChannelID]; skip {
+			continue
+		}
 		byMessage[message.OrganizationID+"/"+message.ChannelID+"/"+message.MessageTS] = message
 		key := message.OrganizationID + "/" + message.ChannelID + "/channel"
 		if groups[key] == nil {

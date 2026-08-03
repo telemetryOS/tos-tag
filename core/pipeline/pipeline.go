@@ -77,7 +77,8 @@ type Dependencies struct {
 }
 
 type Pipeline struct {
-	deps Dependencies
+	deps             Dependencies
+	sessionStartedAt time.Time
 
 	mu      sync.Mutex
 	cancel  context.CancelFunc
@@ -95,6 +96,7 @@ const currentAgentRuntimeContract = `Current tos-tag runtime facts are authorita
 - Ambient classification is a direct, stateless, tool-free OpenAI Responses API call.
 - Admitted full-agent work runs through Codex App Server in a disposable worker.
 - MongoDB and the Go control plane own durable state, policy, authorization, approvals, and Slack delivery.
+- Every dynamic tool call must declare every injected skill actively being followed in skill_names. The control plane uses only those validated names and safe tool identities for Slack progress; never put arguments, source content, prompts, credentials, or hidden reasoning in progress metadata.
 - TelemetryOS source access is permanently read-only. Never edit, patch, commit, push, merge, deploy, or otherwise mutate source; code-change requests are redirected to Linear bug or feature intake.
 - Source-backed version or dependency adoption questions use the injected codebase-read skill's bounded version workflow. For Go, start with the single telemetryos.code versions <repo> go call, which returns manifest/toolchain, container/build, and CI version evidence together. Never infer that a patch version is unpinned from one manifest alone, and never fan out parallel or speculative source reads.
 - A job marked authoritative_product_retrieval_required must successfully read the Agent Wiki Primer and/or official TelemetryOS product documentation in the same attempt before answering.
@@ -112,7 +114,7 @@ func New(deps Dependencies) (*Pipeline, error) {
 	if deps.Logger == nil {
 		deps.Logger = blackbox.New()
 	}
-	return &Pipeline{deps: deps}, nil
+	return &Pipeline{deps: deps, sessionStartedAt: time.Now().UTC()}, nil
 }
 
 func (p *Pipeline) StartWorkers(parent context.Context) error {
@@ -175,6 +177,12 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 func (p *Pipeline) HandleEnvelope(ctx context.Context, envelope types.SlackEnvelope) (slack.AcceptResult, error) {
 	started := time.Now()
 	eventLogger := p.deps.Logger.WithCtx(envelopeLogContext(envelope))
+	// Group DMs (mpim) are ignored entirely: acknowledged so Slack stops
+	// retrying, but never registered, persisted, or classified.
+	if envelope.ChannelKind == types.SlackChannelKindGroupDM {
+		eventLogger.Info("Slack group DM ignored by policy")
+		return slack.AcceptResult{Ignored: true}, nil
+	}
 	if p.contextSyncEnabled() && envelope.OrganizationID == p.deps.Config.Slack.OrganizationID && envelope.TeamID == p.deps.Config.Slack.TeamID {
 		if err := p.ensureContextChannel(ctx, types.SlackContextChannel{
 			OrganizationID:   envelope.OrganizationID,
@@ -199,28 +207,59 @@ func (p *Pipeline) HandleEnvelope(ctx context.Context, envelope types.SlackEnvel
 			return slack.AcceptResult{Ignored: true}, nil
 		}
 	}
+	// Slack echoes Tag's own delivered and Thinking Steps messages back through
+	// Events API. Preserve them as resolved, destination-local conversation
+	// context, but never put them on the pending decision queue. This keeps
+	// follow-up references coherent without spending classifier work or creating
+	// self-referential decision/activity noise.
+	if p.selfAuthoredEnvelope(envelope) {
+		accepted, err := p.deps.Observations.Import(ctx, envelope)
+		if err != nil {
+			eventLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err)}).Error("Slack self-authored context import failed")
+			return slack.AcceptResult{}, err
+		}
+		if err := p.advanceContextSyncWatermark(ctx, envelope); err != nil {
+			eventLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err)}).Error("Slack self-authored context watermark persistence failed")
+			return slack.AcceptResult{}, err
+		}
+		eventLogger.WithCtx(blackbox.Ctx{"observation_id": accepted.Observation.PublicID, "duplicate": accepted.Duplicate, "duration_ms": time.Since(started).Milliseconds()}).Debug("Slack self-authored output retained as resolved context without classification")
+		return slack.AcceptResult{Duplicate: accepted.Duplicate, Ignored: true, ResolvedContext: true}, nil
+	}
 	eventLogger.Info("Slack envelope persistence started")
 	accepted, err := p.deps.Observations.Accept(ctx, envelope)
 	if err != nil {
 		eventLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err)}).Error("Slack envelope persistence failed")
 		return slack.AcceptResult{}, err
 	}
-	if p.contextSyncEnabled() && p.deps.ContextSyncState != nil {
-		through := envelope.EventTime
-		if through.IsZero() {
-			through = envelope.ReceivedAt
-		}
-		if through.IsZero() {
-			through = time.Now().UTC()
-		}
-		if err := p.deps.ContextSyncState.Advance(ctx, envelope.OrganizationID, envelope.TeamID, envelope.ChannelID, through); err != nil {
-			eventLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err)}).Error("Slack context sync watermark persistence failed")
-			return slack.AcceptResult{}, err
-		}
+	if err := p.advanceContextSyncWatermark(ctx, envelope); err != nil {
+		eventLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err)}).Error("Slack context sync watermark persistence failed")
+		return slack.AcceptResult{}, err
 	}
 	eventLogger.WithCtx(blackbox.Ctx{"observation_id": accepted.Observation.PublicID, "duplicate": accepted.Duplicate, "duration_ms": time.Since(started).Milliseconds()}).Info("Slack envelope durably persisted")
 	p.appendReceipt(ctx, audit.AppendRequest{OrganizationID: envelope.OrganizationID, Type: "observation.accepted", ResourceID: accepted.Observation.PublicID, RetentionEpoch: retentionEpoch(accepted.Observation.ExpiresAt), IdempotencyKey: "observation/" + accepted.Observation.PublicID + "/accepted", Metadata: map[string]any{"channel_id": envelope.ChannelID, "event_type": string(envelope.Kind)}, Content: []byte(envelope.Text)})
 	return slack.AcceptResult{Duplicate: accepted.Duplicate}, nil
+}
+
+func (p *Pipeline) selfAuthoredEnvelope(envelope types.SlackEnvelope) bool {
+	return p.deps.Config != nil &&
+		p.deps.Config.Slack.BotUserID != "" &&
+		envelope.OrganizationID == p.deps.Config.Slack.OrganizationID &&
+		envelope.TeamID == p.deps.Config.Slack.TeamID &&
+		envelope.UserID == p.deps.Config.Slack.BotUserID
+}
+
+func (p *Pipeline) advanceContextSyncWatermark(ctx context.Context, envelope types.SlackEnvelope) error {
+	if !p.contextSyncEnabled() || p.deps.ContextSyncState == nil {
+		return nil
+	}
+	through := envelope.EventTime
+	if through.IsZero() {
+		through = envelope.ReceivedAt
+	}
+	if through.IsZero() {
+		through = time.Now().UTC()
+	}
+	return p.deps.ContextSyncState.Advance(ctx, envelope.OrganizationID, envelope.TeamID, envelope.ChannelID, through)
 }
 
 // RegisterContextChannel refreshes both the user-authorized context inventory
@@ -292,6 +331,9 @@ func (p *Pipeline) ImportContextEnvelope(ctx context.Context, envelope types.Sla
 		// even when the user token can see it.
 		return nil
 	}
+	if policy.ContextHistoryMode == types.ContextHistorySessionOnly {
+		return nil
+	}
 	envelope.Restricted = envelope.Restricted || policy.Restricted
 	accepted, err := p.deps.Observations.Import(ctx, envelope)
 	if err != nil {
@@ -323,6 +365,9 @@ func (p *Pipeline) RecoverContextEnvelope(ctx context.Context, envelope types.Sl
 	}
 	policy, err := p.deps.Scopes.Resolve(ctx, envelope.OrganizationID, envelope.TeamID, envelope.ChannelID)
 	if err != nil || !authorizedPolicy(policy, time.Now().UTC()) {
+		return nil
+	}
+	if policy.ContextHistoryMode == types.ContextHistorySessionOnly {
 		return nil
 	}
 	envelope.Restricted = envelope.Restricted || policy.Restricted
@@ -582,7 +627,7 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 		ActiveThread:  activeThread,
 		WorkflowLoop:  isWorkflowLoopOrigin(envelope.OriginTag),
 		Deleted:       envelope.Kind == types.SlackEventDelete,
-		SelfAuthored:  envelope.BotID == "tos-tag-stub",
+		SelfAuthored:  envelope.BotID == "tos-tag-stub" || p.selfAuthoredEnvelope(envelope),
 	}
 	decision := p.deps.Classifier.Decide(ctx, target, pack)
 	// Re-apply the model-independent initiative boundary immediately before
@@ -625,7 +670,13 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 	}).Info("classification decision recorded")
 	p.publishClassificationActivity(envelope, recordedDecision)
 	p.appendReceipt(ctx, audit.AppendRequest{OrganizationID: envelope.OrganizationID, Type: "decision.recorded", ResourceID: recordedDecision.ID, RetentionEpoch: retentionEpoch(pack.ExpiresAt), IdempotencyKey: fmt.Sprintf("decision/%s/%d", observation.PublicID, revision), Metadata: map[string]any{"outcome": string(recordedDecision.Result.Effective.Outcome), "revision": revision}})
-	if recordedDecision.Result.Effective.Reaction != "" && !createsJob(recordedDecision.Result.Effective) {
+	// Reaction-only and lightweight outcomes deliver their reaction here, and
+	// admitted answer work applies the classifier-selected emoji immediately as
+	// an acknowledgement on the message it is about to answer. Background and
+	// approval outcomes stay reaction-free: they do not answer the source
+	// message directly.
+	answersSourceMessage := recordedDecision.Result.Effective.Outcome == types.OutcomeReplyInThread || recordedDecision.Result.Effective.Outcome == types.OutcomeReplyInChannel
+	if recordedDecision.Result.Effective.Reaction != "" && (answersSourceMessage || !createsJob(recordedDecision.Result.Effective)) {
 		p.applyClassifierReaction(ctx, envelope, revision, recordedDecision)
 	}
 	if hasDirectReply(recordedDecision.Result.Effective) {
@@ -838,10 +889,15 @@ func observationLogContext(observation models.Observation) blackbox.Ctx {
 
 func (p *Pipeline) buildContextPack(ctx context.Context, envelope types.SlackEnvelope, observationID string, watermark int64) (types.ContextPackRevision, error) {
 	now := time.Now().UTC()
+	sessionStartedAt := p.sessionStartedAt
+	if sessionStartedAt.IsZero() {
+		sessionStartedAt = now
+	}
 	channels := []string{}
 	restricted := make(map[string]bool)
 	channelNames := make(map[string]string)
 	membershipRevision := "stub-membership/v1"
+	sessionOnly := false
 	if p.deps.Scopes != nil {
 		policies, err := p.deps.Scopes.ListChannels(ctx, envelope.OrganizationID)
 		if err != nil {
@@ -855,11 +911,12 @@ func (p *Pipeline) buildContextPack(ctx context.Context, envelope types.SlackEnv
 			channelNames[policy.ChannelID] = policy.Name
 			if policy.ChannelID == envelope.ChannelID {
 				membershipRevision = policy.MembershipRevision
+				sessionOnly = policy.ContextHistoryMode == types.ContextHistorySessionOnly
 			}
 			// A restricted channel is a destination-local context boundary. Its
 			// messages may be used inside that same channel, but the channel must
 			// not even enter another destination's observation query.
-			if policy.Restricted && policy.ChannelID != envelope.ChannelID {
+			if (sessionOnly && policy.ChannelID != envelope.ChannelID) || (policy.Restricted && policy.ChannelID != envelope.ChannelID) {
 				continue
 			}
 			channels = append(channels, policy.ChannelID)
@@ -874,7 +931,14 @@ func (p *Pipeline) buildContextPack(ctx context.Context, envelope types.SlackEnv
 	if len(channels) == 0 {
 		return types.ContextPackRevision{}, errScopeDenied
 	}
-	messages, err := p.deps.Observations.Recent(ctx, envelope.OrganizationID, channels, now.Add(-7*24*time.Hour), 500)
+	if sessionOnly {
+		channels = []string{envelope.ChannelID}
+	}
+	since := now.Add(-7 * 24 * time.Hour)
+	if sessionOnly && sessionStartedAt.After(since) {
+		since = sessionStartedAt
+	}
+	messages, err := p.deps.Observations.Recent(ctx, envelope.OrganizationID, channels, since, 500)
 	if err != nil {
 		return types.ContextPackRevision{}, err
 	}
@@ -891,7 +955,7 @@ func (p *Pipeline) buildContextPack(ctx context.Context, envelope types.SlackEnv
 			candidates = append(candidates, types.ContextCandidate{ID: "note/" + note.ID, Version: note.Revision, OrganizationID: envelope.OrganizationID, ChannelID: envelope.ChannelID, Partition: types.PartitionSituation, Provenance: "operator_note", Text: channelconfig.DelimitedNoteData(note), Priority: 60, ObservedAt: note.CreatedAt, DisclosureClass: types.DisclosureDestinationSafe})
 		}
 	}
-	if p.deps.Memory != nil {
+	if p.deps.Memory != nil && !sessionOnly {
 		recalled, recallErr := p.deps.Memory.Recall(ctx, envelope.OrganizationID, envelope.ChannelID, envelope.RootThreadTS(), now, 40)
 		if recallErr != nil {
 			return types.ContextPackRevision{}, fmt.Errorf("recall durable memory: %w", recallErr)
@@ -924,7 +988,7 @@ func (p *Pipeline) buildContextPack(ctx context.Context, envelope types.SlackEnv
 	}
 	if recall, ok := p.deps.Intelligence.(interface {
 		Recall(context.Context, string, time.Time, int) ([]models.SituationFact, error)
-	}); ok {
+	}); ok && !sessionOnly {
 		facts, factErr := recall.Recall(ctx, envelope.OrganizationID, now, 40)
 		if factErr != nil {
 			return types.ContextPackRevision{}, fmt.Errorf("recall situation facts: %w", factErr)
@@ -1586,7 +1650,7 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 		if marshalErr != nil {
 			return types.SlackResult{}, marshalErr
 		}
-		system += " A human approved exactly one suspended tool action. Resume by invoking the same tool operation with the exact arguments in this JSON and approval_id `" + approval.ID + "`: " + string(actionJSON) + ". Do not alter, broaden, or reuse it."
+		system += " A human approved exactly one suspended tool action. Resume by invoking the same tool operation with the exact operational arguments in this JSON and approval_id `" + approval.ID + "`: " + string(actionJSON) + ". Add only the required validated skill_names transparency metadata; the harness strips it before exact-action verification. Do not otherwise alter, broaden, or reuse the action."
 	}
 	prompt := harness.Prompt{Text: job.Input, System: deliveries.WithSlackOutputContract(system), Model: job.ResolvedModel.ProviderID + "/" + job.ResolvedModel.ModelID, Variant: job.ResolvedModel.Variant, RequestID: string(job.ID) + "-" + fmt.Sprint(job.Attempt), SlackFormat: deliveries.SlackOutputContractVersion}
 	if err := p.deps.Harness.Prompt(ctx, session.ID, prompt); err != nil {
@@ -1597,7 +1661,9 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 	producedArtifactURLs := make(map[string]struct{})
 	resolvedWikiReferenceURLs := make(map[string]string)
 	completedToolOperations := make(map[string]struct{})
-	reportedToolProgressSteps := make(map[string]struct{})
+	reportedToolProgressSteps := make(map[string]string)
+	usedSkills := make(map[string]struct{})
+	usedActivities := make(map[string]struct{})
 	var reportedUsage types.SlackAgentFooter
 	heartbeatEvery := p.deps.Config.Jobs.Lease / 3
 	if heartbeatEvery <= 0 {
@@ -1615,22 +1681,43 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 				events = nil
 				continue
 			}
-			if event.Type == "tool.execution.completed" {
+			if event.Type == "skill.execution.started" {
+				skillName, _ := event.Data["skill_name"].(string)
+				if safeProgressIdentifier(skillName) {
+					if _, alreadyReported := usedSkills[skillName]; !alreadyReported {
+						usedSkills[skillName] = struct{}{}
+						p.updateJobProgress(ctx, job, safeSkillProgressStep(skillName, types.SlackProgressInProgress))
+					}
+				}
+			} else if event.Type == "tool.execution.started" || event.Type == "tool.execution.completed" || event.Type == "tool.execution.failed" {
 				toolID, _ := event.Data["tool_id"].(string)
 				operationID, _ := event.Data["operation_id"].(string)
 				if toolID != "" && operationID != "" {
 					resourceAction, _ := event.Data["resource_action"].(string)
-					completedToolOperations[toolID+"/"+operationID+"/"+resourceAction] = struct{}{}
-					step := safeToolProgressStep(toolID, operationID, resourceAction)
-					if _, alreadyReported := reportedToolProgressSteps[step.ID]; !alreadyReported {
-						reportedToolProgressSteps[step.ID] = struct{}{}
+					callID, _ := event.Data["call_id"].(string)
+					status := types.SlackProgressInProgress
+					if event.Type == "tool.execution.completed" {
+						status = types.SlackProgressComplete
+						completedToolOperations[toolID+"/"+operationID+"/"+resourceAction] = struct{}{}
+					} else if event.Type == "tool.execution.failed" {
+						status = types.SlackProgressError
+					}
+					step := safeToolProgressLifecycleStep(toolID, operationID, resourceAction, callID, status)
+					signature := string(step.Status) + "\x00" + step.Title
+					if reportedToolProgressSteps[step.ID] != signature {
+						reportedToolProgressSteps[step.ID] = signature
 						p.updateJobProgress(ctx, job, step)
+					}
+					if event.Type == "tool.execution.completed" {
+						if activity := safeFooterActivity(toolID, operationID, resourceAction); activity != "" {
+							usedActivities[activity] = struct{}{}
+						}
 					}
 				}
 			} else if event.Type == "artifact.produced" {
 				if artifactURL, ok := event.Data["url"].(string); ok && artifactURL != "" {
 					producedArtifactURLs[artifactURL] = struct{}{}
-					step := types.SlackProgressStep{ID: "artifact-" + progressID(artifactURL), Title: "Published Agent Wiki artifact", Status: types.SlackProgressComplete}
+					step := types.SlackProgressStep{ID: "agent-work", Title: "Published Agent Wiki artifact", Status: types.SlackProgressComplete}
 					if strings.HasPrefix(artifactURL, "https://") {
 						step.Sources = []types.SlackProgressSource{{URL: artifactURL, Text: "Agent Wiki artifact"}}
 					}
@@ -1643,7 +1730,6 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 					resolvedWikiReferenceURLs[fingerprint] = referenceURL
 				}
 			} else if event.Type == "web.search.completed" {
-				p.updateJobProgress(ctx, job, types.SlackProgressStep{ID: "web-search-" + progressID(event.ID), Title: "Searched the web", Status: types.SlackProgressComplete})
 				metadata := map[string]any{"channel_id": job.ChannelID, "thread_ts": job.RootThreadTS}
 				if query, ok := event.Data["query"].(string); ok && query != "" {
 					metadata["query_sha256"] = fmt.Sprintf("%x", sha256.Sum256([]byte(query)))
@@ -1725,6 +1811,13 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 	reportedUsage.ModelID = job.ResolvedModel.ModelID
 	reportedUsage.ReasoningEffort = job.ResolvedModel.Variant
 	reportedUsage.DurationMS = durationMS
+	if len(usedActivities) > 0 {
+		reportedUsage.Activities = make([]string, 0, len(usedActivities))
+		for activity := range usedActivities {
+			reportedUsage.Activities = append(reportedUsage.Activities, activity)
+		}
+		sort.Strings(reportedUsage.Activities)
+	}
 	result.AgentFooter = &reportedUsage
 	p.updateJobProgress(ctx, job, types.SlackProgressStep{ID: "agent-work", Title: "Completed agent work", Status: types.SlackProgressComplete})
 	return result, nil
@@ -1747,44 +1840,135 @@ func eventInt64(value any) int64 {
 }
 
 func safeToolProgressStep(toolID, operationID, resourceAction string) types.SlackProgressStep {
-	title := "Completed reviewed tool action"
+	return safeToolProgressLifecycleStep(toolID, operationID, resourceAction, "", types.SlackProgressComplete)
+}
+
+func safeToolProgressLifecycleStep(toolID, operationID, resourceAction, _ string, status types.SlackProgressStatus) types.SlackProgressStep {
+	title := progressVerb(status, "Using a reviewed tool", "Used a reviewed tool", "Reviewed tool call failed")
 	switch toolID {
 	case "telemetryos.wiki":
 		if operationID == "read" {
-			title = "Read Agent Wiki"
+			title = progressVerb(status, "Reading Agent Wiki", "Read Agent Wiki", "Agent Wiki call failed")
 		} else {
-			title = "Updated Agent Wiki"
+			title = progressVerb(status, "Updating Agent Wiki", "Updated Agent Wiki", "Agent Wiki update failed")
 		}
 	case "telemetryos.product-docs":
 		switch resourceAction {
 		case "corporate-full":
-			title = "Read TelemetryOS corporate website"
+			title = progressVerb(status, "Reading TelemetryOS corporate website", "Read TelemetryOS corporate website", "Corporate website read failed")
 		case "docs-index":
-			title = "Read TelemetryOS documentation index"
+			title = progressVerb(status, "Reading TelemetryOS documentation index", "Read TelemetryOS documentation index", "Documentation index read failed")
 		default:
-			title = "Read TelemetryOS documentation"
+			title = progressVerb(status, "Reading TelemetryOS documentation", "Read TelemetryOS documentation", "Documentation read failed")
 		}
 	case "telemetryos.code":
-		title = "Inspected TelemetryOS source (read-only)"
+		title = progressVerb(status, "Inspecting TelemetryOS source (read-only)", "Inspected TelemetryOS source (read-only)", "Source inspection failed")
 	case "telemetryos.linear":
 		if operationID == "read" {
-			title = "Checked Linear"
+			title = progressVerb(status, "Checking Linear", "Checked Linear", "Linear lookup failed")
 		} else {
-			title = "Updated Linear"
+			title = progressVerb(status, "Updating Linear", "Updated Linear", "Linear update failed")
 		}
 	case "telemetryos.otel":
-		title = "Queried telemetry"
+		title = progressVerb(status, "Querying telemetry", "Queried telemetry", "Telemetry query failed")
 	case "telemetryos.device-logs":
-		title = "Checked device logs"
+		title = progressVerb(status, "Checking device logs", "Checked device logs", "Device log lookup failed")
 	case "telemetryos.mongo":
-		title = "Queried approved data"
+		title = progressVerb(status, "Querying approved data", "Queried approved data", "Approved data query failed")
+	case "tos-tag-triggers":
+		title = progressVerb(status, "Managing channel automation", "Managed channel automation", "Channel automation call failed")
+	case "openai.web-search":
+		title = progressVerb(status, "Searching the web", "Searched the web", "Web search failed")
+	case "openai.integration":
+		title = progressVerb(status, "Using an approved integration", "Used an approved integration", "Integration call failed")
+	case "openai.command":
+		title = progressVerb(status, "Running a command", "Ran a command", "Command failed")
+	case "openai.file-change":
+		title = progressVerb(status, "Applying a file change", "Applied a file change", "File change failed")
+	case "openai.image-view":
+		title = progressVerb(status, "Inspecting an image", "Inspected an image", "Image inspection failed")
+	case "openai.image-generation":
+		title = progressVerb(status, "Generating an image", "Generated an image", "Image generation failed")
+	case "openai.subagent":
+		title = progressVerb(status, "Delegating agent work", "Completed delegated agent work", "Delegated agent work failed")
+	case "openai.wait":
+		title = progressVerb(status, "Waiting", "Wait completed", "Wait failed")
 	}
-	return types.SlackProgressStep{ID: "tool-" + progressID(toolID+"/"+operationID+"/"+resourceAction), Title: title, Status: types.SlackProgressComplete}
+	return types.SlackProgressStep{ID: "agent-work", Title: title, Status: status}
 }
 
-func progressID(value string) string {
-	sum := sha256.Sum256([]byte(value))
-	return fmt.Sprintf("%x", sum[:6])
+func safeSkillProgressStep(skillName string, status types.SlackProgressStatus) types.SlackProgressStep {
+	displayName := strings.ReplaceAll(skillName, "-", " ")
+	title := "Using " + displayName + " skill"
+	if status == types.SlackProgressComplete {
+		title = "Used " + displayName + " skill"
+	} else if status == types.SlackProgressError {
+		title = displayName + " skill failed"
+	}
+	return types.SlackProgressStep{ID: "agent-work", Title: title, Status: status}
+}
+
+func safeFooterActivity(toolID, _ string, resourceAction string) string {
+	switch toolID {
+	case "telemetryos.wiki":
+		return "wiki"
+	case "telemetryos.product-docs":
+		if resourceAction == "corporate-full" {
+			return "website"
+		}
+		return "documentation"
+	case "telemetryos.code":
+		return "source"
+	case "telemetryos.linear":
+		return "Linear"
+	case "telemetryos.otel":
+		return "telemetry"
+	case "telemetryos.device-logs":
+		return "device logs"
+	case "telemetryos.mongo":
+		return "data"
+	case "tos-tag-triggers":
+		return "automation"
+	case "openai.web-search":
+		return "search"
+	case "openai.integration":
+		return "integration"
+	case "openai.command":
+		return "shell"
+	case "openai.file-change":
+		return "file changes"
+	case "openai.image-view":
+		return "image inspection"
+	case "openai.image-generation":
+		return "image generation"
+	case "openai.subagent":
+		return "delegation"
+	default:
+		return ""
+	}
+}
+
+func progressVerb(status types.SlackProgressStatus, active, complete, failed string) string {
+	switch status {
+	case types.SlackProgressComplete:
+		return complete
+	case types.SlackProgressError:
+		return failed
+	default:
+		return active
+	}
+}
+
+func safeProgressIdentifier(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' && char != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 func minExpiry(a, b time.Time) time.Time {

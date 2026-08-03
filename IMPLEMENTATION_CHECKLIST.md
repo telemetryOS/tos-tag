@@ -57,7 +57,7 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Enforce assist/proactive initiative independently of the classifier,
   preserve rejected predictions for audit, recheck immediately before job
   admission, keep operator-created heartbeat triggers authorized, and pass the
-  44-message deterministic and live provider matrices (`46/46` with
+  46-message deterministic and live provider matrices (`48/48` with
   infrastructure invariants) plus a zero-reply/zero-job `#tos-tag` canary.
 - [x] Fall back conservatively on timeout or malformed output.
 
@@ -147,14 +147,20 @@ Only mark an item complete when source and verification evidence exist.
   audited.
 - [x] Consume approvals once and resume a fresh fenced attempt.
 - [x] Implement `/tag-directive` modal load/save with revision and audit.
-- [x] Persist and reauthorize scheduled routines.
-- [x] Persist trigger subscriptions and run classifier-gated heartbeats.
+- [x] Persist and reauthorize standard five-field cron routines with explicit
+  IANA timezones while advancing legacy interval records safely.
+- [x] Persist classifier-gated cron heartbeat subscriptions and manage them in
+  the combined Automation view without exposing workspace/session IDs.
 
 ## 9. Slack output and delivery
 
 - [x] Define and prompt `slack-output/v3`.
 - [x] Support header, mrkdwn, context, divider, native table, sortable/paginated
   Data Table, presentation-only Card/Carousel, image, and artifact.
+- [x] Normalize recoverable model-created table row-width mismatches before
+  renderer validation without dropping surplus cell content.
+- [x] Degrade unsupported model-created Slack link targets to their visible
+  label while preserving renderer validation for surviving HTTP(S) links.
 - [x] Keep model Card/Carousel output non-interactive; reserve actions for the
   control plane and Alerts for modal surfaces.
 - [x] Keep short/medium answers in Slack and route genuinely document-sized
@@ -221,4 +227,7 @@ Only mark an item complete when source and verification evidence exist.
   keep first-time history context-only, catch up completed bot-joined channels
   after downtime, requeue only human direct mentions, and proactively pace
   exceptional Web API reads.
+- [x] Support operator-selected `session_only` context for noisy test channels:
+  skip backfill/catch-up, isolate context to same-channel messages from the
+  current process, and suppress durable memory and incident-fact derivation.
 - [x] Final exhaustive tracked-tree search confirms no stale runtime surface.

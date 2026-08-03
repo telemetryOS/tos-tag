@@ -205,6 +205,8 @@ func RunLive(ctx context.Context, cfg config.Config) (Score, error) {
 			AgentReasoningEffort:  caseDecision.AgentReasoningEffort,
 			ClassifierInputTokens: caseDecision.ClassifierInputTokens, ClassifierOutputTokens: caseDecision.ClassifierOutputTokens,
 			LatencyMilliseconds: latency.Milliseconds(),
+			ReasonCodes:         append([]string(nil), result.Predicted.ReasonCodes...),
+			ProviderReasonCodes: append([]string(nil), providerDecision.ReasonCodes...),
 		})
 	}
 

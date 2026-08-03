@@ -509,6 +509,35 @@ func TestLiveDeliveryUpdatesExistingMessageInsteadOfPosting(t *testing.T) {
 	}
 }
 
+func TestLiveDeliveryDisablesLinkAndMediaUnfurls(t *testing.T) {
+	unfurlLinks, unfurlMedia := "", ""
+	httpClient := fakeSlackHTTPClient{do: func(request *http.Request) (*http.Response, error) {
+		body := `{"ok":false,"error":"unexpected_endpoint"}`
+		switch request.URL.Path {
+		case "/conversations.history":
+			body = `{"ok":true,"messages":[],"has_more":false,"response_metadata":{"next_cursor":""}}`
+		case "/chat.postMessage":
+			if err := request.ParseForm(); err != nil {
+				t.Errorf("parse post-message form: %v", err)
+			}
+			unfurlLinks, unfurlMedia = request.Form.Get("unfurl_links"), request.Form.Get("unfurl_media")
+			body = `{"ok":true,"channel":"channel","ts":"200.1"}`
+		default:
+			t.Errorf("unexpected Slack endpoint %s", request.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	}}
+	client := slackapi.New("xoxb-test", slackapi.OptionAPIURL("https://slack.test/"), slackapi.OptionHTTPClient(httpClient))
+	delivery := &LiveDelivery{teamID: "team", api: client, renderer: deliveries.NewRenderer()}
+	_, err := delivery.Send(context.Background(), types.SlackDeliveryRequest{ID: "delivery-links", Destination: types.SlackDestination{TeamID: "team", ChannelID: "channel"}, Result: types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: "See <https://telemetry.slack.com/archives/C123/p123|the source>."}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unfurlLinks != "false" || unfurlMedia != "false" {
+		t.Fatalf("unfurl_links=%q unfurl_media=%q", unfurlLinks, unfurlMedia)
+	}
+}
+
 func TestLiveDeliveryStartsUpdatesAndFinalizesThinkingSteps(t *testing.T) {
 	fake := &fakePostMessage{}
 	delivery := &LiveDelivery{teamID: "team", api: fake, renderer: deliveries.NewRenderer()}
@@ -563,7 +592,7 @@ func TestLiveDeliverySendsRequiredRecipientTeamForThinkingSteps(t *testing.T) {
 }
 
 func TestLiveDeliveryStopsChunkStreamWithFinalBlockKitChunk(t *testing.T) {
-	markdownText, blocks, chunks := "", "", ""
+	markdownText, blocks, chunks, unfurlLinks, unfurlMedia := "", "", "", "", ""
 	httpClient := fakeSlackHTTPClient{do: func(request *http.Request) (*http.Response, error) {
 		body := `{"ok":false,"error":"unexpected_endpoint"}`
 		switch request.URL.Path {
@@ -574,6 +603,7 @@ func TestLiveDeliveryStopsChunkStreamWithFinalBlockKitChunk(t *testing.T) {
 				t.Errorf("parse stop-stream form: %v", err)
 			}
 			markdownText, blocks, chunks = request.Form.Get("markdown_text"), request.Form.Get("blocks"), request.Form.Get("chunks")
+			unfurlLinks, unfurlMedia = request.Form.Get("unfurl_links"), request.Form.Get("unfurl_media")
 			body = `{"ok":true,"channel":"channel","ts":"stream.1"}`
 		default:
 			t.Errorf("unexpected Slack endpoint %s", request.URL.Path)
@@ -588,6 +618,9 @@ func TestLiveDeliveryStopsChunkStreamWithFinalBlockKitChunk(t *testing.T) {
 	}
 	if markdownText != "" || blocks != "" || !strings.Contains(chunks, `"type":"blocks"`) || !strings.Contains(chunks, `"type":"context"`) || !strings.Contains(chunks, "Done.") || !strings.Contains(chunks, "ChatGPT 5.6 Luna") || !strings.Contains(chunks, "22k tokens") {
 		t.Fatalf("markdown_text=%q blocks=%q chunks=%q", markdownText, blocks, chunks)
+	}
+	if unfurlLinks != "false" || unfurlMedia != "false" {
+		t.Fatalf("unfurl_links=%q unfurl_media=%q", unfurlLinks, unfurlMedia)
 	}
 }
 
@@ -652,5 +685,19 @@ func TestDirectiveCommandAndModalSubmissionRemainChannelBound(t *testing.T) {
 	callback.Team.ID = "T999"
 	if _, _, err := NormalizeDirectiveSubmission(options, callback); err == nil {
 		t.Fatal("cross-workspace directive submission was accepted")
+	}
+}
+
+func TestModeCommandRemainsWorkspaceBoundAndPassesRequestedMode(t *testing.T) {
+	options := LiveOptions{OrganizationID: "org", AppID: "A123", TeamID: "T123"}
+	request, eligible, err := NormalizeModeCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: modeSlashCommand, Text: " Proactive "})
+	if err != nil || !eligible || request.ChannelID != "C_ALERTS" || request.UserID != "U_ADMIN" || request.Mode != "proactive" {
+		t.Fatalf("request=%#v eligible=%v err=%v", request, eligible, err)
+	}
+	if _, eligible, err := NormalizeModeCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: directiveSlashCommand}); err != nil || eligible {
+		t.Fatalf("directive command leaked into mode normalization: eligible=%v err=%v", eligible, err)
+	}
+	if _, _, err := NormalizeModeCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T999", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: modeSlashCommand, Text: "assist"}); err == nil {
+		t.Fatal("cross-workspace mode command was accepted")
 	}
 }

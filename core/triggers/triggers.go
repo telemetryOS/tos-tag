@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/telemetryos/tos-tag/core/jobs"
+	"github.com/telemetryos/tos-tag/core/schedule"
 	"github.com/telemetryos/tos-tag/types"
 )
 
@@ -31,6 +32,8 @@ type Subscription struct {
 	OwnerID        string          `json:"owner_id" bson:"owner_id"`
 	Kind           Kind            `json:"kind" bson:"kind"`
 	Instruction    string          `json:"instruction" bson:"instruction"`
+	Cron           string          `json:"cron,omitempty" bson:"cron,omitempty"`
+	Timezone       string          `json:"timezone,omitempty" bson:"timezone,omitempty"`
 	Interval       time.Duration   `json:"interval" bson:"interval"`
 	NextRun        time.Time       `json:"next_run" bson:"next_run"`
 	ClassifierGate bool            `json:"classifier_gate" bson:"classifier_gate"`
@@ -89,7 +92,9 @@ func NewStore(now func() time.Time) *Store {
 }
 
 func (s *Store) PutContext(_ context.Context, subscription Subscription) (Subscription, error) {
-	if err := Validate(subscription); err != nil {
+	var err error
+	subscription, err = Normalize(subscription, s.now().UTC())
+	if err != nil {
 		return Subscription{}, err
 	}
 	s.mu.Lock()
@@ -161,9 +166,11 @@ func (s *Store) AdvanceContext(_ context.Context, organizationID, id string, fro
 	if !ok {
 		return errors.New("trigger subscription not found")
 	}
-	for !subscription.NextRun.After(from) {
-		subscription.NextRun = subscription.NextRun.Add(subscription.Interval)
+	spec, err := schedule.Parse(subscription.Cron, subscription.Timezone, subscription.Interval)
+	if err != nil {
+		return err
 	}
+	subscription.NextRun = spec.Advance(subscription.NextRun, from)
 	subscription.Version++
 	subscription.UpdatedAt = s.now().UTC()
 	s.subscriptions[key] = subscription
@@ -180,10 +187,29 @@ func sortSubscriptions(values []Subscription) {
 }
 
 func Validate(subscription Subscription) error {
-	if subscription.ID == "" || subscription.OrganizationID == "" || subscription.WorkspaceID == "" || subscription.ChannelID == "" || subscription.SessionID == "" || subscription.Generation <= 0 || subscription.OwnerID == "" || subscription.Kind != KindHeartbeat || subscription.Instruction == "" || subscription.Interval < time.Minute || subscription.NextRun.IsZero() || !subscription.ClassifierGate || subscription.MinConfidence < 0 || subscription.MinConfidence > 1 {
-		return errors.New("invalid trigger subscription")
+	_, err := Normalize(subscription, time.Now().UTC())
+	return err
+}
+
+// Normalize validates a subscription and derives its first run when needed.
+// Existing fixed-interval records remain valid while new subscriptions prefer
+// a cron expression plus an explicit IANA timezone.
+func Normalize(subscription Subscription, now time.Time) (Subscription, error) {
+	if subscription.ID == "" || subscription.OrganizationID == "" || subscription.WorkspaceID == "" || subscription.ChannelID == "" || subscription.SessionID == "" || subscription.Generation <= 0 || subscription.OwnerID == "" || subscription.Kind != KindHeartbeat || subscription.Instruction == "" || !subscription.ClassifierGate || subscription.MinConfidence < 0 || subscription.MinConfidence > 1 {
+		return Subscription{}, errors.New("invalid trigger subscription")
 	}
-	return nil
+	spec, err := schedule.Parse(subscription.Cron, subscription.Timezone, subscription.Interval)
+	if err != nil {
+		return Subscription{}, fmt.Errorf("invalid trigger subscription: %w", err)
+	}
+	subscription.Cron = spec.Cron
+	subscription.Timezone = spec.Timezone
+	if subscription.NextRun.IsZero() {
+		subscription.NextRun = spec.Next(now)
+	} else {
+		subscription.NextRun = subscription.NextRun.UTC()
+	}
+	return subscription, nil
 }
 
 type Scheduler struct {
@@ -217,6 +243,10 @@ func (s *Scheduler) RunDue(ctx context.Context) error {
 		}
 		decision, gateErr := s.gate.EvaluateHeartbeat(ctx, subscription, window)
 		if gateErr == nil && decision.Accepted && decision.Decision.Confidence >= subscription.MinConfidence {
+			spec, specErr := schedule.Parse(subscription.Cron, subscription.Timezone, subscription.Interval)
+			if specErr != nil {
+				return specErr
+			}
 			_, _, err = s.jobs.Enqueue(ctx, jobs.Spec{
 				OrganizationID: subscription.OrganizationID, WorkspaceID: subscription.WorkspaceID,
 				ChannelID: subscription.ChannelID, RootThreadTS: subscription.RootThreadTS,
@@ -224,7 +254,7 @@ func (s *Scheduler) RunDue(ctx context.Context) error {
 				SessionID:   subscription.SessionID, Generation: subscription.Generation,
 				IdempotencyKey: "trigger/" + subscription.ID + "/" + window,
 				Kind:           "heartbeat", Input: subscription.Instruction, MaxAttempts: 3,
-				ExpiresAt: now.Add(subscription.Interval),
+				ExpiresAt: now.Add(spec.Window(subscription.NextRun)),
 			})
 			if err != nil {
 				return fmt.Errorf("enqueue heartbeat trigger: %w", err)

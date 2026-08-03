@@ -42,6 +42,7 @@ func contextSyncConfig() config.Config {
 type recordingObservationStore struct {
 	observer.Store
 	recentChannels     []string
+	recentSince        time.Time
 	lateCandidateCalls int
 }
 
@@ -136,6 +137,31 @@ func (*duplicateToolProgressHarness) Permission(context.Context, string, harness
 }
 func (*duplicateToolProgressHarness) Abort(context.Context, string) error { return nil }
 
+type transparentProgressHarness struct{}
+
+func (*transparentProgressHarness) Health(context.Context) error { return nil }
+func (*transparentProgressHarness) CreateSession(context.Context, string) (harness.Session, error) {
+	return harness.Session{ID: "transparent-progress-session", CreatedAt: time.Now().UTC()}, nil
+}
+func (*transparentProgressHarness) Prompt(context.Context, string, harness.Prompt) error { return nil }
+func (*transparentProgressHarness) Events(context.Context, string) (<-chan harness.Event, <-chan error) {
+	events := make(chan harness.Event, 6)
+	errs := make(chan error)
+	events <- harness.Event{Type: "skill.execution.started", Data: map[string]any{"skill_name": "product-knowledge", "call_id": "call-1"}}
+	events <- harness.Event{Type: "tool.execution.started", Data: map[string]any{"call_id": "call-1", "tool_id": "telemetryos.wiki", "operation_id": "read", "resource_action": "get"}}
+	events <- harness.Event{Type: "tool.execution.completed", Data: map[string]any{"call_id": "call-1", "tool_id": "telemetryos.wiki", "operation_id": "read", "resource_action": "get"}}
+	events <- harness.Event{Type: "tool.execution.started", Data: map[string]any{"call_id": "call-2", "tool_id": "openai.web-search", "operation_id": "search"}}
+	events <- harness.Event{Type: "tool.execution.failed", Data: map[string]any{"call_id": "call-2", "tool_id": "openai.web-search", "operation_id": "search"}}
+	events <- harness.Event{Type: "message.delta", Data: map[string]any{"text": `{"segments":[{"kind":"mrkdwn_text","text":"done"}]}`}}
+	close(events)
+	close(errs)
+	return events, errs
+}
+func (*transparentProgressHarness) Permission(context.Context, string, harness.PermissionDecision) error {
+	return nil
+}
+func (*transparentProgressHarness) Abort(context.Context, string) error { return nil }
+
 type contextFailureHarness struct{}
 
 func (*contextFailureHarness) Health(context.Context) error { return nil }
@@ -175,6 +201,7 @@ func (r *recordingAdmissions) Complete(_ context.Context, id string) {
 
 func (s *recordingObservationStore) Recent(ctx context.Context, organizationID string, channelIDs []string, since time.Time, limit int) ([]models.ChannelMessage, error) {
 	s.recentChannels = append([]string(nil), channelIDs...)
+	s.recentSince = since
 	return s.Store.Recent(ctx, organizationID, channelIDs, since, limit)
 }
 
@@ -270,8 +297,8 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 		t.Fatal("first envelope was marked duplicate")
 	}
 	waitFor(t, func() bool { return len(system.transport.Requests()) == 1 })
-	if reactions := system.transport.ReactionRequests(); len(reactions) != 0 {
-		t.Fatalf("full-agent work used a reaction instead of Thinking Steps: %#v", reactions)
+	if reactions := system.transport.ReactionRequests(); len(reactions) != 1 || reactions[0].Emoji == "" || reactions[0].ChannelID != message.ChannelID || reactions[0].MessageTS != message.MessageTS {
+		t.Fatalf("admitted answer work did not immediately acknowledge the source message with a classifier reaction: %#v", reactions)
 	}
 	if starts := system.transport.ProgressStarts(); len(starts) != 1 || starts[0].ChannelID != message.ChannelID || starts[0].ThreadTS != message.MessageTS || starts[0].Step.Status != types.SlackProgressInProgress {
 		t.Fatalf("Thinking Steps starts = %#v", starts)
@@ -308,11 +335,33 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 	if got := len(system.transport.Requests()); got != 1 {
 		t.Fatalf("duplicate caused %d deliveries", got)
 	}
-	if got := len(system.transport.ReactionRequests()); got != 0 {
-		t.Fatalf("duplicate caused %d reactions", got)
+	if got := len(system.transport.ReactionRequests()); got != 1 {
+		t.Fatalf("duplicate changed reaction count to %d", got)
 	}
 	if got := len(system.transport.ProgressStarts()); got != 1 {
 		t.Fatalf("duplicate caused %d progress streams", got)
+	}
+}
+
+func TestGroupDMEnvelopesAreIgnoredEntirely(t *testing.T) {
+	system := newTestSystem(t)
+	message := envelope("mpdm-1", "mpdm-group", "500.001", "<@tos-tag> can you help?")
+	message.ChannelKind = types.SlackChannelKindGroupDM
+	message.Restricted = true
+	message.IsMention = true
+
+	if _, err := system.ingress.Inject(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if len(system.transport.Requests()) != 0 || len(system.transport.ReactionRequests()) != 0 {
+		t.Fatal("group DM produced Slack output")
+	}
+	if records, _ := system.decisions.List(context.Background()); len(records) != 0 {
+		t.Fatalf("group DM was classified: %#v", records)
+	}
+	if records := system.activity.Snapshot(message.OrganizationID, 10); len(records) != 0 {
+		t.Fatalf("group DM produced classification activity: %#v", records)
 	}
 }
 
@@ -349,8 +398,50 @@ func TestFullAgentHarnessDeduplicatesRepeatedToolProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	updates := transport.ProgressUpdates()
-	if len(updates) != 2 || updates[0].Step.ID == "agent-work" || updates[1].Step.ID != "agent-work" {
+	if len(updates) != 2 || updates[0].Step.ID != "agent-work" || updates[1].Step.ID != "agent-work" {
 		t.Fatalf("progress updates = %#v", updates)
+	}
+}
+
+func TestFullAgentHarnessShowsSkillAndEveryToolLifecycle(t *testing.T) {
+	cfg := config.DefaultConfiguration
+	cfg.Jobs.Lease = time.Minute
+	transport := slack.NewStubDelivery()
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Harness: &transparentProgressHarness{}, Transport: transport}}
+	result, err := p.runHarness(context.Background(), jobs.Job{
+		ID: "job-transparent-progress", OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "tos-tag", ProgressMessageTS: "progress.1",
+		Input: `{"request":"research"}`, ResolvedModel: types.ResolvedModel{ProviderID: "openai", ModelID: "gpt-5.6-luna", Variant: "medium"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates := transport.ProgressUpdates()
+	if len(updates) != 6 {
+		t.Fatalf("progress updates = %#v", updates)
+	}
+	want := []struct {
+		status types.SlackProgressStatus
+		title  string
+	}{
+		{types.SlackProgressInProgress, "Using product knowledge skill"},
+		{types.SlackProgressInProgress, "Reading Agent Wiki"},
+		{types.SlackProgressComplete, "Read Agent Wiki"},
+		{types.SlackProgressInProgress, "Searching the web"},
+		{types.SlackProgressError, "Web search failed"},
+		{types.SlackProgressComplete, "Completed agent work"},
+	}
+	for index, expected := range want {
+		if updates[index].Step.Status != expected.status || updates[index].Step.Title != expected.title {
+			t.Fatalf("update %d = %#v, want %q/%q", index, updates[index].Step, expected.status, expected.title)
+		}
+	}
+	for _, update := range updates {
+		if update.Step.ID != "agent-work" {
+			t.Fatalf("progress did not reuse the single transient card: %#v", updates)
+		}
+	}
+	if result.AgentFooter == nil || len(result.AgentFooter.Activities) != 1 || result.AgentFooter.Activities[0] != "wiki" {
+		t.Fatalf("footer activities = %#v", result.AgentFooter)
 	}
 }
 
@@ -862,6 +953,54 @@ func TestUnknownAppMentionPrivacyIsDeferredBeforePersistence(t *testing.T) {
 	}
 }
 
+func TestSelfAuthoredSlackOutputBecomesResolvedContextWithoutDecision(t *testing.T) {
+	cfg := contextSyncConfig()
+	cfg.Slack.BotUserID = "U-tag"
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test", EnrollmentMode: "all_observable_channels"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
+	_, err := scopes.PutChannel(context.Background(), orgconfig.ChannelPolicy{
+		OrganizationID: "org-test", TeamID: "team-test", ChannelID: "tos-tag", Enrolled: true,
+		ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 6, MaxConcurrentJobs: 2,
+		MembershipRevision: "member/v1", MembershipRefreshedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Scopes: scopes, Observations: observations}}
+
+	message := envelope("message/team-test/tos-tag/392.001", "tos-tag", "392.001", "Tag delivery")
+	message.UserID = "U-tag"
+	message.BotID = "B-tag"
+	accepted, err := p.HandleEnvelope(context.Background(), message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !accepted.Ignored || !accepted.ResolvedContext || accepted.Duplicate {
+		t.Fatalf("self-authored result = %#v", accepted)
+	}
+	current, err := observations.CurrentMessage(context.Background(), "org-test", "team-test", "tos-tag", "392.001")
+	if err != nil || current.Text != "Tag delivery" {
+		t.Fatalf("self-authored resolved context = %#v err=%v", current, err)
+	}
+	if _, err := observations.ClaimPending(context.Background(), "worker", time.Minute); !errors.Is(err, observer.ErrNoPendingObservation) {
+		t.Fatalf("self-authored output entered decision queue: %v", err)
+	}
+
+	otherBot := envelope("message/team-test/tos-tag/392.002", "tos-tag", "392.002", "External integration update")
+	otherBot.UserID = "U-other-bot"
+	otherBot.BotID = "B-other"
+	accepted, err = p.HandleEnvelope(context.Background(), otherBot)
+	if err != nil || accepted.Ignored {
+		t.Fatalf("other integration was discarded: %#v err=%v", accepted, err)
+	}
+	pending, err := observations.ClaimPending(context.Background(), "worker", time.Minute)
+	if err != nil || pending.MessageTS != "392.002" {
+		t.Fatalf("other integration did not retain normal decision behavior: %#v err=%v", pending, err)
+	}
+}
+
 func TestContextSyncDoesNotExpandAllowlistEnrollment(t *testing.T) {
 	cfg := contextSyncConfig()
 	scopes := orgconfig.NewMemory()
@@ -918,6 +1057,91 @@ func TestContextHistoryImportCannotCreateDecisionAndRespectsExplicitUnenrollment
 	}
 	if _, err := observations.CurrentMessage(context.Background(), "org-test", "team-test", "opted-out", "400.002"); !errors.Is(err, observer.ErrMessageNotFound) {
 		t.Fatalf("explicitly unenrolled history was retained: %v", err)
+	}
+}
+
+func TestSessionOnlyChannelSkipsHistoricalImportAndOfflineRecovery(t *testing.T) {
+	cfg := contextSyncConfig()
+	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
+	_, err := scopes.PutChannel(context.Background(), orgconfig.ChannelPolicy{
+		OrganizationID: "org-test", TeamID: "team-test", ChannelID: "tos-tag", Enrolled: true,
+		ParticipationMode: types.ModeAssist, ContextHistoryMode: types.ContextHistorySessionOnly,
+		MaxResponsesPerHour: 6, MaxConcurrentJobs: 2, MembershipRevision: "member/v1", MembershipRefreshedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Scopes: scopes, Observations: observations, Sessions: sessions.NewMemoryStore(nil)}}
+	history := envelope("message/team-test/tos-tag/ephemeral.001", "tos-tag", "ephemeral.001", "TEST-999 historical context")
+	if err := p.ImportContextEnvelope(context.Background(), history); err != nil {
+		t.Fatal(err)
+	}
+	recovered := envelope("message/team-test/tos-tag/ephemeral.002", "tos-tag", "ephemeral.002", "TEST-998 missed mention <@U-tag>")
+	recovered.IsMention = true
+	if err := p.RecoverContextEnvelope(context.Background(), recovered); err != nil {
+		t.Fatal(err)
+	}
+	for _, ts := range []string{history.MessageTS, recovered.MessageTS} {
+		if _, err := observations.CurrentMessage(context.Background(), "org-test", "team-test", "tos-tag", ts); !errors.Is(err, observer.ErrMessageNotFound) {
+			t.Fatalf("session-only history %s was retained: %v", ts, err)
+		}
+	}
+}
+
+func TestSessionOnlyContextUsesOnlyDestinationMessagesFromCurrentProcess(t *testing.T) {
+	cfg := config.DefaultConfiguration
+	builder, err := contextpacks.New(cfg.ContextPacks, contextpacks.WordTokenizer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	startedAt := now.Add(-time.Minute)
+	base := observer.NewMemoryStore(cfg.Retention.Messages, func() time.Time { return now.Add(time.Minute) })
+	recording := &recordingObservationStore{Store: base}
+	for _, message := range []types.SlackEnvelope{
+		envelope("old-test", "tos-tag", "ephemeral.101", "TEST-101 old test context"),
+		envelope("current-test", "tos-tag", "ephemeral.102", "current session question"),
+		envelope("other-channel", "public-status", "ephemeral.103", "current cross-channel report"),
+	} {
+		message.EventTime = now.Add(-2 * time.Hour)
+		if message.EventID != "old-test" {
+			message.EventTime = now
+		}
+		message.ReceivedAt = message.EventTime
+		if _, err := base.Import(context.Background(), message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
+	for _, policy := range []orgconfig.ChannelPolicy{
+		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "tos-tag", Enrolled: true, ParticipationMode: types.ModeAssist, ContextHistoryMode: types.ContextHistorySessionOnly, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
+		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "public-status", Enrolled: true, ParticipationMode: types.ModeObserve, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
+	} {
+		if _, err := scopes.PutChannel(context.Background(), policy); err != nil {
+			t.Fatal(err)
+		}
+	}
+	memoryStore := agentmemory.NewMemoryStore(func() time.Time { return now })
+	if _, _, err := memoryStore.PutGenerated(context.Background(), agentmemory.Record{OrganizationID: "org-test", ChannelID: "tos-tag", Scope: agentmemory.ScopeChannel, ScopeKey: "tos-tag/channel", Text: "TEST-102 durable memory", Facts: []agentmemory.Fact{{Text: "TEST-102 fact", Confidence: .9, ExpiresAt: now.Add(time.Hour)}}, SourceHash: "old-test", Status: agentmemory.StatusActive, ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Observations: recording, ContextPacks: builder, Scopes: scopes, Memory: memoryStore}, sessionStartedAt: startedAt}
+	target := envelope("current-test", "tos-tag", "ephemeral.102", "current session question")
+	target.EventTime, target.ReceivedAt = now, now
+	pack, err := p.buildContextPack(context.Background(), target, "obs-current", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recording.recentChannels) != 1 || recording.recentChannels[0] != "tos-tag" || !recording.recentSince.Equal(startedAt) {
+		t.Fatalf("session-only query scope channels=%v since=%s", recording.recentChannels, recording.recentSince)
+	}
+	if !contextContains(pack, "current session question") || contextContains(pack, "TEST-101") || contextContains(pack, "TEST-102") || contextContains(pack, "cross-channel report") {
+		t.Fatalf("session-only context was not isolated: %#v", pack.Sources)
 	}
 }
 

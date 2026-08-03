@@ -93,9 +93,21 @@
     .nav-group a:hover { background: var(--elevated); color: var(--ink); }
     .nav-group a[aria-current="page"] { background: var(--accent); color: var(--on-accent); font-weight: 600; }
     .nav-group a[aria-current="page"]::before { border-color: var(--on-accent); background: var(--on-accent); }
+    .nav-more { margin: 8px 0 18px; border-top: 1px solid var(--border); padding-top: 10px; }
+    .nav-more > summary {
+      display: flex; align-items: center; justify-content: space-between; min-height: 31px; padding: 6px 10px;
+      border-radius: 5px; color: var(--faint); font-size: 11px; font-weight: 550; letter-spacing: .08em;
+      text-transform: uppercase; cursor: pointer; list-style: none;
+    }
+    .nav-more > summary::-webkit-details-marker { display: none; }
+    .nav-more > summary::after { content: "+"; color: var(--faint); font: 400 16px/1 var(--mono); }
+    .nav-more[open] > summary::after { content: "−"; }
+    .nav-more > summary:hover { background: var(--elevated); color: var(--ink); }
+    .nav-more .nav-group { margin: 10px 0 12px; padding-left: 5px; border-left: 1px solid var(--border); }
+    .nav-more .nav-group-label { font-size: 8.5px; }
     .main-column { min-width: 0; flex: 1; display: flex; flex-direction: column; }
     .content { --content-x: 56px; width: 100%; flex: 1; padding: 36px var(--content-x) 72px; }
-    .page-head { margin: 0 0 30px; max-width: 68ch; }
+    .page-head { margin: 0 0 30px; }
     .section-label { margin: 0 0 8px; color: var(--accent); font-size: 10px; font-weight: 550; letter-spacing: .18em; text-transform: uppercase; }
     .page-head h1 { margin: 0; color: var(--ink); font-size: clamp(29px, 3vw, 40px); font-weight: 650; letter-spacing: -.035em; line-height: 1.12; }
     .page-head h1 .highlight { color: var(--accent); }
@@ -144,7 +156,36 @@
     .data-table tbody tr:hover { background: color-mix(in srgb, var(--surface) 85%, transparent); }
     .data-table td { max-width: 28rem; color: var(--ink); overflow-wrap: anywhere; }
     .data-table td code { display: inline-block; max-width: 26rem; overflow-x: auto; white-space: pre-wrap; color: var(--muted); }
+    .data-table td time { white-space: nowrap; }
+    code.id-code { white-space: nowrap; }
+    .data-table select.mode-select { display: inline-block; width: 128px; height: 30px; margin: 0; padding: 4px 28px 4px 9px; font-size: 11.5px; }
     .data-table.page-channels th:first-child, .data-table.page-channels td:first-child { min-width: 180px; }
+    .data-table.page-memory { table-layout: fixed; }
+    .data-table.page-memory .memory-context-column { width: 240px; }
+    .data-table.page-memory .detail-column { width: 76px; min-width: 76px; }
+    .data-table.page-memory .memory-context-cell { padding: 15px 18px; }
+    .memory-context { display: grid; gap: 8px; min-width: 0; }
+    .memory-context-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+    .memory-channel { min-width: 0; color: var(--ink); font-size: 13px; font-weight: 620; overflow-wrap: anywhere; }
+    .memory-updated { flex: 0 0 auto; color: var(--faint); font-size: 10.5px; }
+    .memory-signals { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+    .memory-confidence { color: var(--ink); font: 550 11px/1.3 var(--mono); }
+    .memory-context-meta { color: var(--faint); font-size: 10.5px; line-height: 1.4; }
+    .data-table.page-memory .memory-text-cell { max-width: none; padding: 15px 20px; color: var(--ink); font-size: 14px; line-height: 1.58; white-space: pre-wrap; }
+    .data-table.page-jobs { table-layout: fixed; }
+    .data-table.page-jobs .job-summary-column { width: 280px; }
+    .data-table.page-jobs .detail-column { width: 76px; min-width: 76px; }
+    .data-table.page-jobs .job-context-cell, .data-table.page-jobs .job-execution-cell { padding: 15px 18px; }
+    .job-context, .job-execution { display: grid; gap: 8px; min-width: 0; }
+    .job-context-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+    .job-kind { min-width: 0; color: var(--ink); font-size: 13px; font-weight: 620; }
+    .job-channel { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
+    .job-signals { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+    .job-attempt { color: var(--faint); font-size: 10.5px; }
+    .job-model { max-width: 100%; color: var(--ink); font: 550 12px/1.4 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .job-timeline { display: flex; flex-wrap: wrap; gap: 5px 18px; color: var(--faint); font-size: 10.5px; }
+    .job-timeline span { white-space: nowrap; }
+    .job-failure { padding: 8px 10px; border-left: 2px solid var(--destructive); background: color-mix(in srgb, var(--destructive) 7%, transparent); color: var(--muted); font-size: 11.5px; line-height: 1.45; overflow-wrap: anywhere; }
     .value-true { color: var(--success); }
     .value-false { color: var(--faint); }
     .data-state { padding: 22px; border: 1px solid var(--border); border-top: 2px solid var(--accent); border-radius: 0 0 6px 6px; background: var(--well); color: var(--muted); font-size: 13px; }
@@ -159,6 +200,7 @@
     .section-heading h2 { margin-bottom: 3px; }
     .section-heading p { margin: 0; }
     .record-count { flex: 0 0 auto; padding: 5px 9px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 11px; }
+    .heading-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
     .text-link { flex: 0 0 auto; color: var(--accent); font-size: 12px; font-weight: 550; text-decoration: none; }
     .text-link:hover { color: var(--accent-hover); text-decoration: underline; }
     .attention-panel { padding: 0; overflow: hidden; }
@@ -169,28 +211,31 @@
     .attention-item:last-child { border-right: 0; }
     .attention-item strong { display: block; margin-bottom: 3px; font-size: 13px; }
     .attention-item span { color: var(--muted); font-size: 12px; }
+    a.attention-item { display: block; color: inherit; text-decoration: none; transition: background var(--fast); }
+    a.attention-item:hover { background: color-mix(in srgb, var(--surface) 55%, transparent); }
+    a.attention-item .attention-go { display: block; margin-top: 7px; color: var(--accent); font-size: 11px; font-weight: 550; }
     .all-clear { display: flex; align-items: center; gap: 12px; padding: 18px 20px; color: var(--muted); }
     .all-clear .status-dot { width: 9px; height: 9px; }
     .live-activity-panel { padding: 0; overflow: hidden; border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); background: var(--well); }
     .live-activity-panel:hover { background: var(--well); }
-    .activity-console-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 22px 24px 18px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 50%, var(--well)); }
-    .activity-console-head h2 { margin: 5px 0 4px; font-size: 20px; }
-    .activity-console-head p { max-width: 74ch; margin: 0; font-size: 12px; }
+    .activity-console-head { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 14px 24px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 50%, var(--well)); }
     .activity-live-label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: .11em; text-transform: uppercase; }
     .activity-connection-dot { width: 8px; height: 8px; border-radius: 2px; background: var(--faint); box-shadow: 0 0 0 3px color-mix(in srgb, var(--faint) 14%, transparent); }
     .activity-connection-dot.connected { background: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 14%, transparent); }
     .activity-connection-dot.reconnecting { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
     .activity-controls { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
     .activity-controls label { margin: 0; }
-    .activity-controls select { width: 160px; height: 34px; padding: 6px 32px 6px 10px; font-size: 11.5px; }
+    .activity-controls select { width: 150px; height: 34px; padding: 6px 32px 6px 10px; font-size: 11.5px; }
+    .activity-controls input[type="search"] { width: 190px; height: 34px; padding: 6px 10px; font-size: 11.5px; }
     button.secondary-button { height: 34px; margin: 0; padding: 6px 11px; border-color: var(--border); background: transparent; color: var(--muted); font-size: 11.5px; }
     button.secondary-button:hover { border-color: var(--accent); background: var(--elevated); color: var(--ink); }
     button.secondary-button.active { border-color: var(--accent); color: var(--accent); }
     .activity-console-meta { display: flex; justify-content: space-between; gap: 16px; padding: 9px 24px; border-bottom: 1px solid var(--border); color: var(--faint); font: 10.5px/1.4 var(--mono); }
     .live-activity-feed { max-height: min(62vh, 720px); min-height: 380px; overflow-y: auto; overscroll-behavior: contain; }
     .activity-empty { display: grid; min-height: 360px; place-items: center; padding: 24px; color: var(--faint); font-size: 12px; }
-    .activity-event { display: grid; grid-template-columns: 92px 12px minmax(0,1fr); gap: 14px; padding: 15px 24px; border-bottom: 1px solid color-mix(in srgb, var(--border) 68%, transparent); }
+    .activity-event { position: relative; display: grid; grid-template-columns: 92px 12px minmax(0,1fr); gap: 14px; padding: 12px 24px; border-bottom: 1px solid color-mix(in srgb, var(--border) 68%, transparent); }
     .activity-event:hover { background: color-mix(in srgb, var(--surface) 38%, transparent); }
+    .activity-event.expandable { cursor: pointer; }
     .activity-time { color: var(--faint); font: 10.5px/1.5 var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
     .activity-rail { position: relative; display: flex; justify-content: center; }
     .activity-rail::before { content: ""; position: absolute; top: 13px; bottom: -28px; width: 1px; background: var(--border); }
@@ -199,16 +244,43 @@
     .activity-event.category-classifier .activity-marker { background: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
     .activity-event.category-codex .activity-marker { background: #b494f7; box-shadow: 0 0 0 1px #b494f7; }
     .activity-event.category-tool .activity-marker { background: #55c7ba; box-shadow: 0 0 0 1px #55c7ba; }
+    .activity-event.category-agent .activity-marker { background: var(--success); box-shadow: 0 0 0 1px var(--success); }
+    .activity-event.category-slack .activity-marker { background: #8fb4d8; box-shadow: 0 0 0 1px #8fb4d8; }
+    .activity-event.category-system .activity-marker { background: var(--faint); box-shadow: 0 0 0 1px var(--faint); }
     .activity-event.level-warn .activity-marker { background: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
     .activity-event.level-error .activity-marker { background: var(--destructive); box-shadow: 0 0 0 1px var(--destructive); }
-    .activity-event-body { min-width: 0; }
+    .activity-event.level-warn { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+    .activity-event.level-error { background: color-mix(in srgb, var(--destructive) 7%, transparent); }
+    .activity-event.level-error:hover { background: color-mix(in srgb, var(--destructive) 11%, transparent); }
+    .activity-event-body { min-width: 0; padding-right: 34px; }
     .activity-event-topline { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
-    .activity-category { color: var(--faint); font-size: 9.5px; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
+    .activity-category { color: #63aaf2; font-size: 9.5px; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
+    .activity-event.category-system .activity-category { color: var(--faint); }
+    .activity-event.category-classifier .activity-category { color: var(--accent); }
+    .activity-event.category-codex .activity-category { color: #b494f7; }
+    .activity-event.category-tool .activity-category { color: #55c7ba; }
+    .activity-event.category-agent .activity-category { color: var(--success); }
+    .activity-event.category-slack .activity-category { color: #8fb4d8; }
     .activity-event-title { color: var(--ink); font-size: 12.5px; font-weight: 600; }
+    .activity-event.routine .activity-event-title { color: var(--muted); font-weight: 500; }
     .activity-event-summary { margin-top: 3px; color: var(--muted); font-size: 11.5px; }
+    .activity-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+    .activity-chips .pill { padding: 2px 8px; font-size: 10px; }
+    .activity-pulse { display: flex; flex-wrap: wrap; gap: 14px; }
+    .activity-pulse strong { color: var(--muted); font-weight: 650; font-variant-numeric: tabular-nums; }
+    .activity-pulse .pulse-warn strong { color: var(--accent); }
+    .activity-pulse .pulse-bad strong { color: var(--destructive); }
     .activity-message { margin: 9px 0 0; padding: 9px 12px; border-left: 2px solid var(--accent); background: color-mix(in srgb, var(--surface) 38%, transparent); color: var(--ink); font-size: 12.5px; line-height: 1.45; overflow-wrap: anywhere; }
-    .activity-details { margin-top: 9px; }
-    .activity-details summary { color: var(--faint); font-size: 10.5px; cursor: pointer; }
+    .activity-details { margin: 0; }
+    .activity-details summary {
+      list-style: none; position: absolute; top: 9px; right: 18px; display: flex; align-items: center; justify-content: center;
+      width: 24px; height: 24px; border: 1px solid transparent; border-radius: 5px; color: var(--faint); cursor: pointer;
+      transition: background var(--fast), border-color var(--fast), color var(--fast);
+    }
+    .activity-details summary::-webkit-details-marker { display: none; }
+    .activity-details summary::before { content: ""; width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: translate(-2px, 0) rotate(-45deg); transition: transform var(--fast); }
+    .activity-details[open] summary::before { transform: translate(0, -2px) rotate(45deg); }
+    .activity-details summary:hover { border-color: var(--border); background: var(--elevated); color: var(--muted); }
     .activity-details dl { display: grid; grid-template-columns: max-content minmax(0,1fr); gap: 5px 12px; margin: 9px 0 0; padding: 10px 12px; border: 1px solid var(--border); background: color-mix(in srgb, var(--page) 60%, transparent); }
     .activity-details dt { color: var(--faint); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; }
     .activity-details dd { min-width: 0; margin: 0; color: var(--muted); font: 10.5px/1.45 var(--mono); overflow-wrap: anywhere; }
@@ -216,6 +288,36 @@
     .split-panel > div { min-width: 0; padding: 22px 24px; }
     .split-panel > div + div { border-left: 1px solid var(--border); }
     .activity-list, .compact-list { display: grid; gap: 0; }
+    .directive-workspace { padding: 0; overflow: hidden; }
+    .directive-layout { display: grid; grid-template-columns: minmax(230px,.7fr) minmax(0,1.6fr); min-height: 560px; }
+    .directive-sidebar { padding: 22px; border-right: 1px solid var(--border); background: color-mix(in srgb, var(--well) 55%, transparent); }
+    .directive-editor { min-width: 0; padding: 24px 26px; }
+    .directive-sidebar h2, .directive-editor h2 { margin-bottom: 4px; }
+    .directive-list { display: grid; gap: 7px; margin-top: 18px; }
+    .directive-channel-button {
+      display: block; width: 100%; margin: 0; padding: 11px 12px; text-align: left; border: 1px solid var(--border);
+      border-radius: 6px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 450;
+    }
+    .directive-channel-button:hover { border-color: var(--border-strong); background: var(--elevated); color: var(--ink); }
+    .directive-channel-button.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--ink); }
+    .directive-channel-button strong { display: block; color: inherit; font-size: 13px; }
+    .directive-channel-button span { display: block; margin-top: 3px; color: var(--faint); font-size: 10.5px; font-weight: 400; }
+    .directive-editor-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
+    .directive-status { flex: 0 0 auto; padding: 5px 9px; border: 1px solid var(--border); border-radius: 999px; color: var(--faint); font-size: 11px; }
+    .directive-status.active { border-color: color-mix(in srgb, var(--success) 55%, var(--border)); color: var(--success); }
+    .directive-editor textarea { min-height: 13rem; font-family: var(--font); font-size: 14px; line-height: 1.55; }
+    .directive-form-meta { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 7px; color: var(--faint); font-size: 11px; }
+    .directive-form-actions { display: flex; align-items: center; gap: 9px; margin-top: 16px; }
+    .directive-form-actions button { margin: 0; }
+    .directive-notice { min-height: 20px; margin-top: 12px; color: var(--muted); font-size: 12px; }
+    .directive-notice.success { color: var(--success); }
+    .directive-notice.error { color: #ef7b7b; }
+    .directive-history { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border); }
+    .directive-history-list { display: grid; gap: 8px; margin-top: 12px; }
+    .directive-revision { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px; align-items: center; padding: 12px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--well); }
+    .directive-revision-title { color: var(--ink); font-size: 12.5px; font-weight: 550; }
+    .directive-revision-copy { margin-top: 4px; color: var(--muted); font-size: 11.5px; line-height: 1.4; overflow-wrap: anywhere; }
+    .directive-revision button { margin: 0; }
     .activity-row, .compact-row { display: grid; align-items: center; gap: 12px; padding: 11px 0; border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent); }
     .activity-row { grid-template-columns: minmax(0,1fr) auto auto; }
     .compact-row { grid-template-columns: minmax(0,1fr) auto; }
@@ -253,6 +355,35 @@
     .detail-grid dd { min-width: 0; color: var(--ink); font-size: 12px; overflow-wrap: anywhere; }
     .detail-grid dd code { display: block; max-height: 16rem; overflow: auto; white-space: pre-wrap; }
     .dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .automation-actions { display: flex; align-items: center; gap: 8px; }
+    .automation-actions button { margin: 0; }
+    .automation-list { display: grid; gap: 12px; }
+    .automation-card { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 14px 24px; padding: 17px 18px; border: 1px solid var(--border); border-radius: 7px; background: var(--well); }
+    .automation-card:hover { border-color: var(--border-strong); }
+    .automation-card-main { min-width: 0; }
+    .automation-card-head { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
+    .automation-card-title { color: var(--ink); font-size: 14px; font-weight: 620; overflow-wrap: anywhere; }
+    .automation-card-copy { margin-top: 8px; color: var(--muted); font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; }
+    .automation-card-meta { display: flex; flex-wrap: wrap; gap: 7px 14px; margin-top: 12px; color: var(--faint); font-size: 11px; }
+    .automation-card-meta code { color: var(--ink); }
+    .automation-card-side { min-width: 160px; text-align: right; }
+    .automation-next-label { color: var(--faint); font-size: 9.5px; font-weight: 550; letter-spacing: .12em; text-transform: uppercase; }
+    .automation-next { margin-top: 4px; color: var(--ink); font-size: 12.5px; font-weight: 550; }
+    .automation-card-side button { margin-top: 12px; }
+    .automation-empty { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 24px; padding: 20px; border: 1px dashed var(--border-strong); border-radius: 7px; background: var(--well); }
+    .automation-empty strong { display: block; margin-bottom: 4px; font-size: 13px; }
+    .automation-empty span { color: var(--muted); font-size: 12px; }
+    .automation-guide { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 1px; padding: 0; overflow: hidden; }
+    .automation-guide > div { padding: 19px 20px; background: color-mix(in srgb, var(--surface) 58%, var(--page)); }
+    .automation-guide strong { display: block; margin-bottom: 5px; font-size: 12.5px; }
+    .automation-guide span { color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+    .automation-form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 0 16px; }
+    .automation-form-grid .full { grid-column: 1 / -1; }
+    .automation-enabled { display: flex; align-items: center; gap: 9px; margin-top: 18px; color: var(--ink); font-size: 12px; letter-spacing: 0; text-transform: none; }
+    .automation-enabled input { width: auto; margin: 0; }
+    .form-help { margin: 5px 0 0; color: var(--faint); font-size: 11px; }
+    .dialog-notice { min-height: 20px; margin-top: 12px; color: var(--muted); font-size: 12px; }
+    .dialog-notice.error { color: var(--destructive); }
     .developer-tools { grid-column: 1 / -1; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in srgb, var(--surface) 45%, var(--page)); }
     .developer-tools summary { padding: 16px 20px; color: var(--muted); font-size: 12px; font-weight: 550; cursor: pointer; }
     .developer-tools[open] summary { border-bottom: 1px solid var(--border); color: var(--ink); }
@@ -273,7 +404,12 @@
       .overview-metrics, .summary-cards { grid-template-columns: repeat(2, minmax(0,1fr)); }
       .split-panel { grid-template-columns: 1fr; }
       .split-panel > div + div { border-left: 0; border-top: 1px solid var(--border); }
+      .directive-layout { grid-template-columns: 1fr; }
+      .directive-sidebar { border-right: 0; border-bottom: 1px solid var(--border); }
       .health-grid { grid-template-columns: 1fr; }
+      .automation-guide { grid-template-columns: 1fr; }
+      .data-table.page-memory .memory-context-column { width: 205px; }
+      .data-table.page-jobs .job-summary-column { width: 230px; }
       .activity-console-head { align-items: stretch; flex-direction: column; }
       .activity-controls { flex-wrap: wrap; }
       .chrome-footer { padding: 16px 20px; }
@@ -298,8 +434,33 @@
       .activity-time { grid-column: 2; grid-row: 2; }
       .activity-rail { grid-column: 1; grid-row: 1 / span 2; }
       .activity-event-body { grid-column: 2; grid-row: 1; }
-      .activity-controls select { width: 100%; }
+      .activity-controls select, .activity-controls input[type="search"] { width: 100%; }
       .activity-controls label { flex: 1 1 100%; }
+      .automation-card { grid-template-columns: 1fr; }
+      .automation-card-side { text-align: left; }
+      .automation-empty { grid-template-columns: 1fr; }
+      .automation-form-grid { grid-template-columns: 1fr; }
+      .automation-form-grid .full { grid-column: auto; }
+      .data-table.page-memory { table-layout: auto; }
+      .data-table.page-memory thead { display: none; }
+      .data-table.page-memory, .data-table.page-memory tbody { display: block; }
+      .data-table.page-memory tr { display: grid; grid-template-columns: minmax(0,1fr) auto; border-bottom: 1px solid var(--border); }
+      .data-table.page-memory tbody tr:last-child { border-bottom: 0; }
+      .data-table.page-memory td { border-bottom: 0; }
+      .data-table.page-memory .memory-context-cell { grid-column: 1; grid-row: 2; padding-top: 4px; }
+      .data-table.page-memory .memory-text-cell { grid-column: 1 / -1; grid-row: 1; padding-bottom: 8px; }
+      .data-table.page-memory .detail-column { grid-column: 2; grid-row: 2; align-self: center; }
+      .memory-context-head { justify-content: flex-start; flex-wrap: wrap; }
+      .data-table.page-jobs { table-layout: auto; }
+      .data-table.page-jobs thead { display: none; }
+      .data-table.page-jobs, .data-table.page-jobs tbody { display: block; }
+      .data-table.page-jobs tr { display: grid; grid-template-columns: minmax(0,1fr) auto; border-bottom: 1px solid var(--border); }
+      .data-table.page-jobs tbody tr:last-child { border-bottom: 0; }
+      .data-table.page-jobs td { border-bottom: 0; }
+      .data-table.page-jobs .job-context-cell { grid-column: 1; grid-row: 1; }
+      .data-table.page-jobs .job-execution-cell { grid-column: 1 / -1; grid-row: 2; padding-top: 4px; }
+      .data-table.page-jobs .detail-column { grid-column: 2; grid-row: 1; align-self: center; }
+      .job-context-head { justify-content: flex-start; flex-wrap: wrap; }
     }
   </style>
 </head>
@@ -327,39 +488,43 @@
       </a>
       <nav aria-label="Management sections">
         <div class="nav-group">
-          <div class="nav-group-label">Live operations</div>
-          <a href="/admin"{{if eq .Page "overview"}} aria-current="page"{{end}}>Activity</a>
+          <div class="nav-group-label">Operations</div>
+          <a href="/admin/activity"{{if eq .Page "activity"}} aria-current="page"{{end}}>Activity</a>
+          <a href="/admin"{{if eq .Page "overview"}} aria-current="page"{{end}}>Dashboard</a>
           <a href="/admin/jobs"{{if eq .Page "jobs"}} aria-current="page"{{end}}>Agent work</a>
           <a href="/admin/approvals"{{if eq .Page "approvals"}} aria-current="page"{{end}}>Approvals</a>
         </div>
         <div class="nav-group">
-          <div class="nav-group-label">Behavior</div>
-          <a href="/admin/channels"{{if eq .Page "channels"}} aria-current="page"{{end}}>Channel coverage</a>
-          <a href="/admin/decisions"{{if eq .Page "decisions"}} aria-current="page"{{end}}>Decisions</a>
-          <a href="/admin/context"{{if eq .Page "context"}} aria-current="page"{{end}}>Context health</a>
-          <a href="/admin/directives"{{if eq .Page "directives"}} aria-current="page"{{end}}>Channel directives</a>
-          <a href="/admin/notes"{{if eq .Page "notes"}} aria-current="page"{{end}}>Learned notes</a>
+          <div class="nav-group-label">Manage</div>
+          <a href="/admin/channels"{{if eq .Page "channels"}} aria-current="page"{{end}}>Channels</a>
+          <a href="/admin/directives"{{if eq .Page "directives"}} aria-current="page"{{end}}>Directives</a>
           <a href="/admin/memory"{{if eq .Page "memory"}} aria-current="page"{{end}}>Agent memory</a>
+          <a href="/admin/routines"{{if eq .Page "routines"}} aria-current="page"{{end}}>Automation</a>
         </div>
-        <div class="nav-group">
-          <div class="nav-group-label">Automation</div>
-          <a href="/admin/routines"{{if eq .Page "routines"}} aria-current="page"{{end}}>Scheduled routines</a>
-          <a href="/admin/triggers"{{if eq .Page "triggers"}} aria-current="page"{{end}}>Event triggers</a>
-        </div>
-        <div class="nav-group">
-          <div class="nav-group-label">Configuration</div>
-          <a href="/admin/routes"{{if eq .Page "routes"}} aria-current="page"{{end}}>Model routing</a>
-          <a href="/admin/marketplaces"{{if eq .Page "marketplaces"}} aria-current="page"{{end}}>Skills</a>
-          <a href="/admin/tools"{{if eq .Page "tools"}} aria-current="page"{{end}}>Tools</a>
-          <a href="/admin/keystore"{{if eq .Page "keystore"}} aria-current="page"{{end}}>Secrets</a>
-        </div>
-        <div class="nav-group">
-          <div class="nav-group-label">Diagnostics</div>
-          <a href="/admin/observations"{{if eq .Page "observations"}} aria-current="page"{{end}}>Message intake</a>
-          <a href="/admin/usage"{{if eq .Page "usage"}} aria-current="page"{{end}}>Usage &amp; latency</a>
-          <a href="/admin/audit"{{if eq .Page "audit"}} aria-current="page"{{end}}>Audit log</a>
-          <a href="/admin/retention"{{if eq .Page "retention"}} aria-current="page"{{end}}>Data retention</a>
-        </div>
+        <details class="nav-more"{{if or (eq .Page "decisions") (eq .Page "context") (eq .Page "notes") (eq .Page "triggers") (eq .Page "routes") (eq .Page "marketplaces") (eq .Page "tools") (eq .Page "keystore") (eq .Page "observations") (eq .Page "usage") (eq .Page "audit") (eq .Page "retention")}} open{{end}}>
+          <summary>Advanced</summary>
+          <div class="nav-group">
+            <div class="nav-group-label">Behavior</div>
+            <a href="/admin/decisions"{{if eq .Page "decisions"}} aria-current="page"{{end}}>Classifier decisions</a>
+            <a href="/admin/context"{{if eq .Page "context"}} aria-current="page"{{end}}>Context health</a>
+            <a href="/admin/notes"{{if eq .Page "notes"}} aria-current="page"{{end}}>Learned notes</a>
+            <a href="/admin/triggers"{{if eq .Page "triggers"}} aria-current="page"{{end}}>Event triggers</a>
+          </div>
+          <div class="nav-group">
+            <div class="nav-group-label">Configuration</div>
+            <a href="/admin/routes"{{if eq .Page "routes"}} aria-current="page"{{end}}>Model routing</a>
+            <a href="/admin/marketplaces"{{if eq .Page "marketplaces"}} aria-current="page"{{end}}>Skills</a>
+            <a href="/admin/tools"{{if eq .Page "tools"}} aria-current="page"{{end}}>Tools</a>
+            <a href="/admin/keystore"{{if eq .Page "keystore"}} aria-current="page"{{end}}>Secrets</a>
+          </div>
+          <div class="nav-group">
+            <div class="nav-group-label">Diagnostics</div>
+            <a href="/admin/observations"{{if eq .Page "observations"}} aria-current="page"{{end}}>Message intake</a>
+            <a href="/admin/usage"{{if eq .Page "usage"}} aria-current="page"{{end}}>Usage &amp; latency</a>
+            <a href="/admin/audit"{{if eq .Page "audit"}} aria-current="page"{{end}}>Audit log</a>
+            <a href="/admin/retention"{{if eq .Page "retention"}} aria-current="page"{{end}}>Data retention</a>
+          </div>
+        </details>
       </nav>
     </aside>
     <div class="main-column">
@@ -370,23 +535,22 @@
           <p>{{.Description}}</p>
         </div>
         <main>
-    {{if eq .Page "overview"}}
+    {{if eq .Page "activity"}}
     <section class="wide live-activity-panel">
       <div class="activity-console-head">
-        <div>
-          <div class="activity-live-label"><span id="activityConnectionDot" class="activity-connection-dot" aria-hidden="true"></span><span id="activityConnection">Connecting live feed…</span></div>
-          <h2>Real-time control-plane activity</h2>
-          <p class="muted">A safe operational timeline. Public message excerpts and classifier results are visible; restricted content and Codex payloads remain redacted.</p>
-        </div>
+        <div class="activity-live-label"><span id="activityConnectionDot" class="activity-connection-dot" aria-hidden="true"></span><span id="activityConnection">Connecting live feed…</span></div>
         <div class="activity-controls">
+          <label for="activitySearch"><span class="sr-only">Filter events by text</span><input id="activitySearch" type="search" placeholder="Filter events…"></label>
           <label for="activityFilter"><span class="sr-only">Activity category</span><select id="activityFilter"><option value="">All activity</option><option value="classifier">Classifier</option><option value="codex">Codex</option><option value="slack">Slack</option><option value="agent">Agent work</option><option value="tool">Tools</option><option value="delivery">Delivery</option><option value="system">System</option></select></label>
+          <button type="button" id="activitySignal" class="secondary-button active" title="Hide routine plumbing events and keep decisions, work, answers, and problems">Key events</button>
           <button type="button" id="pauseActivity" class="secondary-button">Pause</button>
           <button type="button" id="clearActivity" class="secondary-button">Clear view</button>
         </div>
       </div>
-      <div class="activity-console-meta"><span id="activityCount">Waiting for activity</span><span>Newest first · SSE</span></div>
+      <div class="activity-console-meta"><span id="activityCount">Waiting for activity</span><span id="activityPulse" class="activity-pulse" title="Counts across the retained event window">Newest first · live</span></div>
       <div id="liveActivity" class="live-activity-feed" aria-live="polite"><div class="activity-empty">Connecting to the live event stream…</div></div>
     </section>
+    {{else if eq .Page "overview"}}
     <div id="overviewMetrics" class="overview-metrics" aria-live="polite"></div>
     <section class="wide attention-panel" id="attentionPanel"><div class="data-state">Checking for items that need attention…</div></section>
     <section class="wide split-panel">
@@ -404,6 +568,69 @@
         <section class="wide"><h2>Retention reconciler</h2><pre id="retention">Loading…</pre></section>
       </div>
     </details>
+    {{else if eq .Page "directives"}}
+    <section class="wide directive-workspace">
+      <div class="directive-layout">
+        <aside class="directive-sidebar">
+          <h2>Configured channels</h2>
+          <p class="muted">Active directives currently shaping classifier and agent behavior.</p>
+          <div id="directiveOverview" class="directive-list" aria-live="polite"><div class="data-state">Loading directives…</div></div>
+        </aside>
+        <div class="directive-editor">
+          <div class="directive-editor-head">
+            <div><div class="section-label">Channel behavior</div><h2 id="directiveEditorTitle">Select a channel</h2><p class="muted" id="directiveEditorSummary">Create or revise the instruction used by both classifier and full-agent work.</p></div>
+            <span id="directiveActiveStatus" class="directive-status">No directive</span>
+          </div>
+          <form id="directiveForm">
+            <label for="directiveChannel">Channel</label>
+            <select id="directiveChannel" required><option value="">Loading channels…</option></select>
+            <label for="directivePrompt">Directive</label>
+            <textarea id="directivePrompt" maxlength="3000" required placeholder="Describe how Tag should behave in this channel."></textarea>
+            <div class="directive-form-meta"><span>Applies only to this channel and cannot override tool or safety policy.</span><span id="directiveCharacters">0 / 3000</span></div>
+            <div class="directive-form-actions"><button type="submit" id="saveDirective">Save and activate</button><button type="button" id="resetDirective" class="secondary-button">Reset</button></div>
+            <div id="directiveNotice" class="directive-notice" role="status" aria-live="polite"></div>
+          </form>
+          <div class="directive-history">
+            <div class="section-heading"><div><h2>Revision history</h2><p class="muted">Every save creates a revision. Restore an earlier instruction without losing history.</p></div></div>
+            <div id="directiveHistory" class="directive-history-list" aria-live="polite"><div class="data-state">Select a channel to inspect its history.</div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+    {{else if eq .Page "routines"}}
+    <div id="automationSummary" class="summary-cards" aria-live="polite"></div>
+    <section class="wide">
+      <div class="section-heading">
+        <div><h2>Classifier-gated schedules</h2><p class="muted">Cron-triggered checks that inspect fresh channel context and start agent work only when the classifier admits it.</p></div>
+        <div class="automation-actions"><span class="record-count" id="automationCount"></span><button type="button" id="newAutomation">New schedule</button><button type="button" id="refreshAutomation" class="secondary-button">Refresh</button></div>
+      </div>
+      <div id="automationSchedules" class="automation-list" aria-live="polite"><div class="data-state">Loading schedules…</div></div>
+    </section>
+    <section class="wide">
+      <div class="section-heading"><div><h2>Direct scheduled work</h2><p class="muted">Legacy operator-managed routines that enqueue work at each due window without the heartbeat classifier gate.</p></div><span class="record-count" id="routineCount"></span></div>
+      <div id="automationRoutines" class="automation-list" aria-live="polite"><div class="data-state">Loading routines…</div></div>
+    </section>
+    <section class="wide automation-guide">
+      <div><strong>Use cron and a timezone</strong><span>Schedules use standard five-field cron, such as <code>0 9 * * 1-5</code>, plus an explicit IANA timezone.</span></div>
+      <div><strong>Classifier-gated by default</strong><span>A due schedule can still stay silent. Policy, membership, context privacy, confidence, and output controls are rechecked every run.</span></div>
+      <div><strong>Manage here or from Slack</strong><span>Create and edit schedules here, or ask Tag in the destination channel to create, update, pause, resume, or list its automations.</span></div>
+    </section>
+    <dialog id="automationDialog" class="record-dialog">
+      <div class="dialog-head"><div><div class="section-label">Classifier-gated schedule</div><h2 id="automationDialogTitle">New automation</h2></div><button type="button" id="closeAutomationDialog" class="icon-button" aria-label="Close automation editor">×</button></div>
+      <form id="automationForm">
+        <div class="automation-form-grid">
+          <div><label for="automationID">Stable name</label><input id="automationID" required maxlength="80" pattern="[a-z0-9][a-z0-9-]*" placeholder="daily-operations-check"><p class="form-help">Lowercase letters, numbers, and hyphens.</p></div>
+          <div><label for="automationChannel">Channel</label><select id="automationChannel" required><option value="">Loading channels…</option></select></div>
+          <div class="full"><label for="automationInstruction">What should Tag check?</label><textarea id="automationInstruction" required maxlength="3000" placeholder="Review recent channel context and report only when an unresolved issue needs attention."></textarea></div>
+          <div><label for="automationCron">Cron schedule</label><input id="automationCron" required value="0 9 * * 1-5" placeholder="0 9 * * 1-5"><p class="form-help">minute · hour · day of month · month · day of week</p></div>
+          <div><label for="automationTimezone">Timezone</label><input id="automationTimezone" required value="UTC" placeholder="America/Vancouver"><p class="form-help">Use an IANA timezone name.</p></div>
+          <div><label for="automationConfidence">Minimum classifier confidence</label><input id="automationConfidence" type="number" min="0" max="1" step="0.05" value="0.8" required></div>
+          <label class="automation-enabled"><input id="automationEnabled" type="checkbox" checked> Enabled after save</label>
+        </div>
+        <div class="directive-form-actions"><button type="submit" id="saveAutomation">Save schedule</button><button type="button" id="cancelAutomation" class="secondary-button">Cancel</button></div>
+        <div id="automationNotice" class="dialog-notice" role="status" aria-live="polite"></div>
+      </form>
+    </dialog>
     {{else if eq .Page "keystore"}}
     <section class="wide">
       <h2>Write-only keystore</h2>
@@ -418,7 +645,7 @@
     </section>
     {{else}}
     <section class="wide data-section">
-      <div class="section-heading"><div><h2>{{.Title}}</h2><p class="muted" id="viewGuidance">Loading organization data…</p></div><span class="record-count" id="recordCount"></span></div>
+      <div class="section-heading"><div><h2>{{.Title}}</h2><p class="muted" id="viewGuidance">Loading organization data…</p></div><div class="heading-actions"><span class="record-count" id="recordCount"></span><button type="button" id="refreshData" class="secondary-button">Refresh</button></div></div>
       <div id="summaryCards" class="summary-cards" aria-live="polite"></div>
       <div id="dataToolbar" class="data-toolbar" hidden>
         <label class="search-control" for="dataSearch"><span class="sr-only">Search records</span><input id="dataSearch" type="search" placeholder="Search records"></label>
@@ -446,9 +673,10 @@
 
     const pageViews = {
       channels: {
-        guidance: 'Search by channel name, then filter by participation mode. Open details for limits and membership metadata.',
+        guidance: 'Change a channel\'s participation mode directly with its dropdown. Search by name, filter by mode, and open details for limits and membership metadata.',
+        empty: 'No conversations are known yet. Channels appear here once the Slack app is installed or the stub delivers its first event.',
         search: 'Find a channel…', filter: {key: 'participation_mode', label: 'mode'},
-        columns: ['name', {key:'participation_mode', label:'Mode'}, {key:'bot_is_member', label:'Tag joined'}, 'restricted', 'kill_switch', 'membership_refreshed_at'],
+        columns: ['name', {key:'participation_mode', label:'Mode'}, {key:'context_history_mode', label:'Context'}, {key:'bot_is_member', label:'Tag joined'}, 'restricted', 'kill_switch', 'membership_refreshed_at'],
         summaries: rows => [
           {label:'Known channels', value:rows.length, detail:'Visible to the installed Slack app'},
           {label:'Can participate', value:rows.filter(row => ['assist','proactive'].includes(row.participation_mode) && row.enrolled && !row.kill_switch && (!row.participation_managed_by_membership || row.bot_is_member)).length, detail:'Joined assist/proactive channels passing safeguards'},
@@ -458,8 +686,9 @@
       },
       jobs: {
         guidance: 'Focus on outcome and timing. Use details for correlation IDs, routing traces, and retry evidence.',
+        empty: 'No agent work has been admitted yet. Jobs appear here the moment the classifier requests a full agent.',
         search: 'Find work by channel, state, or model…', filter: {key: 'state', label: 'status'},
-        columns: ['state', 'kind', {key:'channel_id', label:'Channel'}, {key:'resolved_model', label:'Model'}, 'attempt', 'created_at', 'updated_at', 'failure_reason'],
+        columns: [{key:'job_context', label:'Job', derived:true}, {key:'job_execution', label:'Execution', derived:true}],
         summaries: rows => [
           {label:'In progress', value:rows.filter(row => ['queued','leased','running'].includes(row.state)).length, detail:'Queued or actively executing'},
           {label:'Succeeded', value:rows.filter(row => row.state === 'succeeded').length, detail:'Completed in this result window'},
@@ -469,6 +698,7 @@
       },
       decisions: {
         guidance: 'Review the effective outcome first; open details to compare the raw prediction, policy override, and evidence.',
+        empty: 'No classifier decisions yet. Every considered message will leave a decision record here, including deliberate silence.',
         search: 'Find decisions by outcome, reaction, or model…', filter: {key: 'result.effective.outcome', label: 'outcome'},
         columns: ['created_at', {key:'result.effective.outcome', label:'Outcome'}, {key:'result.effective.confidence', label:'Confidence'}, {key:'result.effective.reaction', label:'Reaction'}, {key:'result.effective.agent_model_profile', label:'Agent model'}, {key:'result.shadowed', label:'Shadowed'}],
         summaries: rows => [
@@ -480,6 +710,7 @@
       },
       observations: {
         guidance: 'Use this diagnostic view to confirm that Slack events were normalized, scoped, and considered exactly once.',
+        empty: 'No Slack events have been ingested yet for this organization.',
         search: 'Find intake events by channel or event type…', filter: {key: 'decision_state', label: 'processing state'},
         columns: ['received_at', {key:'channel_id', label:'Channel'}, 'event_type', 'is_mention', 'restricted', 'decision_state', 'output_produced'],
         summaries: rows => [
@@ -491,6 +722,7 @@
       },
       context: {
         guidance: 'Each row is a bounded, immutable context pack. Source count indicates breadth without exposing message content.',
+        empty: 'No context packs have been built yet. They are created when the classifier considers a message.',
         search: 'Find a context pack…',
         columns: ['created_at', 'expires_at', 'source_count', 'revision', 'target_observation_id'],
         summaries: rows => [
@@ -502,6 +734,7 @@
       },
       approvals: {
         guidance: 'Pending write actions appear here after Slack-native approval is requested. Resolved requests remain available as evidence.',
+        empty: 'Nothing is waiting for approval. Non-read tool actions pause here for a human decision before they run.',
         search: 'Find an approval…', filter: {key: 'status', label: 'status'},
         columns: ['status', 'action', 'risk', 'requested_at', 'expires_at', 'resolved_at'],
         summaries: rows => [
@@ -511,13 +744,55 @@
           {label:'Expired', value:rows.filter(row => row.status === 'expired').length, detail:'No longer actionable'}
         ]
       },
-      routines: {guidance:'Recurring work is classifier-gated before any output. Open details for instructions, confidence, and schedule.', search:'Find a routine…', filter:{key:'enabled',label:'state'}, columns:['id','enabled','kind','interval_seconds','next_run','min_confidence']},
-      triggers: {guidance:'Event subscriptions connect a bounded event pattern to reviewed agent work.', search:'Find a trigger…', filter:{key:'enabled',label:'state'}, columns:['id','enabled','event_type','channel_id','kind','created_at']},
-      directives: {guidance:'Directives are channel-specific instructions assembled into both classifier and worker context.', search:'Find a directive…', filter:{key:'state',label:'state'}, columns:['channel_id','state','revision_id','created_at','activated_at','actor_id']},
-      notes: {guidance:'Learned notes stay local to their channel and require review before becoming active context.', search:'Find a learned note…', filter:{key:'state',label:'state'}, columns:['channel_id','state','text','created_at','reviewed_at']},
+      routines: {
+        guidance:'Recurring work is classifier-gated before any output. Open details for instructions, confidence, and schedule.',
+        empty:'No scheduled routines are configured for this organization.',
+        search:'Find a routine…', filter:{key:'enabled',label:'state'}, columns:['id','enabled','kind',{key:'interval_seconds',label:'Interval'},'next_run','min_confidence'],
+        summaries: rows => [
+          {label:'Routines', value:rows.length, detail:'Configured recurring work'},
+          {label:'Enabled', value:rows.filter(row => row.enabled).length, detail:'Will run on schedule'},
+          {label:'Due within the hour', value:rows.filter(row => { const hours = hoursUntil(row.next_run); return hours >= 0 && hours <= 1; }).length, detail:'Next run is coming up soon'},
+          {label:'Paused', value:rows.filter(row => !row.enabled).length, detail:'Configured but not running'}
+        ]
+      },
+      triggers: {
+        guidance:'Event subscriptions connect a bounded event pattern to reviewed agent work.',
+        empty:'No event triggers are configured. Operator-created triggers can launch agent work when their conditions match.',
+        search:'Find a trigger…', filter:{key:'enabled',label:'state'}, columns:['id','enabled','event_type','channel_id','kind','created_at'],
+        summaries: rows => [
+          {label:'Triggers', value:rows.length, detail:'Event subscriptions'},
+          {label:'Enabled', value:rows.filter(row => row.enabled).length, detail:'Actively matching events'},
+          {label:'Event types', value:new Set(rows.map(row => row.event_type).filter(Boolean)).size, detail:'Distinct patterns watched'},
+          {label:'Channels', value:new Set(rows.map(row => row.channel_id).filter(Boolean)).size, detail:'Conversations with triggers'}
+        ]
+      },
+      directives: {
+        guidance:'Directives are channel-specific instructions assembled into both classifier and worker context.',
+        empty:'No channel directives exist yet. Create one in Slack with /tag-directive to shape behavior per channel.',
+        search:'Find a directive…', filter:{key:'state',label:'state'}, columns:['channel_id','state','revision_id','created_at','activated_at','actor_id'],
+        summaries: rows => [
+          {label:'Directive revisions', value:rows.length, detail:'All recorded revisions'},
+          {label:'Active', value:rows.filter(row => row.state === 'active').length, detail:'Currently shaping behavior'},
+          {label:'Draft', value:rows.filter(row => row.state === 'draft').length, detail:'Written but not activated'},
+          {label:'Channels', value:new Set(rows.map(row => row.channel_id).filter(Boolean)).size, detail:'Conversations with directives'}
+        ]
+      },
+      notes: {
+        guidance:'Learned notes stay local to their channel and require review before becoming active context.',
+        empty:'No learned notes have been proposed yet.',
+        search:'Find a learned note…', filter:{key:'state',label:'state'}, columns:['channel_id','state','text','created_at','reviewed_at'],
+        summaries: rows => [
+          {label:'Learned notes', value:rows.length, detail:'Channel-local knowledge'},
+          {label:'Awaiting review', value:rows.filter(row => ['proposed','pending'].includes(row.state)).length, detail:'Need an operator decision', tone:'attention'},
+          {label:'Active', value:rows.filter(row => ['active','approved'].includes(row.state)).length, detail:'Used as future context'},
+          {label:'Channels', value:new Set(rows.map(row => row.channel_id).filter(Boolean)).size, detail:'Conversations with notes'}
+        ]
+      },
       memory: {
-        guidance:'Source-linked summaries are generated asynchronously by Luna. Open a record to correct, pin, or forget it.', search:'Find remembered context…', filter:{key:'status',label:'status'},
-        columns:['updated_at',{key:'channel_id',label:'Channel'},'scope','status','pinned','confidence','text'],
+        guidance:'Source-linked summaries are generated asynchronously by Luna. Open a record to correct, pin, or forget it.',
+        empty:'Nothing has been remembered yet. Durable memory is consolidated asynchronously from observed conversations.',
+        search:'Find remembered context…', filter:{key:'status',label:'status'},
+        columns:[{key:'memory_context',label:'Context',derived:true},{key:'text',label:'Memory'}],
         summaries: rows => [
           {label:'Active memories', value:rows.filter(row => row.status === 'active' && (row.origin === 'operator' || (row.facts || []).length > 0)).length, detail:'Eligible for privacy-scoped recall'},
           {label:'Pinned', value:rows.filter(row => row.pinned).length, detail:'Retained until explicitly changed'},
@@ -525,12 +800,38 @@
           {label:'Forgotten', value:rows.filter(row => row.status === 'forgotten').length, detail:'Content erased; source hash tombstone retained'}
         ]
       },
-      routes: {guidance:'Profiles describe available model strength. Open details for token limits, capabilities, and policy metadata.', search:'Find a model profile…', filter:{key:'enabled',label:'state'}, columns:['id','model_id','variant','enabled','max_input_tokens','max_output_tokens']},
-      marketplaces: {guidance:'Validated skill snapshots are injected read-only into every admitted worker.', search:'Find a skill package…', columns:['name','version','hash','marketplace_id']},
-      tools: {guidance:'Reviewed tools expose bounded operations—not arbitrary shell access. Open details for scope and integrity metadata.', search:'Find a reviewed tool…', columns:['name','version','hash','marketplace_id']},
-      usage: {guidance:'Filter by activity type to compare classifier, model, tool, worker, reaction, and delivery costs.', search:'Find usage by job, model, or category…', filter:{key:'category',label:'category'}, columns:['created_at','category','calls','job_id','duration_ms','input_tokens','output_tokens','model_id']},
-      audit: {guidance:'Receipts are ordered and hash-linked. Open details for resource metadata without exposing secrets or message content.', search:'Find an audit event…', filter:{key:'type',label:'event type'}, columns:['created_at','type','resource_id','sequence','retention_epoch']},
-      retention: {guidance:'Retention operates on stored source and derived records. This page reports lifecycle progress, not retained content.', columns:['last_started_at','last_finished_at','sweeps','deleted_sources','deleted_derived']}
+      routes: {guidance:'Profiles describe available model strength. Open details for token limits, capabilities, and policy metadata.', empty:'No model profiles are configured.', search:'Find a model profile…', filter:{key:'enabled',label:'state'}, columns:['id','model_id','variant','enabled','max_input_tokens','max_output_tokens']},
+      marketplaces: {guidance:'Validated skill snapshots are injected read-only into every admitted worker.', empty:'No skill packages are registered. Workers run without behavioral skills until a marketplace is configured.', search:'Find a skill package…', columns:['name','version','hash','marketplace_id']},
+      tools: {guidance:'Reviewed tools expose bounded operations—not arbitrary shell access. Open details for scope and integrity metadata.', empty:'No reviewed tools are registered. Agent jobs run without external capabilities until a tool marketplace is configured.', search:'Find a reviewed tool…', columns:['name','version','hash','marketplace_id']},
+      usage: {
+        guidance:'Filter by activity type to compare classifier, model, tool, worker, reaction, and delivery costs.',
+        empty:'No usage has been recorded yet.',
+        search:'Find usage by job, model, or category…', filter:{key:'category',label:'category'}, columns:['created_at','category','calls','job_id',{key:'duration_ms',label:'Duration'},'input_tokens','output_tokens','model_id'],
+        summaries: rows => {
+          const total = key => rows.reduce((sum, row) => sum + (Number(row[key]) || 0), 0);
+          const counts = {};
+          for (const row of rows) if (row.category) counts[row.category] = (counts[row.category] || 0) + 1;
+          const busiest = Object.entries(counts).sort((left, right) => right[1] - left[1])[0];
+          return [
+            {label:'Recorded calls', value:total('calls').toLocaleString(), detail:'Across the current result window'},
+            {label:'Input tokens', value:total('input_tokens').toLocaleString(), detail:'Prompt and context tokens consumed'},
+            {label:'Output tokens', value:total('output_tokens').toLocaleString(), detail:'Generated tokens returned'},
+            {label:'Busiest category', value:busiest ? humanize(busiest[0]) : '—', detail:busiest ? `${busiest[1]} of ${rows.length} usage records` : 'No activity recorded'}
+          ];
+        }
+      },
+      audit: {
+        guidance:'Receipts are ordered and hash-linked. Open details for resource metadata without exposing secrets or message content.',
+        empty:'No audit receipts have been appended yet.',
+        search:'Find an audit event…', filter:{key:'type',label:'event type'}, columns:['created_at','type','resource_id','sequence','retention_epoch'],
+        summaries: rows => [
+          {label:'Receipts', value:rows.length, detail:'Hash-linked records in this window'},
+          {label:'Event types', value:new Set(rows.map(row => row.type).filter(Boolean)).size, detail:'Distinct receipt types'},
+          {label:'Latest sequence', value:Math.max(0, ...rows.map(row => Number(row.sequence) || 0)).toLocaleString(), detail:'Most recent chain position'},
+          {label:'Last 24 hours', value:rows.filter(row => { const time = Date.parse(row.created_at); return Number.isFinite(time) && Date.now() - time < 86400000; }).length, detail:'Receipts appended in the last day'}
+        ]
+      },
+      retention: {guidance:'Retention operates on stored source and derived records. This page reports lifecycle progress, not retained content.', empty:'The retention reconciler has not completed a sweep yet.', columns:['last_started_at','last_finished_at','sweeps','deleted_sources','deleted_derived']}
     };
 
     function currentOrganization() { return organizationSelector.value || ''; }
@@ -547,11 +848,32 @@
       return formatter.format(seconds, 'second');
     }
     function normalizedColumn(column) { return typeof column === 'string' ? {key:column, label:humanize(column)} : column; }
+    function sentenceCase(value) { value = String(value); return value.charAt(0).toUpperCase() + value.slice(1); }
+    function pluralize(word) {
+      word = String(word);
+      if (word.endsWith('s') || word.endsWith('x') || word.endsWith('ch')) return word + 'es';
+      if (word.endsWith('y')) return word.slice(0, -1) + 'ies';
+      return word + 's';
+    }
+    function formatDurationMs(ms) {
+      if (!Number.isFinite(ms)) return String(ms);
+      if (ms < 1000) return Math.round(ms) + ' ms';
+      if (ms < 60000) return (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + ' s';
+      return Math.floor(ms / 60000) + ' m ' + Math.round((ms % 60000) / 1000) + ' s';
+    }
+    function formatSeconds(seconds) {
+      if (!Number.isFinite(seconds)) return String(seconds);
+      if (seconds < 60) return seconds + ' sec';
+      if (seconds < 3600) return Math.round(seconds / 60) + ' min';
+      if (seconds < 86400) return Math.round(seconds / 3600) + ' hr';
+      const days = Math.round(seconds / 86400);
+      return days + (days === 1 ? ' day' : ' days');
+    }
     function toneFor(value) {
       const normalized = String(value ?? '').toLowerCase();
-      if (['succeeded','approved','assist','proactive','active','enabled','reply_in_channel','reply_in_thread','react'].includes(normalized)) return 'good';
-      if (['queued','leased','running','pending','requested','observe','shadow'].includes(normalized)) return 'warn';
-      if (['failed','dead','cancelled','denied','expired','disabled'].includes(normalized)) return 'bad';
+      if (['succeeded','approved','assist','proactive','active','enabled','reply_in_channel','reply_in_thread','react','completed','ok','delivered'].includes(normalized)) return 'good';
+      if (['queued','leased','running','pending','requested','observe','shadow','proposed','draft'].includes(normalized)) return 'warn';
+      if (['failed','dead','cancelled','denied','expired','disabled','rejected'].includes(normalized)) return 'bad';
       return 'info';
     }
     function stateMessage(container, message) {
@@ -561,7 +883,7 @@
       state.textContent = message;
       container.append(state);
     }
-    function cellValue(value, key = '') {
+    function cellValue(value, key = '', full = false) {
       if (key === 'name' && (value === null || value === undefined || value === '')) return document.createTextNode('Unnamed conversation');
       if (value === null || value === undefined || value === '') return document.createTextNode('—');
       if (typeof value === 'boolean') {
@@ -572,6 +894,16 @@
       }
       if (key === 'channel_id' && channelNames.has(String(value))) return document.createTextNode('#' + channelNames.get(String(value)));
       if (key === 'cooldown' && Number.isFinite(Number(value))) return document.createTextNode(Math.round(Number(value) / 1e9) + ' sec');
+      if (key === 'duration_ms' && Number.isFinite(Number(value))) return document.createTextNode(formatDurationMs(Number(value)));
+      if (key === 'interval_seconds' && Number.isFinite(Number(value))) return document.createTextNode(formatSeconds(Number(value)));
+      if (!full && (key === 'hash' || key.endsWith('_hash')) && typeof value === 'string' && value.length > 14) {
+        const code = document.createElement('code');
+        code.className = 'id-code';
+        code.textContent = value.slice(0, 12) + '…';
+        code.title = value;
+        return code;
+      }
+      if (typeof value === 'number' && Number.isInteger(value) && ['calls','input_tokens','output_tokens','sequence','max_input_tokens','max_output_tokens','deleted_sources','deleted_derived','sweeps','source_count'].includes(key)) return document.createTextNode(value.toLocaleString());
       if (key.endsWith('_at') || key === 'received_at' || key === 'created_at' || key === 'updated_at' || key === 'next_run') {
         const time = document.createElement('time');
         time.dateTime = String(value);
@@ -594,7 +926,14 @@
       }
       if (key.endsWith('_id') || key === 'id') {
         const code = document.createElement('code');
-        code.textContent = String(value);
+        code.className = 'id-code';
+        const text = String(value);
+        if (!full && text.length > 18) {
+          code.textContent = text.slice(0, 16) + '…';
+          code.title = text;
+        } else {
+          code.textContent = text;
+        }
         return code;
       }
       return document.createTextNode(String(value));
@@ -628,7 +967,7 @@
       recordDetails.replaceChildren();
       for (const key of Object.keys(row).filter(key => !hiddenTableColumns.has(key))) {
         const term = document.createElement('dt'); term.textContent = humanize(key);
-        const detail = document.createElement('dd'); detail.append(cellValue(row[key], key));
+        const detail = document.createElement('dd'); detail.append(cellValue(row[key], key, true));
         recordDetails.append(term, detail);
       }
       if (page === 'memory' && row.id) {
@@ -672,6 +1011,82 @@
       tableState.page = 1;
       renderTablePage();
     }
+    function participationModeControl(row) {
+      const select = document.createElement('select');
+      select.className = 'mode-select';
+      for (const mode of ['observe', 'assist', 'proactive']) select.add(new Option(humanize(mode), mode, false, row.participation_mode === mode));
+      select.addEventListener('change', async () => {
+        select.disabled = true;
+        try {
+          const csrf = await fetchJSON('/admin/api/csrf');
+          await fetchJSON('/admin/api/channels', {
+            method: 'PUT',
+            headers: {'content-type': 'application/json', 'x-tos-tag-csrf': csrf.token},
+            body: JSON.stringify({...row, participation_mode: select.value, participation_managed_by_membership: false})
+          });
+          window.dispatchEvent(new CustomEvent('organizationchange'));
+        } catch (error) {
+          window.alert('Participation mode change failed: ' + error.message);
+          select.value = row.participation_mode;
+          select.disabled = false;
+        }
+      });
+      return select;
+    }
+    function memoryContext(row) {
+      const context = document.createElement('div'); context.className = 'memory-context';
+      const head = document.createElement('div'); head.className = 'memory-context-head';
+      const channel = document.createElement('span'); channel.className = 'memory-channel'; channel.append(cellValue(row.channel_id, 'channel_id'));
+      const updated = document.createElement('span'); updated.className = 'memory-updated'; updated.append(cellValue(row.updated_at, 'updated_at'));
+      head.append(channel, updated);
+
+      const signals = document.createElement('div'); signals.className = 'memory-signals';
+      signals.append(cellValue(row.status, 'status'));
+      const confidence = document.createElement('span'); confidence.className = 'memory-confidence';
+      confidence.textContent = Number.isFinite(Number(row.confidence)) ? Math.round(Number(row.confidence) * 100) + '% confidence' : 'Confidence unavailable';
+      signals.append(confidence);
+
+      const meta = document.createElement('div'); meta.className = 'memory-context-meta';
+      const scope = row.restricted ? 'Private channel scope' : sentenceCase(humanize(row.scope || 'channel')) + ' scope';
+      meta.textContent = scope + ' · ' + (row.pinned ? 'Pinned' : 'Not pinned');
+      context.append(head, signals, meta);
+      return context;
+    }
+    function jobContext(row) {
+      const context = document.createElement('div'); context.className = 'job-context';
+      const head = document.createElement('div'); head.className = 'job-context-head';
+      const kind = document.createElement('span'); kind.className = 'job-kind'; kind.textContent = sentenceCase(humanize(row.kind || 'agent work'));
+      const channel = document.createElement('span'); channel.className = 'job-channel'; channel.append(cellValue(row.channel_id, 'channel_id'));
+      head.append(kind, channel);
+
+      const signals = document.createElement('div'); signals.className = 'job-signals';
+      signals.append(cellValue(row.state, 'state'));
+      const attempt = document.createElement('span'); attempt.className = 'job-attempt';
+      const currentAttempt = Number(row.attempt) || 0;
+      const maxAttempts = Number(row.max_attempts) || 0;
+      attempt.textContent = maxAttempts ? `Attempt ${currentAttempt} of ${maxAttempts}` : `Attempt ${currentAttempt}`;
+      signals.append(attempt);
+      context.append(head, signals);
+      return context;
+    }
+    function jobExecution(row) {
+      const execution = document.createElement('div'); execution.className = 'job-execution';
+      const model = document.createElement('div'); model.className = 'job-model';
+      const modelName = row.resolved_model?.profile_id || row.resolved_model?.model_id || 'Model not resolved';
+      model.textContent = modelName; model.title = modelName;
+
+      const timeline = document.createElement('div'); timeline.className = 'job-timeline';
+      const created = document.createElement('span'); created.append('Created '); created.append(cellValue(row.created_at, 'created_at'));
+      const updated = document.createElement('span'); updated.append('Updated '); updated.append(cellValue(row.updated_at, 'updated_at'));
+      timeline.append(created, updated);
+      execution.append(model, timeline);
+      if (row.failure_reason) {
+        const failure = document.createElement('div'); failure.className = 'job-failure';
+        failure.textContent = 'Failure: ' + row.failure_reason;
+        execution.append(failure);
+      }
+      return execution;
+    }
     function renderTablePage() {
       pageData.replaceChildren();
       const total = tableState.filtered.length;
@@ -685,12 +1100,25 @@
       } else {
         const table = document.createElement('table'); table.className = 'data-table page-' + page;
         const head = table.createTHead().insertRow();
-        for (const column of tableState.columns) { const th = document.createElement('th'); th.scope = 'col'; th.textContent = column.label; head.append(th); }
+        for (const column of tableState.columns) {
+          const th = document.createElement('th'); th.scope = 'col'; th.textContent = column.label;
+          if (page === 'memory' && column.key === 'memory_context') th.className = 'memory-context-column';
+          if (page === 'jobs' && column.key === 'job_context') th.className = 'job-summary-column';
+          head.append(th);
+        }
         const detailHead = document.createElement('th'); detailHead.scope = 'col'; detailHead.className = 'detail-column'; detailHead.textContent = 'Details'; head.append(detailHead);
         const body = table.createTBody();
         for (const row of rows) {
           const tr = body.insertRow();
-          for (const column of tableState.columns) tr.insertCell().append(cellValue(valueAt(row, column.key), column.key));
+          for (const column of tableState.columns) {
+            const cell = tr.insertCell();
+            if (page === 'channels' && column.key === 'participation_mode') cell.append(participationModeControl(row));
+            else if (page === 'memory' && column.key === 'memory_context') { cell.className = 'memory-context-cell'; cell.append(memoryContext(row)); }
+            else if (page === 'memory' && column.key === 'text') { cell.className = 'memory-text-cell'; cell.append(cellValue(row.text, 'text')); }
+            else if (page === 'jobs' && column.key === 'job_context') { cell.className = 'job-context-cell'; cell.append(jobContext(row)); }
+            else if (page === 'jobs' && column.key === 'job_execution') { cell.className = 'job-execution-cell'; cell.append(jobExecution(row)); }
+            else cell.append(cellValue(valueAt(row, column.key), column.key));
+          }
           const actionCell = tr.insertCell(); actionCell.className = 'detail-column';
           const action = document.createElement('button'); action.type = 'button'; action.className = 'row-action'; action.textContent = 'Open'; action.addEventListener('click', () => openRecordDetails(row)); actionCell.append(action);
         }
@@ -724,7 +1152,7 @@
       }
       const available = new Set(rows.flatMap(row => Object.keys(row)));
       const configured = (config.columns || []).map(normalizedColumn);
-      const columns = configured.length ? configured.filter(column => column.key.includes('.') || available.has(column.key)) : [...available].filter(column => !hiddenTableColumns.has(column)).slice(0, 8).map(normalizedColumn);
+      const columns = configured.length ? configured.filter(column => column.derived || column.key.includes('.') || available.has(column.key)) : [...available].filter(column => !hiddenTableColumns.has(column)).slice(0, 8).map(normalizedColumn);
       if (!columns.length) {
         stateMessage(container, 'No data available.');
         return;
@@ -733,7 +1161,7 @@
       viewGuidance.textContent = config.guidance || 'Search recent records and open a row for complete redacted details.';
       recordCount.textContent = rows.length === 1 ? '1 record' : `${rows.length} records`;
       dataToolbar.hidden = false; dataSearch.placeholder = config.search || 'Search records…'; dataSearch.value = '';
-      dataFilter.replaceChildren(new Option(config.filter ? (config.filter.allLabel || `All ${config.filter.label}${String(config.filter.label).endsWith('s') ? 'es' : 's'}`) : 'All records', ''));
+      dataFilter.replaceChildren(new Option(config.filter ? (config.filter.allLabel || `All ${pluralize(config.filter.label)}`) : 'All records', ''));
       if (config.filter) for (const option of [...new Set(rows.map(row => valueAt(row, config.filter.key)).filter(value => value !== undefined && value !== null))].sort()) dataFilter.add(new Option(humanize(option), String(option)));
       dataFilter.parentElement.hidden = !config.filter;
       renderSummaryCards(rows, config); renderTablePage();
@@ -790,7 +1218,7 @@
       window.dispatchEvent(new CustomEvent('organizationchange'));
     }
 
-    if (page !== 'overview' && page !== 'keystore') {
+    if (page !== 'overview' && page !== 'activity' && page !== 'directives' && page !== 'routines' && page !== 'keystore') {
       async function loadScoped() {
         const organizationID = currentOrganization();
         if (!organizationID) return stateMessage(pageData, 'No organization selected.');
@@ -808,11 +1236,268 @@
           } else {
             renderData(pageData, await fetchJSON(url.pathname + url.search));
           }
+          recordCount.title = 'Updated ' + new Date().toLocaleTimeString();
         } catch (error) {
           stateMessage(pageData, error.message);
         }
       }
       window.addEventListener('organizationchange', loadScoped);
+      refreshData.addEventListener('click', loadScoped);
+    }
+
+    if (page === 'routines') {
+      let automationSubscriptions = [];
+      let directRoutines = [];
+      let automationChannels = [];
+
+      function automationChannelLabel(channelID) {
+        const name = channelNames.get(String(channelID));
+        return name ? '#' + name : 'Slack channel';
+      }
+      function automationScheduleLabel(row) {
+        if (row.cron) return {text:`${row.cron} · ${row.timezone || 'UTC'}`, legacy:false};
+        const seconds = Number(row.interval || 0) / 1e9;
+        return {text:seconds ? `Every ${formatSeconds(seconds)}` : 'Schedule unavailable', legacy:true};
+      }
+      function automationMetric(labelText, valueText, detailText, tone = '') {
+        const card = document.createElement('div'); card.className = 'insight-card' + (tone ? ' ' + tone : '');
+        const label = document.createElement('div'); label.className = 'label'; label.textContent = labelText;
+        const value = document.createElement('div'); value.className = 'value'; value.textContent = String(valueText);
+        const detail = document.createElement('div'); detail.className = 'detail'; detail.textContent = detailText;
+        card.append(label, value, detail); return card;
+      }
+      function renderAutomationSummary() {
+        const all = [...automationSubscriptions, ...directRoutines];
+        const active = all.filter(row => row.enabled).length;
+        const dueSoon = all.filter(row => row.enabled && hoursUntil(row.next_run) >= 0 && hoursUntil(row.next_run) <= 24).length;
+        const legacy = all.filter(row => !row.cron).length;
+        automationSummary.replaceChildren(
+          automationMetric('Automations', all.length, 'Classifier-gated schedules and direct routines'),
+          automationMetric('Active', active, 'Enabled and eligible to run'),
+          automationMetric('Next 24 hours', dueSoon, 'Scheduled to reach a due window soon'),
+          automationMetric('Needs cron migration', legacy, 'Older fixed-interval schedules', legacy ? 'attention' : '')
+        );
+      }
+      function automationCard(row, editable) {
+        const card = document.createElement('article'); card.className = 'automation-card';
+        const main = document.createElement('div'); main.className = 'automation-card-main';
+        const head = document.createElement('div'); head.className = 'automation-card-head';
+        const title = document.createElement('div'); title.className = 'automation-card-title'; title.textContent = row.id || 'Unnamed automation';
+        const state = document.createElement('span'); state.className = 'pill ' + (row.enabled ? 'good' : 'bad'); state.textContent = row.enabled ? 'Enabled' : 'Paused';
+        head.append(title, state);
+        const schedule = automationScheduleLabel(row);
+        if (schedule.legacy) { const legacy = document.createElement('span'); legacy.className = 'pill warn'; legacy.textContent = 'Legacy interval'; head.append(legacy); }
+        const copy = document.createElement('div'); copy.className = 'automation-card-copy'; copy.textContent = row.instruction || row.input || 'No instruction recorded.';
+        const meta = document.createElement('div'); meta.className = 'automation-card-meta';
+        const channel = document.createElement('span'); channel.textContent = automationChannelLabel(row.channel_id);
+        const cadence = document.createElement('span'); cadence.append('Schedule ', Object.assign(document.createElement('code'), {textContent:schedule.text}));
+        meta.append(channel, cadence);
+        if (row.classifier_gate) { const gate = document.createElement('span'); gate.textContent = `Classifier gate · ${Math.round(Number(row.min_confidence || 0) * 100)}% minimum`; meta.append(gate); }
+        main.append(head, copy, meta);
+        const side = document.createElement('div'); side.className = 'automation-card-side';
+        const nextLabel = document.createElement('div'); nextLabel.className = 'automation-next-label'; nextLabel.textContent = row.enabled ? 'Next run' : 'Schedule paused';
+        const next = document.createElement('div'); next.className = 'automation-next'; next.textContent = row.enabled ? relativeTime(row.next_run) : 'No work will start';
+        if (row.next_run) next.title = row.next_run;
+        side.append(nextLabel, next);
+        if (editable) { const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'secondary-button'; edit.textContent = 'Edit'; edit.addEventListener('click', () => openAutomationDialog(row)); side.append(edit); }
+        card.append(main, side); return card;
+      }
+      function renderAutomationLists() {
+        automationCount.textContent = `${automationSubscriptions.length} schedule${automationSubscriptions.length === 1 ? '' : 's'}`;
+        routineCount.textContent = `${directRoutines.length} routine${directRoutines.length === 1 ? '' : 's'}`;
+        automationSchedules.replaceChildren();
+        if (!automationSubscriptions.length) {
+          const empty = document.createElement('div'); empty.className = 'automation-empty';
+          const copy = document.createElement('div'); const title = document.createElement('strong'); title.textContent = 'No classifier-gated schedules yet'; const detail = document.createElement('span'); detail.textContent = 'Create a cron schedule here or ask Tag from the destination Slack channel.'; copy.append(title, detail);
+          const action = document.createElement('button'); action.type = 'button'; action.textContent = 'Create schedule'; action.addEventListener('click', () => openAutomationDialog());
+          empty.append(copy, action); automationSchedules.append(empty);
+        } else {
+          for (const row of automationSubscriptions) automationSchedules.append(automationCard(row, true));
+        }
+        automationRoutines.replaceChildren();
+        if (!directRoutines.length) stateMessage(automationRoutines, 'No direct scheduled routines are configured. Classifier-gated cron schedules are the recommended default.');
+        else for (const row of directRoutines) automationRoutines.append(automationCard(row, false));
+        renderAutomationSummary();
+      }
+      function resetAutomationForm() {
+        automationForm.reset(); automationID.disabled = false; automationChannel.disabled = false;
+        automationCron.value = '0 9 * * 1-5';
+        automationTimezone.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+        automationConfidence.value = '0.8'; automationEnabled.checked = true;
+        automationNotice.textContent = ''; automationNotice.className = 'dialog-notice';
+      }
+      function openAutomationDialog(row = null) {
+        resetAutomationForm();
+        automationDialogTitle.textContent = row ? 'Edit automation' : 'New automation';
+        if (row) {
+          automationID.value = row.id || ''; automationID.disabled = true;
+          automationChannel.value = row.channel_id || ''; automationChannel.disabled = true;
+          automationInstruction.value = row.instruction || '';
+          automationCron.value = row.cron || '';
+          automationTimezone.value = row.timezone || 'UTC';
+          automationConfidence.value = String(Number(row.min_confidence || 0)); automationEnabled.checked = Boolean(row.enabled);
+          if (!row.cron) { automationNotice.textContent = 'This older schedule uses a fixed interval. Enter a cron expression to migrate it when you save.'; }
+        }
+        automationDialog.showModal();
+      }
+      async function loadAutomationPage() {
+        const organizationID = currentOrganization();
+        if (!organizationID) return stateMessage(automationSchedules, 'No organization selected.');
+        stateMessage(automationSchedules, 'Loading schedules…'); stateMessage(automationRoutines, 'Loading routines…');
+        try {
+          const scope = '?organization_id=' + encodeURIComponent(organizationID);
+          const [subscriptions, routines, channels] = await Promise.all([
+            fetchJSON('/admin/api/trigger-subscriptions' + scope),
+            fetchJSON('/admin/api/routines' + scope),
+            fetchJSON('/admin/api/channels' + scope)
+          ]);
+          automationSubscriptions = Array.isArray(subscriptions) ? subscriptions : [];
+          directRoutines = Array.isArray(routines) ? routines : [];
+          automationChannels = (Array.isArray(channels) ? channels : []).filter(channel => channel.channel_id && channel.name && ['assist','proactive'].includes(channel.participation_mode) && !channel.kill_switch).sort((left,right) => String(left.name).localeCompare(String(right.name)));
+          channelNames = new Map((Array.isArray(channels) ? channels : []).filter(channel => channel.name).map(channel => [String(channel.channel_id), channel.name]));
+          automationChannel.replaceChildren(new Option('Select a participating channel…', ''));
+          for (const channel of automationChannels) automationChannel.add(new Option('#' + channel.name, channel.channel_id));
+          renderAutomationLists();
+        } catch (error) {
+          stateMessage(automationSchedules, `Unable to load automations: ${error.message}`);
+          stateMessage(automationRoutines, 'Direct routines are unavailable while automation data is incomplete.');
+        }
+      }
+      newAutomation.addEventListener('click', () => openAutomationDialog());
+      refreshAutomation.addEventListener('click', loadAutomationPage);
+      closeAutomationDialog.addEventListener('click', () => automationDialog.close());
+      cancelAutomation.addEventListener('click', () => automationDialog.close());
+      automationForm.addEventListener('submit', async event => {
+        event.preventDefault(); automationNotice.textContent = 'Validating and saving schedule…'; automationNotice.className = 'dialog-notice'; saveAutomation.disabled = true;
+        try {
+          const csrf = await fetchJSON('/admin/api/csrf');
+          await fetchJSON('/admin/api/trigger-subscriptions', {method:'PUT', headers:{'content-type':'application/json','x-tos-tag-csrf':csrf.token}, body:JSON.stringify({
+            organization_id:currentOrganization(), id:automationID.value, channel_id:automationChannel.value,
+            instruction:automationInstruction.value.trim(), cron:automationCron.value.trim(), timezone:automationTimezone.value.trim(),
+            min_confidence:Number(automationConfidence.value), enabled:automationEnabled.checked
+          })});
+          automationDialog.close(); await loadAutomationPage();
+        } catch (error) {
+          automationNotice.textContent = error.message; automationNotice.className = 'dialog-notice error';
+        } finally { saveAutomation.disabled = false; }
+      });
+      window.addEventListener('organizationchange', loadAutomationPage);
+    }
+
+    if (page === 'directives') {
+      let directiveRows = [];
+      let directiveChannels = [];
+
+      function directiveChannelName(channelID) {
+        const name = channelNames.get(String(channelID));
+        return name ? '#' + name : 'Slack channel';
+      }
+      function activeDirective(channelID) {
+        return directiveRows.find(row => row.channel_id === channelID && row.active) || null;
+      }
+      function channelDirectiveHistory(channelID) {
+        return directiveRows.filter(row => row.channel_id === channelID).sort((left, right) => Number(right.revision || 0) - Number(left.revision || 0));
+      }
+      function setDirectiveNotice(message, tone = '') {
+        directiveNotice.className = 'directive-notice' + (tone ? ' ' + tone : '');
+        directiveNotice.textContent = message;
+      }
+      function updateDirectiveCharacters() {
+        directiveCharacters.textContent = `${[...directivePrompt.value].length} / 3000`;
+      }
+      function selectDirectiveChannel(channelID) {
+        directiveChannel.value = channelID;
+        const url = new URL(window.location.href);
+        if (channelID) url.searchParams.set('channel_id', channelID); else url.searchParams.delete('channel_id');
+        history.replaceState(null, '', url);
+        renderDirectiveOverview();
+        renderDirectiveEditor();
+      }
+      function renderDirectiveOverview() {
+        directiveOverview.replaceChildren();
+        const configured = directiveChannels.filter(channel => activeDirective(channel.channel_id));
+        if (!configured.length) {
+          return stateMessage(directiveOverview, 'No active directives yet. Choose a channel to create the first one.');
+        }
+        for (const channel of configured) {
+          const active = activeDirective(channel.channel_id);
+          const button = document.createElement('button'); button.type = 'button'; button.className = 'directive-channel-button' + (directiveChannel.value === channel.channel_id ? ' active' : '');
+          const name = document.createElement('strong'); name.textContent = directiveChannelName(channel.channel_id);
+          const detail = document.createElement('span'); detail.textContent = `Revision ${active.revision} · ${String(active.prompt || '').slice(0, 72)}${String(active.prompt || '').length > 72 ? '…' : ''}`;
+          button.append(name, detail); button.addEventListener('click', () => selectDirectiveChannel(channel.channel_id)); directiveOverview.append(button);
+        }
+      }
+      function renderDirectiveEditor() {
+        const channelID = directiveChannel.value;
+        const active = activeDirective(channelID);
+        directiveEditorTitle.textContent = channelID ? directiveChannelName(channelID) : 'Select a channel';
+        directiveActiveStatus.textContent = active ? `Revision ${active.revision} active` : 'No directive';
+        directiveActiveStatus.className = 'directive-status' + (active ? ' active' : '');
+        directiveEditorSummary.textContent = active ? `Last updated ${relativeTime(active.created_at)}${active.created_by ? ' by ' + active.created_by : ''}. Saving creates and activates a new revision.` : 'Create the instruction used by both classifier and full-agent work.';
+        directivePrompt.value = active ? active.prompt : '';
+        directivePrompt.disabled = !channelID; saveDirective.disabled = !channelID; resetDirective.disabled = !channelID;
+        updateDirectiveCharacters(); setDirectiveNotice('');
+        directiveHistory.replaceChildren();
+        const revisions = channelDirectiveHistory(channelID);
+        if (!revisions.length) return stateMessage(directiveHistory, channelID ? 'No revisions for this channel yet.' : 'Select a channel to inspect its history.');
+        for (const revision of revisions) {
+          const row = document.createElement('div'); row.className = 'directive-revision';
+          const copy = document.createElement('div');
+          const title = document.createElement('div'); title.className = 'directive-revision-title'; title.textContent = `Revision ${revision.revision}${revision.active ? ' · active' : ''} · ${relativeTime(revision.created_at)}`;
+          const prompt = document.createElement('div'); prompt.className = 'directive-revision-copy'; prompt.textContent = revision.prompt;
+          copy.append(title, prompt); row.append(copy);
+          if (!revision.active) {
+            const restore = document.createElement('button'); restore.type = 'button'; restore.className = 'secondary-button'; restore.textContent = 'Restore';
+            restore.addEventListener('click', () => activateDirectiveRevision(revision)); row.append(restore);
+          }
+          directiveHistory.append(row);
+        }
+      }
+      async function activateDirectiveRevision(revision) {
+        setDirectiveNotice(`Activating revision ${revision.revision}…`);
+        try {
+          const csrf = await fetchJSON('/admin/api/csrf');
+          await fetchJSON('/admin/api/directives/activate', {method:'POST', headers:{'content-type':'application/json','x-tos-tag-csrf':csrf.token}, body:JSON.stringify({organization_id:currentOrganization(), channel_id:revision.channel_id, revision_id:revision.id})});
+          await loadDirectivePage(revision.channel_id);
+          setDirectiveNotice(`Revision ${revision.revision} is active.`, 'success');
+        } catch (error) { setDirectiveNotice(error.message, 'error'); }
+      }
+      async function loadDirectivePage(preferredChannel = '') {
+        const organizationID = currentOrganization();
+        if (!organizationID) return stateMessage(directiveOverview, 'No organization selected.');
+        try {
+          const [revisions, channels] = await Promise.all([
+            fetchJSON('/admin/api/directives?organization_id=' + encodeURIComponent(organizationID)),
+            fetchJSON('/admin/api/channels?organization_id=' + encodeURIComponent(organizationID))
+          ]);
+          directiveRows = Array.isArray(revisions) ? revisions : [];
+          directiveChannels = (Array.isArray(channels) ? channels : []).filter(channel => channel.channel_id && channel.name && !String(channel.name).startsWith('mpdm-') && !/^U[A-Z0-9]+$/.test(String(channel.name))).sort((left, right) => String(left.name).localeCompare(String(right.name)));
+          channelNames = new Map(directiveChannels.filter(channel => channel.name).map(channel => [String(channel.channel_id), channel.name]));
+          directiveChannel.replaceChildren(new Option('Select a channel…', ''));
+          for (const channel of directiveChannels) directiveChannel.add(new Option(directiveChannelName(channel.channel_id), channel.channel_id));
+          const requested = preferredChannel || new URLSearchParams(window.location.search).get('channel_id') || directiveRows.find(row => row.active)?.channel_id || directiveChannels.find(channel => ['assist','proactive'].includes(channel.participation_mode))?.channel_id || '';
+          selectDirectiveChannel(directiveChannels.some(channel => channel.channel_id === requested) ? requested : '');
+        } catch (error) {
+          stateMessage(directiveOverview, error.message); setDirectiveNotice(error.message, 'error');
+        }
+      }
+      directiveChannel.addEventListener('change', () => selectDirectiveChannel(directiveChannel.value));
+      directivePrompt.addEventListener('input', updateDirectiveCharacters);
+      resetDirective.addEventListener('click', renderDirectiveEditor);
+      directiveForm.addEventListener('submit', async event => {
+        event.preventDefault();
+        const channelID = directiveChannel.value; const prompt = directivePrompt.value.trim();
+        if (!channelID || !prompt) return setDirectiveNotice('Choose a channel and enter a directive.', 'error');
+        saveDirective.disabled = true; setDirectiveNotice('Saving and activating a new revision…');
+        try {
+          const csrf = await fetchJSON('/admin/api/csrf');
+          const headers = {'content-type':'application/json','x-tos-tag-csrf':csrf.token};
+          const revision = await fetchJSON('/admin/api/directives', {method:'POST', headers, body:JSON.stringify({organization_id:currentOrganization(), channel_id:channelID, prompt, actor_id:'management-ui'})});
+          await fetchJSON('/admin/api/directives/activate', {method:'POST', headers, body:JSON.stringify({organization_id:currentOrganization(), channel_id:channelID, revision_id:revision.id})});
+          await loadDirectivePage(channelID); setDirectiveNotice(`Revision ${revision.revision} saved and activated.`, 'success');
+        } catch (error) { setDirectiveNotice(error.message, 'error'); saveDirective.disabled = false; }
+      });
+      window.addEventListener('organizationchange', () => loadDirectivePage());
     }
 
     if (page === 'keystore') {
@@ -840,11 +1525,10 @@
       });
     }
 
-    if (page === 'overview') {
+    if (page === 'activity') {
       let activitySource = null;
       let activityRecords = [];
       let activityPaused = false;
-      let overviewRefreshTimer = null;
       const seenActivityIDs = new Set();
 
       function activityTimestamp(value) {
@@ -858,38 +1542,212 @@
         if (typeof value === 'number' && value >= 0 && value <= 1) return Math.round(value * 100) + '%';
         return String(value);
       }
+      let keyEventsOnly = true;
+      let pausedNewCount = 0;
+      const classifierOutcomeTags = {
+        reply_in_channel: 'Answer in channel',
+        reply_in_thread: 'Answer in thread',
+        silent: 'Stay quiet',
+        react: 'React',
+        start_background_job: 'Background job',
+        escalate_for_approval: 'Needs approval'
+      };
+      const activityTitleMap = {
+        'slack envelope persistence started': {title:'Storing incoming message', routine:true},
+        'slack envelope durably persisted': {title:'Message captured', routine:true},
+        'slack event normalized': {title:'Slack event normalized', routine:true},
+        'slack event durably accepted and acknowledged': {title:'Slack event accepted', routine:true},
+        'slack events api envelope received': {title:'Slack event received', routine:true},
+        'classification decision recorded': {title:'Decision recorded', routine:true},
+        'classifier acknowledgement reaction completed': {title:'Acknowledged with a reaction'},
+        'classifier direct reply durably enqueued': {title:'Quick reply queued'},
+        'agent job durably enqueued': {title:'Agent work queued'},
+        'agent job claimed': {title:'Worker claimed the job', routine:true},
+        'agent job running': {title:'Agent started working'},
+        'agent job completed': {title:'Agent work completed'},
+        'agent job execution failed': {title:'Agent work failed'},
+        'agent job start failed': {title:'Agent work failed to start'},
+        'agent job completion failed': {title:'Agent work completion failed'},
+        'agent job requeued': {title:'Agent work will retry'},
+        'agent job suspended awaiting slack approval': {title:'Paused — waiting for approval'},
+        'approved job queued for a fresh fenced worker': {title:'Approved — resuming work'},
+        'final slack delivery durably enqueued': {title:'Answer queued for delivery'},
+        'slack delivery requested': {title:'Delivery requested', routine:true},
+        'slack delivery claimed': {title:'Delivery in progress', routine:true},
+        'slack delivery part accepted': {title:'Message part posted', routine:true},
+        'slack delivery completed': {title:'Answer delivered to Slack'},
+        'slack delivery durably completed': {title:'Answer delivered to Slack'},
+        'slack reaction requested': {title:'Reaction requested', routine:true},
+        'slack reaction completed': {title:'Reaction added'},
+        'durable memory updated': {title:'Memory updated'},
+        'slack socket mode transport connected': {title:'Slack connected'},
+        'slack socket mode connecting': {title:'Connecting to Slack', routine:true},
+        'slack ingress started': {title:'Slack ingress started'},
+        'slack ingress start requested': {title:'Slack ingress starting', routine:true},
+        'heartbeat classifier gate evaluated': {title:'Heartbeat gate evaluated', routine:true},
+        'management action authorized and audited': {title:'Management action audited', routine:true},
+        'slack membership reconciliation completed': {title:'Channel membership refreshed', routine:true},
+        'slack user context sync started': {title:'Context sync started', routine:true},
+        'slack user context sync completed': {title:'Context sync completed', routine:true},
+        'slack user context discovery completed': {title:'Context discovery completed', routine:true},
+        'reviewed tool call completed': {title:'Reviewed tool call completed'},
+        'reviewed tool call failed': {title:'Reviewed tool call failed'}
+      };
+      const routineTitlePatterns = [
+        /thinking steps/, /reconcil/, /normaliz/, /acknowledg/, /persistence started/,
+        /socket mode (hello|loop|event stream)/, /context (sync|bootstrap|backfill|discovery)/,
+        /membership/, /heartbeat/, /^sent /, /^received /, /snapshot/
+      ];
+      function activityChips(record) {
+        const details = record.details || {};
+        const chips = [];
+        const consumed = new Set();
+        const add = (chip, ...keys) => {
+          if (chips.length >= 6) return;
+          chips.push(chip);
+          for (const key of keys) consumed.add(key);
+        };
+        if (details.outcome && record.kind !== 'classification.completed') add({text: humanize(details.outcome), tone: toneFor(details.outcome)}, 'outcome');
+        if (typeof details.confidence === 'number') add({text: Math.round(details.confidence * 100) + '% confident'}, 'confidence');
+        if (details.reaction) add({text: ':' + details.reaction + ':'}, 'reaction');
+        const modelKey = details.agent_model_profile ? 'agent_model_profile' : details.model_profile ? 'model_profile' : details.model_id ? 'model_id' : '';
+        const effortKey = details.agent_reasoning_effort ? 'agent_reasoning_effort' : details.reasoning_effort ? 'reasoning_effort' : '';
+        if (modelKey) add({text: String(details[modelKey]) + (effortKey ? ' · ' + details[effortKey] : '')}, ...(effortKey ? [modelKey, effortKey] : [modelKey]));
+        if (details.requires_full_agent === true) add({text:'full agent', tone:'warn'}, 'requires_full_agent');
+        if (details.shadowed === true) add({text:'shadowed'}, 'shadowed');
+        if (details.tool_id) add({text: String(details.tool_id) + (details.operation_id ? ' · ' + details.operation_id : ''), tone:'info'}, 'tool_id', 'operation_id');
+        else if (details.dynamic_tool) add({text: String(details.dynamic_tool), tone:'info'}, 'dynamic_tool');
+        if (details.method && record.kind === 'codex.rpc') add({text: String(details.method)}, 'method');
+        if (details.status && String(record.kind || '').startsWith('codex')) add({text: humanize(details.status), tone: toneFor(details.status)}, 'status');
+        if (details.duration_ms !== '' && Number.isFinite(Number(details.duration_ms))) add({text: formatDurationMs(Number(details.duration_ms))}, 'duration_ms');
+        if (Number(details.attempt) > 1) add({text: 'attempt ' + details.attempt, tone:'warn'}, 'attempt');
+        if (details.error_type) add({text: String(details.error_type), tone:'bad'}, 'error_type');
+        if (details.slack_error_code) add({text: String(details.slack_error_code), tone:'bad'}, 'slack_error_code');
+        return {chips, consumed};
+      }
+      function describeActivity(record) {
+        const details = record.details || {};
+        const raw = String(record.title || '').trim();
+        const lower = raw.toLowerCase();
+        const description = {title: raw ? sentenceCase(raw) : humanize(record.kind || 'activity'), summary: record.summary || '', routine: false};
+        description.consumedDetailKeys = new Set();
+        if (record.kind === 'classification.completed') {
+          description.title = details.shadowed === true ? 'Shadow classifier decision' : 'Classifier decision';
+          description.topTag = {text: classifierOutcomeTags[details.outcome] || humanize(details.outcome || 'unknown'), tone: toneFor(details.outcome)};
+          description.messageInDetails = true;
+          description.consumedDetailKeys.add('outcome');
+          description.summary = '';
+        } else if (record.kind === 'codex.rpc') {
+          description.routine = true;
+          description.summary = '';
+        } else if (record.kind === 'codex.tool') {
+          description.summary = '';
+        } else if (activityTitleMap[lower]) {
+          description.title = activityTitleMap[lower].title;
+          description.routine = Boolean(activityTitleMap[lower].routine);
+        } else if (routineTitlePatterns.some(pattern => pattern.test(lower))) {
+          description.routine = true;
+        }
+        if (record.level === 'warn' || record.level === 'error') description.routine = false;
+        const chipResult = activityChips(record);
+        description.chips = chipResult.chips;
+        for (const key of chipResult.consumed) description.consumedDetailKeys.add(key);
+        return description;
+      }
+      function matchesActivityQuery(record, description, query) {
+        if (!query) return true;
+        const haystack = [description.title, description.summary, record.message, record.title, record.category, JSON.stringify(record.details || {})].join(' ').toLowerCase();
+        if (haystack.includes(query)) return true;
+        const channelID = record.details && record.details.channel_id;
+        return Boolean(channelID && String(channelNames.get(String(channelID)) || '').toLowerCase().includes(query));
+      }
+      function renderActivityPulse() {
+        const counts = {answers:0, quiet:0, reactions:0, agentRuns:0, problems:0};
+        for (const record of activityRecords) {
+          if (record.kind === 'classification.completed') {
+            const outcome = record.details && record.details.outcome;
+            if (outcome === 'silent') counts.quiet++;
+            else if (outcome === 'react') counts.reactions++;
+            else counts.answers++;
+          }
+          if (String(record.title || '').toLowerCase() === 'agent job completed') counts.agentRuns++;
+          if (record.level === 'warn' || record.level === 'error') counts.problems++;
+        }
+        activityPulse.replaceChildren();
+        const parts = [
+          [counts.answers === 1 ? 'answer' : 'answers', counts.answers, ''],
+          ['quiet', counts.quiet, ''],
+          [counts.reactions === 1 ? 'reaction' : 'reactions', counts.reactions, ''],
+          [counts.agentRuns === 1 ? 'agent run' : 'agent runs', counts.agentRuns, ''],
+          [counts.problems === 1 ? 'problem' : 'problems', counts.problems, counts.problems ? 'pulse-bad' : '']
+        ];
+        for (const [labelText, count, tone] of parts) {
+          const item = document.createElement('span');
+          if (tone) item.className = tone;
+          const strong = document.createElement('strong'); strong.textContent = String(count);
+          item.append(strong, document.createTextNode(' ' + labelText));
+          activityPulse.append(item);
+        }
+      }
       function renderActivityFeed() {
         if (activityPaused) return;
+        renderActivityPulse();
         const selected = activityFilter.value;
-        const records = selected ? activityRecords.filter(record => record.category === selected) : activityRecords;
+        const query = (activitySearch.value || '').trim().toLowerCase();
+        let hiddenRoutine = 0;
+        const visible = [];
+        for (const record of activityRecords) {
+          if (selected && record.category !== selected) continue;
+          const description = describeActivity(record);
+          if (!matchesActivityQuery(record, description, query)) continue;
+          if (keyEventsOnly && description.routine) { hiddenRoutine++; continue; }
+          visible.push([record, description]);
+        }
         liveActivity.replaceChildren();
-        activityCount.textContent = `${records.length} visible event${records.length === 1 ? '' : 's'}`;
-        if (!records.length) {
+        const hiddenNote = hiddenRoutine ? ` · ${hiddenRoutine} routine hidden` : '';
+        activityCount.textContent = `${visible.length} event${visible.length === 1 ? '' : 's'} shown${hiddenNote}`;
+        if (!visible.length) {
           const empty = document.createElement('div'); empty.className = 'activity-empty';
-          empty.textContent = selected ? `No ${humanize(selected)} activity in the current window.` : 'No runtime activity has been observed yet.';
+          if (query || selected) empty.textContent = 'No events match the current filters.';
+          else if (keyEventsOnly && hiddenRoutine) empty.textContent = `No key events yet — ${hiddenRoutine} routine event${hiddenRoutine === 1 ? ' is' : 's are'} hidden. Switch to “All events” to see everything.`;
+          else empty.textContent = 'No runtime activity has been observed yet.';
           liveActivity.append(empty); return;
         }
-        for (const record of records.slice(0, 200)) {
+        for (const [record, description] of visible.slice(0, 200)) {
           const row = document.createElement('article');
-          row.className = `activity-event category-${record.category || 'system'} level-${record.level || 'info'}`;
-          const time = document.createElement('time'); time.className = 'activity-time'; time.dateTime = record.occurred_at || ''; time.textContent = activityTimestamp(record.occurred_at);
+          row.className = `activity-event category-${record.category || 'system'} level-${record.level || 'info'}${description.routine ? ' routine' : ''}`;
+          const time = document.createElement('time'); time.className = 'activity-time'; time.dateTime = record.occurred_at || ''; time.textContent = activityTimestamp(record.occurred_at); time.title = record.occurred_at || '';
           const rail = document.createElement('div'); rail.className = 'activity-rail'; const marker = document.createElement('span'); marker.className = 'activity-marker'; rail.append(marker);
           const body = document.createElement('div'); body.className = 'activity-event-body';
           const top = document.createElement('div'); top.className = 'activity-event-topline';
           const category = document.createElement('span'); category.className = 'activity-category'; category.textContent = humanize(record.category || 'system');
-          const title = document.createElement('span'); title.className = 'activity-event-title'; title.textContent = record.title || humanize(record.kind || 'activity');
-          top.append(category, title); body.append(top);
-          if (record.summary) { const summary = document.createElement('div'); summary.className = 'activity-event-summary'; summary.textContent = record.summary; body.append(summary); }
-          if (record.message) { const message = document.createElement('blockquote'); message.className = 'activity-message'; message.textContent = record.message; body.append(message); }
-          const detailsValue = record.details && typeof record.details === 'object' ? {...record.details} : {};
+          const title = document.createElement('span'); title.className = 'activity-event-title'; title.textContent = description.title;
+          top.append(category, title);
+          if (description.topTag) { const tag = document.createElement('span'); tag.className = 'pill ' + (description.topTag.tone || 'info'); tag.textContent = description.topTag.text; top.append(tag); }
+          if (description.chips.length) {
+            const chips = document.createElement('div'); chips.className = 'activity-chips';
+            for (const chip of description.chips) { const pill = document.createElement('span'); pill.className = 'pill' + (chip.tone ? ' ' + chip.tone : ''); pill.textContent = chip.text; chips.append(pill); }
+            top.append(chips);
+          }
+          body.append(top);
+          if (description.summary) { const summary = document.createElement('div'); summary.className = 'activity-event-summary'; summary.textContent = description.summary; body.append(summary); }
+          if (record.message && !description.messageInDetails) { const message = document.createElement('blockquote'); message.className = 'activity-message'; message.textContent = record.message; body.append(message); }
+          const detailsValue = {};
+          if (description.messageInDetails && record.message) detailsValue.message = record.message;
+          if (record.details && typeof record.details === 'object') Object.assign(detailsValue, record.details);
           if (detailsValue.channel_id && channelNames.has(String(detailsValue.channel_id))) detailsValue.channel = '#' + channelNames.get(String(detailsValue.channel_id));
-          const entries = Object.entries(detailsValue).filter(([, value]) => value !== '' && value !== null && value !== undefined);
+          const entries = Object.entries(detailsValue).filter(([key, value]) => value !== '' && value !== null && value !== undefined && !description.consumedDetailKeys.has(key));
           if (entries.length) {
             const details = document.createElement('details'); details.className = 'activity-details';
-            const disclosure = document.createElement('summary'); disclosure.textContent = 'Correlation and result details'; details.append(disclosure);
+            const disclosure = document.createElement('summary'); disclosure.title = 'Show details'; disclosure.setAttribute('aria-label', 'Show details'); details.append(disclosure);
             const list = document.createElement('dl');
-            for (const [key, value] of entries) { const term = document.createElement('dt'); term.textContent = humanize(key); const description = document.createElement('dd'); description.textContent = activityDetailValue(value); list.append(term, description); }
+            for (const [key, value] of entries) { const term = document.createElement('dt'); term.textContent = humanize(key); const definition = document.createElement('dd'); definition.textContent = activityDetailValue(value); list.append(term, definition); }
             details.append(list); body.append(details);
+            row.classList.add('expandable');
+            row.addEventListener('click', event => {
+              if (event.target.closest('summary, a, button, dl') || window.getSelection()?.toString()) return;
+              details.open = !details.open;
+            });
           }
           row.append(time, rail, body); liveActivity.append(row);
         }
@@ -902,19 +1760,23 @@
           const removed = activityRecords.splice(200);
           for (const item of removed) seenActivityIDs.delete(item.id);
         }
+        if (activityPaused) {
+          pausedNewCount++;
+          pauseActivity.textContent = `Resume (+${pausedNewCount})`;
+          return;
+        }
         renderActivityFeed();
       }
       function setActivityConnection(label, state) {
         activityConnection.textContent = label;
         activityConnectionDot.className = 'activity-connection-dot' + (state ? ' ' + state : '');
       }
-      function scheduleOverviewRefresh() {
-        clearTimeout(overviewRefreshTimer);
-        overviewRefreshTimer = setTimeout(loadOverview, 250);
-      }
       function openActivityStream() {
         if (activitySource) activitySource.close();
-        activityRecords = []; seenActivityIDs.clear(); renderActivityFeed();
+        activityRecords = []; seenActivityIDs.clear();
+        activityPaused = false; pausedNewCount = 0;
+        pauseActivity.classList.remove('active'); pauseActivity.textContent = 'Pause';
+        renderActivityFeed();
         const organizationID = currentOrganization();
         if (!organizationID) return setActivityConnection('No organization selected', '');
         setActivityConnection('Connecting live feed…', 'reconnecting');
@@ -923,20 +1785,30 @@
         activitySource.addEventListener('activity', event => {
           try { acceptActivity(JSON.parse(event.data)); } catch (_) { setActivityConnection('Live feed returned invalid data', 'reconnecting'); }
         });
-        activitySource.addEventListener('refresh', scheduleOverviewRefresh);
         activitySource.onopen = () => setActivityConnection('Live · connected', 'connected');
         activitySource.onerror = () => setActivityConnection('Reconnecting…', 'reconnecting');
       }
       activityFilter.addEventListener('change', renderActivityFeed);
+      activitySearch.addEventListener('input', renderActivityFeed);
+      activitySignal.addEventListener('click', () => {
+        keyEventsOnly = !keyEventsOnly;
+        activitySignal.classList.toggle('active', keyEventsOnly);
+        activitySignal.textContent = keyEventsOnly ? 'Key events' : 'All events';
+        renderActivityFeed();
+      });
       pauseActivity.addEventListener('click', () => {
         activityPaused = !activityPaused;
         pauseActivity.classList.toggle('active', activityPaused);
+        pausedNewCount = 0;
         pauseActivity.textContent = activityPaused ? 'Resume' : 'Pause';
-        activityCount.textContent = activityPaused ? `Paused · ${activityRecords.length} buffered events` : activityCount.textContent;
-        if (!activityPaused) renderActivityFeed();
+        if (activityPaused) activityCount.textContent = 'Paused · new events keep buffering';
+        else renderActivityFeed();
       });
       clearActivity.addEventListener('click', () => { activityRecords = []; seenActivityIDs.clear(); renderActivityFeed(); });
+      window.addEventListener('organizationchange', openActivityStream);
+    }
 
+    if (page === 'overview') {
       function updateOverviewScope() {
         const organizationID = currentOrganization() || 'org-local';
         const sample = {organization_id:organizationID, envelope_id:'env-demo', event_id:'event-demo', team_id:'team-local', channel_id:'product', message_ts:'100.001', user_id:'user-local', kind:'message', text:'<@tos-tag> hello from the stub', event_time:new Date().toISOString(), received_at:new Date().toISOString(), is_mention:true};
@@ -962,14 +1834,20 @@
           overviewMetric('Recent failures', failures, 'Failed, exhausted, or cancelled jobs', failures ? 'attention' : '')
         );
       }
+      function adminHref(path) {
+        const url = new URL(path, window.location.origin);
+        const organizationID = currentOrganization();
+        if (organizationID) url.searchParams.set('organization_id', organizationID);
+        return url.pathname + url.search;
+      }
       function renderAttention(jobValues, channelValues, approvalValues) {
         const issues = [];
         const failures = jobValues.filter(job => ['failed','dead'].includes(job.state));
         const pending = approvalValues.filter(approval => ['pending','requested'].includes(approval.status));
         const disabled = channelValues.filter(channel => channel.kill_switch);
-        if (failures.length) issues.push({title:`${failures.length} agent job${failures.length === 1 ? '' : 's'} failed`, detail:'Open Agent work for the failure reason and retry history.'});
-        if (pending.length) issues.push({title:`${pending.length} action${pending.length === 1 ? '' : 's'} awaiting approval`, detail:'Review the exact requested action before it expires.'});
-        if (disabled.length) issues.push({title:`${disabled.length} channel kill switch${disabled.length === 1 ? '' : 'es'} active`, detail:'Participation is blocked in those channels.'});
+        if (pending.length) issues.push({title:`${pending.length} action${pending.length === 1 ? '' : 's'} awaiting approval`, detail:'Review the exact requested action before it expires.', href:'/admin/approvals', go:'Review approvals'});
+        if (failures.length) issues.push({title:`${failures.length} agent job${failures.length === 1 ? '' : 's'} failed`, detail:'Open Agent work for the failure reason and retry history.', href:'/admin/jobs', go:'Open agent work'});
+        if (disabled.length) issues.push({title:`${disabled.length} channel kill switch${disabled.length === 1 ? '' : 'es'} active`, detail:'Participation is blocked in those channels.', href:'/admin/channels', go:'Review channels'});
         attentionPanel.replaceChildren();
         if (!issues.length) {
           const clear = document.createElement('div'); clear.className = 'all-clear';
@@ -981,7 +1859,13 @@
         const dot = document.createElement('span'); dot.className = 'status-dot'; dot.setAttribute('aria-hidden','true');
         const heading = document.createElement('strong'); heading.textContent = 'Needs attention'; head.append(dot, heading);
         const list = document.createElement('div'); list.className = 'attention-items';
-        for (const issue of issues.slice(0,3)) { const item = document.createElement('div'); item.className = 'attention-item'; const title = document.createElement('strong'); title.textContent = issue.title; const detail = document.createElement('span'); detail.textContent = issue.detail; item.append(title, detail); list.append(item); }
+        for (const issue of issues.slice(0,3)) {
+          const item = document.createElement('a'); item.className = 'attention-item'; item.href = adminHref(issue.href);
+          const title = document.createElement('strong'); title.textContent = issue.title;
+          const detail = document.createElement('span'); detail.textContent = issue.detail;
+          const go = document.createElement('span'); go.className = 'attention-go'; go.textContent = issue.go + ' →';
+          item.append(title, detail, go); list.append(item);
+        }
         attentionPanel.append(head, list);
       }
       function renderRecentJobs(jobValues) {
@@ -989,9 +1873,12 @@
         if (!jobValues.length) return stateMessage(recentJobs, 'No agent work has been admitted yet.');
         for (const job of jobValues.slice(0,6)) {
           const row = document.createElement('div'); row.className = 'activity-row';
+          if (job.failure_reason) row.title = String(job.failure_reason);
           const identity = document.createElement('div');
           const title = document.createElement('div'); title.className = 'activity-title'; title.textContent = humanize(job.kind || 'agent work');
-          const detail = document.createElement('div'); detail.className = 'activity-detail'; detail.textContent = channelNames.has(String(job.channel_id)) ? '#' + channelNames.get(String(job.channel_id)) : 'Slack channel'; identity.append(title, detail);
+          const model = job.resolved_model && typeof job.resolved_model === 'object' ? (job.resolved_model.profile_id || job.resolved_model.model_id || '') : '';
+          const channelText = channelNames.has(String(job.channel_id)) ? '#' + channelNames.get(String(job.channel_id)) : 'Slack channel';
+          const detail = document.createElement('div'); detail.className = 'activity-detail'; detail.textContent = channelText + (model ? ' · ' + model : ''); identity.append(title, detail);
           const status = cellValue(job.state, 'state'); const time = document.createElement('span'); time.className = 'activity-detail'; time.textContent = relativeTime(job.created_at);
           row.append(identity, status, time); recentJobs.append(row);
         }
@@ -1041,7 +1928,7 @@
           overviewStatus.textContent = `Unable to load diagnostics: ${error.message}`;
         }
       }
-      window.addEventListener('organizationchange', () => { updateOverviewScope(); loadOverview(); openActivityStream(); });
+      window.addEventListener('organizationchange', () => { updateOverviewScope(); loadOverview(); });
       inject.addEventListener('submit', async event => {
         event.preventDefault();
         const csrf = await fetchJSON('/admin/api/csrf');

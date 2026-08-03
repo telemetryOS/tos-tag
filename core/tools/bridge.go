@@ -287,6 +287,8 @@ type triggerSubscriptionRequest struct {
 	Operation       string  `json:"operation"`
 	ID              string  `json:"id,omitempty"`
 	Instruction     string  `json:"instruction,omitempty"`
+	Cron            string  `json:"cron,omitempty"`
+	Timezone        string  `json:"timezone,omitempty"`
 	IntervalSeconds int64   `json:"interval_seconds,omitempty"`
 	NextRun         string  `json:"next_run,omitempty"`
 	MinConfidence   float64 `json:"min_confidence,omitempty"`
@@ -371,7 +373,7 @@ func (b *Bridge) serveTriggerSubscriptions(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		interval := time.Duration(input.IntervalSeconds) * time.Second
-		nextRun := time.Now().UTC().Add(interval)
+		nextRun := time.Time{}
 		if input.NextRun != "" {
 			parsed, parseErr := time.Parse(time.RFC3339, input.NextRun)
 			if parseErr != nil {
@@ -388,13 +390,14 @@ func (b *Bridge) serveTriggerSubscriptions(w http.ResponseWriter, r *http.Reques
 		if rootThreadTS == "" {
 			rootThreadTS = scope.ThreadTS
 		}
-		pendingSubscription = triggers.Subscription{ID: input.ID, OrganizationID: scope.OrganizationID, WorkspaceID: scope.WorkspaceID, ChannelID: scope.ChannelID, RootThreadTS: rootThreadTS, SessionID: job.SessionID, Generation: job.Generation, OwnerID: b.approvalRequester(r.Context(), scope), Kind: triggers.KindHeartbeat, Instruction: input.Instruction, Interval: interval, NextRun: nextRun, ClassifierGate: true, MinConfidence: input.MinConfidence, Enabled: enabled}
-		if err := triggers.Validate(pendingSubscription); err != nil {
+		pendingSubscription = triggers.Subscription{ID: input.ID, OrganizationID: scope.OrganizationID, WorkspaceID: scope.WorkspaceID, ChannelID: scope.ChannelID, RootThreadTS: rootThreadTS, SessionID: job.SessionID, Generation: job.Generation, OwnerID: b.approvalRequester(r.Context(), scope), Kind: triggers.KindHeartbeat, Instruction: input.Instruction, Cron: input.Cron, Timezone: input.Timezone, Interval: interval, NextRun: nextRun, ClassifierGate: true, MinConfidence: input.MinConfidence, Enabled: enabled}
+		pendingSubscription, err = triggers.Normalize(pendingSubscription, time.Now().UTC())
+		if err != nil {
 			writeBridge(w, http.StatusUnprocessableEntity, map[string]any{"error": "invalid_trigger_subscription"})
 			return
 		}
 	}
-	actionArguments := map[string]any{"id": input.ID, "instruction": input.Instruction, "interval_seconds": input.IntervalSeconds, "next_run": input.NextRun, "min_confidence": input.MinConfidence, "root_thread_ts": input.RootThreadTS}
+	actionArguments := map[string]any{"id": input.ID, "instruction": input.Instruction, "cron": input.Cron, "timezone": input.Timezone, "interval_seconds": input.IntervalSeconds, "next_run": input.NextRun, "min_confidence": input.MinConfidence, "root_thread_ts": input.RootThreadTS}
 	if input.Enabled != nil {
 		actionArguments["enabled"] = *input.Enabled
 	}

@@ -36,6 +36,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/orgconfig"
 	"github.com/telemetryos/tos-tag/core/retention"
 	"github.com/telemetryos/tos-tag/core/routines"
+	"github.com/telemetryos/tos-tag/core/sessions"
 	"github.com/telemetryos/tos-tag/core/tools"
 	"github.com/telemetryos/tos-tag/core/triggers"
 	"github.com/telemetryos/tos-tag/models"
@@ -84,6 +85,7 @@ type Dependencies struct {
 	}
 	Routines routines.Repository
 	Triggers triggers.Repository
+	Sessions sessions.Store
 }
 
 type Server struct {
@@ -267,16 +269,17 @@ type pageData struct {
 }
 
 var managementPageCopy = map[string]pageData{
-	"overview":     {Section: "Live operations", Title: "Activity", Description: "Watch Slack intake, classifier decisions, agent execution, Codex App Server traffic, tools, and delivery as they happen."},
+	"overview":     {Section: "Operations", Title: "Dashboard", Description: "See what needs attention, current agent work, channel participation, and control-plane health."},
+	"activity":     {Section: "Live operations", Title: "Activity", Description: "Watch Slack intake, classifier decisions, agent execution, Codex App Server traffic, tools, and delivery as they happen."},
 	"channels":     {Section: "Operations", Title: "Channel coverage", Description: "Understand where Tag can observe, where it can participate, and which safeguards are active."},
 	"jobs":         {Section: "Operations", Title: "Agent work", Description: "Track admitted work from classification through completion, retry, or failure."},
 	"approvals":    {Section: "Operations", Title: "Approvals", Description: "Review actions waiting for a human decision and inspect recently resolved requests."},
 	"decisions":    {Section: "Intelligence", Title: "Classifier decisions", Description: "See when Tag chose to answer, react, start a thread, or stay quiet—and why."},
 	"context":      {Section: "Intelligence", Title: "Context health", Description: "Monitor the freshness and source coverage of the context packs Tag uses to reason."},
-	"directives":   {Section: "Intelligence", Title: "Channel directives", Description: "Review the active instructions that shape Tag's behavior in each channel."},
+	"directives":   {Section: "Intelligence", Title: "Channel directives", Description: "Review, create, edit, and restore the instructions that shape Tag's behavior in each channel."},
 	"notes":        {Section: "Intelligence", Title: "Learned channel notes", Description: "Review durable channel-specific knowledge proposed or approved for future conversations."},
 	"memory":       {Section: "Intelligence", Title: "Agent memory", Description: "Review, correct, pin, or forget source-linked summaries and facts recalled in future conversations."},
-	"routines":     {Section: "Automation", Title: "Scheduled routines", Description: "Monitor recurring classifier-gated work and its next scheduled run."},
+	"routines":     {Section: "Automation", Title: "Automations", Description: "Create and monitor cron schedules that let Tag check fresh channel context and act only when useful."},
 	"triggers":     {Section: "Automation", Title: "Event triggers", Description: "See the event subscriptions that can launch agent work when their conditions match."},
 	"routes":       {Section: "Configuration", Title: "Model routing", Description: "Understand the available model profiles and how work is routed by strength and effort."},
 	"marketplaces": {Section: "Configuration", Title: "Agent skills", Description: "Inspect the validated behavioral capabilities injected into every admitted agent job."},
@@ -315,7 +318,7 @@ func (s *Server) renderIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	endpoint := endpoints[page]
 	copy, exists := managementPageCopy[page]
-	if !exists || (page != "overview" && endpoint == "") {
+	if !exists || (page != "overview" && page != "activity" && endpoint == "") {
 		writeError(w, http.StatusNotFound, "page_not_found")
 		return
 	}
@@ -494,6 +497,18 @@ func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	values, err := s.deps.Organizations.ListChannels(r.Context(), organizationID)
+	if err == nil {
+		// Group DMs are ignored by policy; hide any registered before the
+		// mpim exclusion so coverage reflects conversations Tag actually uses.
+		filtered := values[:0]
+		for _, channel := range values {
+			if strings.HasPrefix(channel.Name, "mpdm-") {
+				continue
+			}
+			filtered = append(filtered, channel)
+		}
+		values = filtered
+	}
 	writeList(w, values, err)
 }
 func (s *Server) listOrganizations(w http.ResponseWriter, r *http.Request) {
@@ -578,7 +593,7 @@ func (s *Server) putChannel(w http.ResponseWriter, r *http.Request) {
 	if !decodeMutation(w, r, s.csrf, &policy) {
 		return
 	}
-	if !s.auditMutation(w, r, policy.OrganizationID, policy.ChannelID, "channel_policy.put", "admin", map[string]any{"team_id": policy.TeamID, "enrolled": policy.Enrolled, "restricted": policy.Restricted, "kill_switch": policy.KillSwitch}) {
+	if !s.auditMutation(w, r, policy.OrganizationID, policy.ChannelID, "channel_policy.put", "admin", map[string]any{"team_id": policy.TeamID, "enrolled": policy.Enrolled, "restricted": policy.Restricted, "kill_switch": policy.KillSwitch, "context_history_mode": policy.ContextHistoryMode}) {
 		return
 	}
 	saved, err := s.deps.Organizations.PutChannel(r.Context(), policy)
@@ -638,7 +653,11 @@ func (s *Server) listDirectives(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "directives_disabled")
 		return
 	}
-	values, err := s.deps.ChannelConfig.ListDirectives(r.Context(), r.URL.Query().Get("organization_id"), r.URL.Query().Get("channel_id"))
+	organizationID, ok := requiredOrganization(w, r)
+	if !ok {
+		return
+	}
+	values, err := s.deps.ChannelConfig.ListDirectives(r.Context(), organizationID, r.URL.Query().Get("channel_id"))
 	writeList(w, values, err)
 }
 func (s *Server) draftDirective(w http.ResponseWriter, r *http.Request) {
@@ -978,6 +997,8 @@ func (s *Server) putRoutine(w http.ResponseWriter, r *http.Request) {
 		Generation      int64           `json:"generation"`
 		OwnerID         string          `json:"owner_id"`
 		Input           string          `json:"input"`
+		Cron            string          `json:"cron"`
+		Timezone        string          `json:"timezone"`
 		IntervalSeconds int64           `json:"interval_seconds"`
 		NextRun         time.Time       `json:"next_run"`
 		Enabled         bool            `json:"enabled"`
@@ -988,7 +1009,7 @@ func (s *Server) putRoutine(w http.ResponseWriter, r *http.Request) {
 	if !s.auditMutation(w, r, input.OrganizationID, input.ID, "routine.put", input.OwnerID, map[string]any{"channel_id": input.ChannelID, "enabled": input.Enabled}) {
 		return
 	}
-	value := routines.Routine{ID: input.ID, OrganizationID: input.OrganizationID, WorkspaceID: input.WorkspaceID, ChannelID: input.ChannelID, RootThreadTS: input.RootThreadTS, SessionID: input.SessionID, Generation: input.Generation, OwnerID: input.OwnerID, Input: input.Input, Interval: time.Duration(input.IntervalSeconds) * time.Second, NextRun: input.NextRun, Enabled: input.Enabled}
+	value := routines.Routine{ID: input.ID, OrganizationID: input.OrganizationID, WorkspaceID: input.WorkspaceID, ChannelID: input.ChannelID, RootThreadTS: input.RootThreadTS, SessionID: input.SessionID, Generation: input.Generation, OwnerID: input.OwnerID, Input: input.Input, Cron: input.Cron, Timezone: input.Timezone, Interval: time.Duration(input.IntervalSeconds) * time.Second, NextRun: input.NextRun, Enabled: input.Enabled}
 	saved, err := s.deps.Routines.PutContext(r.Context(), value)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_routine")
@@ -1027,24 +1048,76 @@ func (s *Server) putTriggerSubscription(w http.ResponseWriter, r *http.Request) 
 		OwnerID         string          `json:"owner_id"`
 		Kind            triggers.Kind   `json:"kind"`
 		Instruction     string          `json:"instruction"`
+		Cron            string          `json:"cron"`
+		Timezone        string          `json:"timezone"`
 		IntervalSeconds int64           `json:"interval_seconds"`
 		NextRun         time.Time       `json:"next_run"`
-		ClassifierGate  bool            `json:"classifier_gate"`
+		ClassifierGate  *bool           `json:"classifier_gate"`
 		MinConfidence   float64         `json:"min_confidence"`
 		Enabled         bool            `json:"enabled"`
 	}
 	if !decodeMutation(w, r, s.csrf, &input) {
 		return
 	}
-	if !s.auditMutation(w, r, input.OrganizationID, input.ID, "trigger_subscription.put", input.OwnerID, map[string]any{"channel_id": input.ChannelID, "kind": string(input.Kind), "enabled": input.Enabled, "classifier_gate": input.ClassifierGate}) {
+	if input.OrganizationID == "" || input.ID == "" || input.ChannelID == "" {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_trigger_subscription")
+		return
+	}
+	derivedScope := input.WorkspaceID == "" || input.SessionID == "" || input.Generation <= 0 || input.OwnerID == ""
+	if derivedScope {
+		if s.deps.Sessions == nil || s.deps.Organizations == nil {
+			writeError(w, http.StatusUnprocessableEntity, "trigger_scope_required")
+			return
+		}
+		channels, err := s.deps.Organizations.ListChannels(r.Context(), input.OrganizationID)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "trigger_scope_unavailable")
+			return
+		}
+		var channel orgconfig.ChannelPolicy
+		for _, candidate := range channels {
+			if candidate.ChannelID == input.ChannelID {
+				channel = candidate
+				break
+			}
+		}
+		if channel.TeamID == "" {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_trigger_channel")
+			return
+		}
+		sessionScope := input.RootThreadTS
+		if sessionScope == "" {
+			sessionScope = "automation:" + input.ID
+		}
+		session, _, err := s.deps.Sessions.Resolve(r.Context(), input.OrganizationID, channel.TeamID, input.ChannelID, sessionScope)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "trigger_session_unavailable")
+			return
+		}
+		input.WorkspaceID = channel.TeamID
+		input.SessionID = session.ID
+		input.Generation = session.CurrentGeneration
+		input.OwnerID = "management-ui"
+	}
+	if input.Kind == "" {
+		input.Kind = triggers.KindHeartbeat
+	}
+	classifierGate := false
+	if input.ClassifierGate != nil {
+		classifierGate = *input.ClassifierGate
+	} else if derivedScope {
+		classifierGate = true
+	}
+	if !s.auditMutation(w, r, input.OrganizationID, input.ID, "trigger_subscription.put", input.OwnerID, map[string]any{"channel_id": input.ChannelID, "kind": string(input.Kind), "enabled": input.Enabled, "classifier_gate": classifierGate}) {
 		return
 	}
 	value := triggers.Subscription{
 		ID: input.ID, OrganizationID: input.OrganizationID, WorkspaceID: input.WorkspaceID,
 		ChannelID: input.ChannelID, RootThreadTS: input.RootThreadTS, SessionID: input.SessionID,
 		Generation: input.Generation, OwnerID: input.OwnerID, Kind: input.Kind,
-		Instruction: input.Instruction, Interval: time.Duration(input.IntervalSeconds) * time.Second,
-		NextRun: input.NextRun, ClassifierGate: input.ClassifierGate,
+		Instruction: input.Instruction, Cron: input.Cron, Timezone: input.Timezone,
+		Interval: time.Duration(input.IntervalSeconds) * time.Second,
+		NextRun:  input.NextRun, ClassifierGate: classifierGate,
 		MinConfidence: input.MinConfidence, Enabled: input.Enabled,
 	}
 	saved, err := s.deps.Triggers.PutContext(r.Context(), value)

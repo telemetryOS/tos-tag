@@ -27,6 +27,13 @@ delivery. DMs and group DMs are never auto-enabled, and an optional exact-ID
 output allowlist can narrow joined-channel authority. This local authority does
 not become a tracked default or production authorization.
 
+An operator may set a channel to `session_only` context history. That mode
+fails closed against prior-session Slack history, cross-channel context,
+durable memory recall, and situation-fact recall, and prevents new durable
+memory or situation facts from being derived from the channel. It intentionally
+disables offline direct-mention recovery for that destination while preserving
+the minimum live operational records needed for delivery safety and audit.
+
 ## Non-negotiable boundaries
 
 - A message, model, skill, or tool result may request an action; none authorizes

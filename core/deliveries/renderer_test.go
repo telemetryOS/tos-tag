@@ -59,6 +59,7 @@ func TestRendererAppendsFullAgentExecutionFooter(t *testing.T) {
 		AgentFooter: &types.SlackAgentFooter{
 			ModelID: "gpt-5.6-luna", ReasoningEffort: "max", InputTokens: 21_000,
 			OutputTokens: 1_200, TotalTokens: 22_200, DurationMS: 12_450,
+			Activities: []string{"wiki", "documentation", "search", "wiki"},
 		},
 	}
 	payloads, err := NewRenderer().Render(result)
@@ -73,7 +74,7 @@ func TestRendererAppendsFullAgentExecutionFooter(t *testing.T) {
 		t.Fatalf("footer block = %#v", footer)
 	}
 	encoded, _ := json.Marshal(footer)
-	for _, expected := range []string{"ChatGPT 5.6 Luna", "max effort", "22k tokens", "12.4s"} {
+	for _, expected := range []string{"ChatGPT 5.6 Luna", "max effort", "22k tokens", "12.4s", "used documentation, search, wiki"} {
 		if !strings.Contains(string(encoded), expected) {
 			t.Fatalf("footer %s missing %q", encoded, expected)
 		}

@@ -11,6 +11,10 @@ features:
       description: Configure tag's operating directive for this channel
       usage_hint: Opens a channel configuration form
       should_escape: false
+    - command: /tag-mode
+      description: Show or change tag's participation mode for this channel
+      usage_hint: "observe | assist | proactive"
+      should_escape: false
   agent_view:
     agent_description: Cross-channel AI teammate for investigation, planning, and durable agent work.
     suggested_prompts:

@@ -205,12 +205,18 @@ func (s *Service) predict(ctx context.Context, target Target, pack types.Context
 		predicted, err := s.classifier.Decide(ctx, target, pack)
 		predicted = sanitizeEvidenceReferences(predicted, pack)
 		predicted = enforceDirectReplyPlacement(predicted, target)
+		// Placement is part of the model-independent contract, so canonicalize it
+		// before validation. A provider can legitimately recommend strong/max work
+		// while initially choosing the channel; rejecting that otherwise useful
+		// recommendation would drop into the generic direct-mention fallback and
+		// lose the threaded Thinking Steps surface.
+		predicted = enforceDirectMentionPlacement(predicted, target.Envelope.Text)
+		validationErr := validateDecision(predicted, pack)
 		// A direct mention is already a hard participation trigger. The ambient
 		// confidence threshold must not discard an otherwise valid placement and
 		// model-routing recommendation, or simple mentioned questions fall back to
 		// the deployment-default (usually max-effort) profile.
-		if err == nil && validateDecision(predicted, pack) == nil && predicted.Outcome != types.OutcomeSilent && predicted.Outcome != types.OutcomeReact && (predicted.DirectReply == "" || predicted.Confidence >= s.channelReplyThreshold) {
-			predicted = enforceDirectMentionPlacement(predicted, target.Envelope.Text)
+		if err == nil && validationErr == nil && predicted.Outcome != types.OutcomeSilent && predicted.Outcome != types.OutcomeReact && (predicted.DirectReply == "" || predicted.Confidence >= s.channelReplyThreshold) {
 			if predicted.DirectReply == "" || validateDirectReplyForTarget(predicted, target, pack) == nil {
 				return predicted
 			}
@@ -218,7 +224,20 @@ func (s *Service) predict(ctx context.Context, target Target, pack types.Context
 		if isDirectSocialCandidate(target.Envelope.Text) {
 			return directSocialFallback(target.Envelope.Text, false)
 		}
-		return directMentionFallback(target.Envelope.Text)
+		fallback := directMentionFallback(target.Envelope.Text)
+		switch {
+		case err != nil:
+			fallback.ReasonCodes = append(fallback.ReasonCodes, "classifier.provider_error_fallback")
+		case validationErr != nil:
+			fallback.ReasonCodes = append(fallback.ReasonCodes, decisionValidationReason(validationErr))
+		case predicted.DirectReply != "" && predicted.Confidence < s.channelReplyThreshold:
+			fallback.ReasonCodes = append(fallback.ReasonCodes, "classifier.direct_reply_threshold_fallback")
+		case predicted.DirectReply != "" && validateDirectReplyForTarget(predicted, target, pack) != nil:
+			fallback.ReasonCodes = append(fallback.ReasonCodes, "classifier.invalid_direct_reply_fallback")
+		default:
+			fallback.ReasonCodes = append(fallback.ReasonCodes, "classifier.non_action_fallback")
+		}
+		return fallback
 	}
 	if target.Mode == types.ModeMention {
 		return silent("admission.channel_mode")
@@ -249,6 +268,20 @@ func (s *Service) predict(ctx context.Context, target Target, pack types.Context
 		predicted = silent("admission.destination_disclosure_denied")
 	}
 	return predicted
+}
+
+func decisionValidationReason(err error) string {
+	message := err.Error()
+	for _, candidate := range []string{
+		"confidence", "outcome", "reason code", "reaction", "direct reply outcome",
+		"direct reply agent recommendation", "direct reply text", "full agent required",
+		"releasable evidence", "restricted signal",
+	} {
+		if strings.Contains(message, candidate) {
+			return "classifier.invalid_" + strings.ReplaceAll(candidate, " ", "_") + "_fallback"
+		}
+	}
+	return "classifier.invalid_decision_fallback"
 }
 
 // sanitizeEvidenceReferences preserves an otherwise valid participation
@@ -338,6 +371,18 @@ func enforceDirectMentionPlacement(decision types.ClassificationDecision, text s
 		}
 		return decision
 	}
+	// A strong/high-effort recommendation means the classifier expects
+	// substantial work rather than a brief self-contained channel answer. Keep
+	// that work in a thread so it has a focused conversation surface and Slack
+	// can show Thinking Steps while the worker runs. An explicit channel request
+	// was already honored above.
+	if substantialAgentRecommendation(decision) && (decision.Outcome == types.OutcomeReplyInChannel || decision.Outcome == types.OutcomeReplyInThread) {
+		if decision.Outcome != types.OutcomeReplyInThread {
+			decision.Outcome = types.OutcomeReplyInThread
+			decision.ReasonCodes = append(decision.ReasonCodes, "policy.substantial_agent_thread")
+		}
+		return decision
+	}
 	if decision.SourceWriteRequested {
 		return decision
 	}
@@ -354,6 +399,21 @@ func enforceDirectMentionPlacement(decision types.ClassificationDecision, text s
 		decision.ReasonCodes = append(decision.ReasonCodes, "policy.deep_surface_thread")
 	}
 	return decision
+}
+
+func substantialAgentRecommendation(decision types.ClassificationDecision) bool {
+	if !decision.RequiresFullAgent {
+		return false
+	}
+	if decision.AgentModelStrength == "strong" {
+		return true
+	}
+	switch decision.AgentReasoningEffort {
+	case "high", "xhigh", "max":
+		return true
+	default:
+		return false
+	}
 }
 
 func requestedReplyPlacement(text string) (types.ClassificationOutcome, string, bool) {
@@ -390,9 +450,21 @@ func requiresThreadSurface(text string) bool {
 	return containsAny(normalized,
 		"analyze", "debug", "deep dive", "explain in detail", "figure out", "implement",
 		"investigate", "look into", "review", "step by step", "walk me through",
+		"what would we need to change", "what do we need to change", "what changes would be needed",
+		"how would we change", "how should we change", "how would we implement", "what would it take to",
+		"implementation plan", "migration plan",
 		"compare", "comparison", "native table", "table with", "structured report", "artifact",
 		"research", "multiple sections", "code sample", "code block", "long-form",
 		"architecture document", "design document", "reference guide", "white paper",
+	)
+}
+
+func isImplementationPlanningRequest(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	return containsAny(normalized,
+		"what would we need to change", "what do we need to change", "what changes would be needed",
+		"how would we change", "how should we change", "how would we implement", "what would it take to",
+		"implementation plan", "migration plan",
 	)
 }
 

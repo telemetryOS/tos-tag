@@ -12,8 +12,10 @@ influence an answer sent elsewhere.
 
 ## What it does
 
-- Ingests Slack messages, edits, deletes, threads, DMs, group DMs, private
-  channels, public channels, and permitted Slack Connect events.
+- Ingests Slack messages, edits, deletes, threads, DMs, private channels,
+  public channels, and permitted Slack Connect events. Group DMs (`mpdm-*`)
+  are ignored entirely: excluded from discovery, never persisted, and hidden
+  from channel coverage.
 - Builds immutable, source-linked context packs with a 100k-token default cap.
 - Curates source-linked channel/thread memory asynchronously with Luna, then
   recalls it through the same private-channel boundary as live Slack context.
@@ -31,12 +33,17 @@ influence an answer sent elsewhere.
   Native agent blocks use streamed block chunks; ordinary direct posts
   downgrade them to equivalent standard Sections/Tables for compatibility.
 - Shows Slack-native Thinking Steps for admitted full-agent thread work, then
-  finalizes that same streamed message with the validated answer. The timeline
-  contains concise action summaries and sources, never hidden reasoning.
+  finalizes that same streamed message with the validated answer. Every native
+  or reviewed tool and dynamically declared active skill updates one rotating
+  current-action card, so completed work does not leave a stack of task cards. The
+  timeline contains concise action summaries and sources, never hidden reasoning,
+  arguments, or source content.
   Brief classifier-selected in-channel answers remain direct because Slack
   requires streamed agent responses to reply to a thread.
 - Supports Slack-native exact-action approvals, channel directive modals,
-  scheduled routines, and classifier-gated trigger subscriptions.
+  a `/tag-mode` slash command that shows or changes the channel's
+  participation mode, cron-scheduled routines, and classifier-gated cron
+  trigger subscriptions with explicit IANA timezones.
 - Records correlated redacted logs, usage, and append-only audit receipts.
 
 ### Verified development posture
@@ -46,7 +53,7 @@ asymmetric authority:
 
 | Boundary | Development setting |
 | --- | --- |
-| Input discovery | All user-authorized observable public channels, private channels, DMs, and group DMs |
+| Input discovery | All user-authorized observable public channels, private channels, and DMs; group DMs are ignored |
 | New conversation policy | Enrolled as `observe`; joined public/private channels become `assist` when enabled |
 | Interactive test channel | `#tos-tag`; live regression traffic remains confined there |
 | Output | Slack-confirmed joined-channel policy, optionally narrowed by `TAG__SLACK__OUTPUT_CHANNEL_IDS` |
@@ -92,11 +99,18 @@ See [architecture.md](architecture.md) for the full security and lifecycle
 contract.
 
 Reactions remain available for intentional reaction-only classifier outcomes
-and lightweight social acknowledgements. They are not used as an opaque
-"working" indicator for admitted jobs. Admitted thread work uses Slack's
+and lightweight social acknowledgements. When the classifier admits answer
+work (a channel or thread reply), the control plane immediately applies the
+classifier-selected emoji to the source message as an acknowledgement that a
+response is coming. Progress itself is not conveyed by reactions: admitted
+thread work uses Slack's
 [Thinking Steps](https://slack.dev/slack-thinking-steps-ai-agents/) timeline;
 brief classifier-selected in-channel answers remain direct because Slack
-requires streamed agent responses to have a `thread_ts`.
+requires streamed agent responses to have a `thread_ts`. Background and
+approval outcomes stay reaction-free. A strong/high-effort full-agent
+recommendation is substantial by definition and is corrected to a thread
+unless the requester explicitly asks for an in-channel answer; this prevents a
+long-running job from losing its progress surface.
 
 ## Dependencies
 
@@ -112,6 +126,7 @@ bootstrap revisions.
 | GitHub CLI | `2.96.0` | Repository bootstrap and auth |
 | MongoDB | `8.0.28` | Authoritative state |
 | slack-go | `v0.27.0` | Socket Mode, Block Kit, and `chat.*Stream` Thinking Steps transport |
+| robfig/cron | `v3.0.1` | Validated standard five-field automation schedules |
 | Docker Engine + Compose v2 | host-managed | Reproducible persistent development stack |
 | Docker Buildx | host-managed, recommended | Modern Compose image builder; the classic builder remains a functional fallback |
 | Bash, Git, Make, curl, jq, ripgrep, OpenSSL, Python 3 | image distribution versions | Reviewed helpers, bootstrap, keystore generation, skill builds, and source search |
@@ -119,7 +134,7 @@ bootstrap revisions.
 | telemetry-otel-fetch | `0e94e929…` | Reviewed SigNoz/OTel helper |
 | Device-Log-Analyzer | `d885c144…` | Reviewed device-log helper |
 | TelemetryOS-Mongo-Fetch | `4c39e789…` | Optional reviewed Mongo helper |
-| tag-agent-skills | plugin `base` `0.8.0`; current configured checkout | Complete 12-skill tos-tag behavioral package |
+| tag-agent-skills | plugin `base` `0.10.5`; current configured checkout | Complete 14-skill tos-tag behavioral package |
 
 The exact image digests, versions, and helper commits live in
 [Dockerfile.dev](Dockerfile.dev), [docker-compose.yml](docker-compose.yml), and
@@ -143,7 +158,8 @@ core/jobs/                   leased durable work
 core/deliveries/             typed output, rendering, and reconciliation
 core/approvals/              exact-action approval/resume
 core/channelconfig/          Slack channel prompt directives
-core/routines/, core/triggers/ scheduled and heartbeat work
+core/schedule/                cron parsing, timezone validation, and advancement
+core/routines/, core/triggers/ scheduled and classifier-gated work
 tool-marketplace/            reviewed executable helper bundles
 container/                   reproducible persistent development workspace
 ```
@@ -282,6 +298,20 @@ history reads are proactively paced by
 `TAG__SLACK__CONTEXT_SYNC_REQUEST_INTERVAL` (default `1200ms`) and still honor
 Slack's `Retry-After` response.
 
+Slack also echoes Tag's own delivered messages and Thinking Steps edits through
+Events API. Those callbacks are imported directly as authorized, resolved,
+destination-local context for conversational continuity; they never enter the
+pending decision queue and therefore never call the classifier or create a
+self-referential activity card, reaction, job, or delivery.
+
+Channel policy can set `context_history_mode` to `session_only` for noisy test
+destinations. Tag then skips Slack backfill and offline catch-up for that
+channel, supplies only same-channel messages observed since the current process
+started, excludes cross-channel history and durable memory/facts, and prevents
+the channel from generating new durable memory or incident facts. Live events
+are still persisted for acknowledgement, idempotency, job recovery, and audit.
+The local `#tos-tag` test channel uses this mode.
+
 ### Direct classifier
 
 ```dotenv
@@ -404,7 +434,8 @@ artifact segments.
 
 Every full-agent Block Kit result ends with a de-emphasized, control-plane-owned
 context footer containing the resolved model, reasoning effort, provider-reported
-turn tokens, and elapsed worker time. Codex App Server's
+turn tokens, elapsed worker time, and a compact allowlisted summary such as
+`used documentation, search, wiki`. Codex App Server's
 `thread/tokenUsage/updated` event supplies the token count; the model cannot
 author or alter the footer. Direct classifier chat, reaction-only decisions,
 approvals, and other control-plane notices omit it.
@@ -507,6 +538,9 @@ public docs page, or corporate full-content source. Search results, an index,
 Slack context, generic web results, and model memory do not satisfy that gate.
 Every product answer includes concise clickable links to the authoritative
 sources materially used without requiring the requester to ask for citations.
+Tag disables Slack link and media unfurls on all final delivery paths, so those
+links remain compact references instead of expanding into quoted message or
+page previews beneath the answer.
 Customer setup, operation, Studio workflow, device/Edge, SDK/API,
 authentication, compatibility, and troubleshooting questions use
 `telemetryos-documentation`: it reads `https://docs.telemetryos.com/llms.txt`
@@ -569,10 +603,13 @@ copied into broad audit listings.
 
 ### Management activity UI
 
-Open `http://127.0.0.1:8090/admin` for the operator surface. Its primary view
-is an organization-scoped live activity timeline backed by Server-Sent Events
-at `/admin/events?organization_id=...`; configuration and database-oriented
-inspection remain secondary navigation.
+Open `http://127.0.0.1:8090/admin` for the operator dashboard: attention items,
+current work, channel participation, and control-plane health. The dedicated
+`/admin/activity` page is the organization-scoped live timeline backed by
+Server-Sent Events at `/admin/events?organization_id=...`. Activity, Dashboard,
+Agent work, Approvals, Channels, Directives, Agent memory, and Automation stay visible in
+the concise operator navigation; record-oriented configuration and diagnostics
+are available under the collapsed **Advanced** disclosure.
 
 The feed retains a bounded in-memory window of recent lifecycle records and
 streams new Slack intake, classifier, job, Thinking Steps, tool, delivery, and
@@ -590,6 +627,21 @@ facts or to correct, pin, and forget them. Memory model calls are recorded as
 content-free `memory_curation` usage and lifecycle logs; prompts and results do
 not enter the activity feed.
 
+Use **Directives** to review the active `/tag-directive` instruction for each
+public or private channel, create and immediately activate a new directive,
+edit an existing directive as a new revision, or restore an earlier revision.
+The page shares the same revisioned Mongo records and classifier/worker context
+path as the Slack modal, so saving through either surface updates the other.
+
+Use **Automation** to create and monitor classifier-gated recurring checks.
+New schedules use standard five-field cron plus an explicit IANA timezone;
+existing fixed-interval records remain visible with a migration warning. The
+page resolves channel and durable session scope server-side, so operators edit
+human concepts rather than workspace IDs or generation fields. The same cron
+contract is available to the `tag-triggers` skill from the destination Slack
+channel. Direct scheduled routines remain visible separately because they do
+not use the heartbeat classifier gate.
+
 ## Verification
 
 The full local gate is:
@@ -601,18 +653,18 @@ make verify
 It runs formatting, all Go tests, race tests, vet, behavioral evals, gosec, and
 govulncheck.
 
-Latest complete baseline (2026-08-02):
+Latest complete baseline (2026-08-03):
 
 - all Go tests, race tests, and `go vet`: pass;
-- deterministic behavioral evaluation: `46/46` (44 natural classifier messages
+- deterministic behavioral evaluation: `48/48` (46 natural classifier messages
   plus context-cap and deduplication invariants), including silence, placement,
   privacy, routing, reaction, source-write intake, mandatory product retrieval,
   conversational-reference, Wiki CRUD, and assist/proactive initiative contracts;
-- live direct OpenAI classifier evaluation: `46/46`, with 36 real provider
+- live direct OpenAI classifier evaluation: `48/48`, with 38 real provider
   calls and complete
   grounding/disclosure/placement/routing/reaction scores, and approximately
-  `1.82s` mean end-to-end case latency;
-- `gosec`: 0 issues across 88 Go files and 24,092 lines;
+  `1.84s` mean end-to-end case latency;
+- `gosec`: 0 issues across 88 Go files and 24,533 lines;
 - `govulncheck`: no reachable or imported vulnerable packages; one advisory is
   present in a required module but its affected package is not imported or
   called;
@@ -657,8 +709,8 @@ separately, and inspect only redacted structured logs.
 ```bash
 make test                 # deterministic test suite
 make race                 # race detector
-make eval                 # deterministic 46-case behavioral gate
-make eval-live            # opt-in 46-case live OpenAI classifier gate
+make eval                 # deterministic 48-case behavioral gate
+make eval-live            # opt-in 48-case live OpenAI classifier gate
 make security             # gosec + govulncheck
 make verify               # full local gate
 make run-live             # host live runtime from ignored runtime.env

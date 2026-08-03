@@ -10,6 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/telemetryos/tos-tag/core/database"
+	"github.com/telemetryos/tos-tag/core/schedule"
 	"github.com/telemetryos/tos-tag/models"
 )
 
@@ -20,13 +21,15 @@ type MongoStore struct {
 
 func NewMongoStore(db *database.Database) *MongoStore { return &MongoStore{db: db, now: time.Now} }
 func (s *MongoStore) PutContext(ctx context.Context, routine Routine) (Routine, error) {
-	if _, err := validate(routine); err != nil {
+	now := s.now().UTC()
+	var err error
+	routine, err = normalize(routine, now)
+	if err != nil {
 		return Routine{}, err
 	}
-	now := s.now().UTC()
 	after := options.After
 	var saved Routine
-	err := s.db.Collection(models.CollectionRoutines).FindOneAndUpdate(ctx, bson.M{"organization_id": routine.OrganizationID, "public_id": routine.ID}, bson.M{"$set": bson.M{"workspace_id": routine.WorkspaceID, "channel_id": routine.ChannelID, "root_thread_ts": routine.RootThreadTS, "session_id": routine.SessionID, "generation": routine.Generation, "owner_id": routine.OwnerID, "input": routine.Input, "interval": routine.Interval, "next_run": routine.NextRun, "enabled": routine.Enabled, "updated_at": now}, "$setOnInsert": bson.M{"organization_id": routine.OrganizationID, "public_id": routine.ID, "created_at": now}, "$inc": bson.M{"version": 1}}, options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(after)).Decode(&saved)
+	err = s.db.Collection(models.CollectionRoutines).FindOneAndUpdate(ctx, bson.M{"organization_id": routine.OrganizationID, "public_id": routine.ID}, bson.M{"$set": bson.M{"workspace_id": routine.WorkspaceID, "channel_id": routine.ChannelID, "root_thread_ts": routine.RootThreadTS, "session_id": routine.SessionID, "generation": routine.Generation, "owner_id": routine.OwnerID, "input": routine.Input, "cron": routine.Cron, "timezone": routine.Timezone, "interval": routine.Interval, "next_run": routine.NextRun, "enabled": routine.Enabled, "updated_at": now}, "$setOnInsert": bson.M{"organization_id": routine.OrganizationID, "public_id": routine.ID, "created_at": now}, "$inc": bson.M{"version": 1}}, options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(after)).Decode(&saved)
 	return saved, err
 }
 func (s *MongoStore) DueContext(ctx context.Context, now time.Time, limit int) ([]Routine, error) {
@@ -35,7 +38,7 @@ func (s *MongoStore) DueContext(ctx context.Context, now time.Time, limit int) (
 		return nil, err
 	}
 	defer cursor.Close(ctx)
-	var values []Routine
+	values := make([]Routine, 0)
 	err = cursor.All(ctx, &values)
 	return values, err
 }
@@ -48,10 +51,11 @@ func (s *MongoStore) AdvanceContext(ctx context.Context, organizationID, id stri
 	if err != nil {
 		return err
 	}
-	next := current.NextRun
-	for !next.After(from) {
-		next = next.Add(current.Interval)
+	spec, err := schedule.Parse(current.Cron, current.Timezone, current.Interval)
+	if err != nil {
+		return err
 	}
+	next := spec.Advance(current.NextRun, from)
 	result, err := s.db.Collection(models.CollectionRoutines).UpdateOne(ctx, bson.M{"organization_id": organizationID, "public_id": id, "version": current.Version}, bson.M{"$set": bson.M{"next_run": next, "updated_at": s.now().UTC()}, "$inc": bson.M{"version": 1}})
 	if err == nil && result.ModifiedCount != 1 {
 		return errors.New("routine advance conflict")
@@ -64,15 +68,9 @@ func (s *MongoStore) List(ctx context.Context, organizationID string) ([]Routine
 		return nil, err
 	}
 	defer cursor.Close(ctx)
-	var values []Routine
+	values := make([]Routine, 0)
 	err = cursor.All(ctx, &values)
 	return values, err
-}
-func validate(r Routine) (Routine, error) {
-	if r.ID == "" || r.OrganizationID == "" || r.WorkspaceID == "" || r.ChannelID == "" || r.SessionID == "" || r.Generation <= 0 || r.OwnerID == "" || r.Interval < time.Minute || r.NextRun.IsZero() {
-		return Routine{}, errors.New("invalid routine")
-	}
-	return r, nil
 }
 
 var _ Repository = (*MongoStore)(nil)

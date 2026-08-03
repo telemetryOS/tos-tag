@@ -222,6 +222,7 @@ func (c *OpenAIClassifier) Decide(ctx context.Context, target Target, pack types
 	decision = withClarificationFollowupPolicyCorrections(decision, target, pack, profiles)
 	decision = withProductKnowledgePolicyCorrections(decision, target, profiles)
 	decision = withSourceWritePolicyCorrections(decision, target)
+	decision = withImplementationPlanningPolicyCorrections(decision, target, profiles)
 	decision = withReadOnlyCodeAnalysisPolicyCorrections(decision, target, profiles)
 	decision = withBriefMentionPolicyCorrections(decision, target, profiles)
 	decision = withAmbientPolicyCorrections(decision, target, pack, profiles)
@@ -493,7 +494,7 @@ func isMissingLocationWeatherQuestion(text string) bool {
 	return true
 }
 
-const classifierInstructions = `You are tos-tag's stateless, tool-free Slack classifier. Using only the immutable input, decide whether to remain silent, react only, answer in the current thread, answer in the channel, start background agent work, or request approval. Choose the least disruptive placement. A direct mention is a hard participation trigger but not automatically a thread: choose reply_in_channel when the expected answer is brief, self-contained, useful to the channel, and unlikely to invite follow-up; choose reply_in_thread when the answer itself is likely to become a deeper dive, needs multiple explanatory steps, code, a table, an artifact, concerns a narrow side topic, or is likely to continue as a conversation. Internal retrieval or tool use alone does not force a thread: judge placement by the expected final Slack message. A requested table, structured report, code sample, artifact, research result, or multi-part comparison is not a brief answer and must use reply_in_thread even when it can be self-contained. Honor an explicit request to reply in the channel or in a thread. When active_thread is true, keep any substantive response in that thread. For ambient messages, default to silent on ambiguity, repetition, or an already-answered question.
+const classifierInstructions = `You are tos-tag's stateless, tool-free Slack classifier. Using only the immutable input, decide whether to remain silent, react only, answer in the current thread, answer in the channel, start background agent work, or request approval. Choose the least disruptive placement. A direct mention is a hard participation trigger but not automatically a thread: choose reply_in_channel when the expected answer is brief, self-contained, useful to the channel, and unlikely to invite follow-up; choose reply_in_thread when the answer itself is likely to become a deeper dive, needs multiple explanatory steps, code, a table, an artifact, concerns a narrow side topic, or is likely to continue as a conversation. Internal retrieval or tool use alone does not force a thread: judge placement by the expected final Slack message. A requested table, structured report, code sample, artifact, research result, multi-part comparison, implementation plan, migration plan, or question asking what would need to change is not a brief answer and must use reply_in_thread with at least standard/medium routing even when it can be self-contained. Honor an explicit request to reply in the channel or in a thread. When active_thread is true, keep any substantive response in that thread. For ambient messages, default to silent on ambiguity, repetition, or an already-answered question.
 
 likely_addressed_to_agent is a deterministic conversational signal, not a direct mention: it is true only when the current author is the sole recent human participant represented in destination context and the immediately preceding destination message came from Tag. Treat a clear question with this signal as likely directed to Tag even when it omits a mention. conversation_focus is a short chronological view of the latest destination-local human and Tag turns; use it before the larger source set to resolve conversational pronouns and short follow-ups. When a question such as "are we using it?" has one clear referent in the immediately preceding Tag turn, answer the underlying question instead of asking what "it" means or merely describing the referent. When a short active-thread message answers a Tag clarification, compose it with the earlier unresolved human request and answer that composed request. Do not claim the channel has only one human member; recent context is not a complete membership roster. If such a weather or forecast question omits the location needed to answer, reply directly in the channel with one short location clarification rather than staying silent or starting a worker.
 
@@ -775,7 +776,11 @@ func isObviousSourceWriteRequest(text string) bool {
 }
 
 func withReadOnlyCodeAnalysisPolicyCorrections(decision types.ClassificationDecision, target Target, profiles []advertisedAgentProfile) types.ClassificationDecision {
-	if decision.SourceWriteRequested || isObviousSourceWriteRequest(target.Envelope.Text) || !isObviousReadOnlyCodeAnalysisRequest(target.Envelope.Text) {
+	// The request text is authoritative for this boundary. A provider may mark a
+	// code review or explanation as a source write, but explicit read-only
+	// analysis wording must recover the reviewed read path instead of redirecting
+	// the user to Linear.
+	if !isObviousReadOnlyCodeAnalysisRequest(target.Envelope.Text) {
 		return decision
 	}
 	decision.Outcome = types.OutcomeReplyInThread
@@ -793,6 +798,26 @@ func withReadOnlyCodeAnalysisPolicyCorrections(decision types.ClassificationDeci
 		decision.AgentModelStrength = "standard"
 		decision.AgentReasoningEffort = "medium"
 	}
+	return withCanonicalAgentProfile(decision, profiles)
+}
+
+func withImplementationPlanningPolicyCorrections(decision types.ClassificationDecision, target Target, profiles []advertisedAgentProfile) types.ClassificationDecision {
+	if !target.Envelope.IsMention || !isImplementationPlanningRequest(target.Envelope.Text) {
+		return decision
+	}
+	decision.Outcome = types.OutcomeReplyInThread
+	decision.Confidence = max(decision.Confidence, 0.99)
+	decision.ReasonCodes = slices.DeleteFunc(decision.ReasonCodes, func(reason string) bool {
+		return reason == "policy.source_write_to_linear"
+	})
+	decision.ReasonCodes = appendUnique(decision.ReasonCodes, "policy.implementation_plan_thread")
+	decision.ResponseIntent = "provide a bounded implementation plan without modifying source; explain the required changes, safety constraints, and verification"
+	decision.DirectReply = ""
+	decision.SourceWriteRequested = false
+	decision.RequiresFullAgent = true
+	decision.AgentModelProfile = ""
+	decision.AgentModelStrength = "standard"
+	decision.AgentReasoningEffort = "medium"
 	return withCanonicalAgentProfile(decision, profiles)
 }
 
@@ -836,9 +861,14 @@ func withBriefMentionPolicyCorrections(decision types.ClassificationDecision, ta
 }
 
 func withProductKnowledgePolicyCorrections(decision types.ClassificationDecision, target Target, profiles []advertisedAgentProfile) types.ClassificationDecision {
-	if decision.ProductRetrievalRequired && isClearlyOperationalSchedulingQuestion(target.Envelope.Text) {
-		decision.ProductRetrievalRequired = false
-		decision.ReasonCodes = append(decision.ReasonCodes, "policy.non_product_operational_question")
+	// The request text is authoritative here. Context about a feature regression
+	// can legitimately produce a "feature" topic, but that must not turn an
+	// unmistakable operational-status question into product-document retrieval.
+	if isClearlyOperationalSchedulingQuestion(target.Envelope.Text) {
+		if decision.ProductRetrievalRequired || isObviousProductKnowledgeQuestion(target.Envelope.Text, decision) {
+			decision.ProductRetrievalRequired = false
+			decision.ReasonCodes = append(decision.ReasonCodes, "policy.non_product_operational_question")
+		}
 		return decision
 	}
 	productQuestion := decision.ProductRetrievalRequired || isObviousProductKnowledgeQuestion(target.Envelope.Text, decision)
@@ -892,7 +922,11 @@ func isClearlyOperationalSchedulingQuestion(text string) bool {
 	if containsAny(lower, "premium", "enterprise", "billing", "pricing", "trial", "node pro", "node mini", "telemetryos", "telemetry os", "product", "subscription", "device tier") {
 		return false
 	}
-	return containsAny(lower, "deploy window", "deployment window", "release window", "maintenance window")
+	return containsAny(lower,
+		"deploy window", "deployment window", "release window", "maintenance window",
+		"operational issues", "operational concerns", "any incidents", "current incidents", "open incidents",
+		"anything broken", "what is broken", "what's broken",
+	)
 }
 
 func isObviousProductKnowledgeQuestion(text string, decision types.ClassificationDecision) bool {
@@ -978,12 +1012,13 @@ func withAddressedSocialPolicyCorrections(decision types.ClassificationDecision,
 		}
 		return decision
 	}
-	if decision.Outcome != types.OutcomeSilent && decision.Outcome != types.OutcomeReact {
-		return decision
-	}
 	reply := "Hey!"
 	lower := strings.ToLower(target.Envelope.Text)
+	reaction := "speech_balloon"
 	switch {
+	case containsAny(lower, "thanks", "thank you", "nice work", "great work", "good work", "well done"):
+		reply = "Thanks!"
+		reaction = "white_check_mark"
 	case strings.Contains(lower, "morning"):
 		reply = "Morning!"
 	case strings.Contains(lower, "afternoon"):
@@ -998,7 +1033,7 @@ func withAddressedSocialPolicyCorrections(decision types.ClassificationDecision,
 		ResponseIntent:     "brief social acknowledgement",
 		DirectReply:        reply,
 		DisclosureClass:    types.DisclosureDestinationSafe,
-		Reaction:           "speech_balloon",
+		Reaction:           reaction,
 		AgentModelStrength: "none",
 	}
 }
@@ -1059,25 +1094,20 @@ func withAmbientPolicyCorrections(decision types.ClassificationDecision, target 
 			break
 		}
 	}
-	if decision.Outcome == types.OutcomeSilent {
-		return decision
-	}
-	if isStableNonUrgentMetricObservation(target.Envelope.Text) && decision.Outcome != types.OutcomeReact {
-		return types.ClassificationDecision{
-			Outcome:            types.OutcomeReact,
-			Confidence:         max(decision.Confidence, 0.99),
-			ReasonCodes:        append(decision.ReasonCodes, "policy.stable_metric_reaction_only"),
-			DisclosureClass:    types.DisclosureDestinationSafe,
-			Reaction:           "warning",
-			AgentModelStrength: "none",
-		}
-	}
 	if source, ok := alignmentConflict(target, pack); ok {
 		if decision.Reaction != "speech_balloon" && decision.Reaction != "warning" && decision.Reaction != "rotating_light" {
 			decision.Reaction = "speech_balloon"
 			decision.ReasonCodes = append(decision.ReasonCodes, "policy.alignment_reaction")
 		}
 		switch decision.Outcome {
+		case types.OutcomeSilent:
+			decision.Outcome = types.OutcomeReplyInChannel
+			decision.Confidence = max(decision.Confidence, 0.99)
+			decision.RequiresFullAgent = true
+			decision.ReleasableEvidenceIDs = appendUnique(decision.ReleasableEvidenceIDs, source.ID)
+			decision.ResponseIntent = fmt.Sprintf("briefly surface and reconcile the conflicting public report from <@%s> in <#%s> without assigning blame or treating the report as verified fact", source.AuthorID, source.ChannelID)
+			decision = withLightestProfile(decision, profiles)
+			decision.ReasonCodes = append(decision.ReasonCodes, "policy.alignment_requires_message")
 		case types.OutcomeReplyInChannel:
 			decision.Confidence = max(decision.Confidence, 0.99)
 			decision.ReasonCodes = append(decision.ReasonCodes, "policy.brief_alignment_in_channel")
@@ -1094,6 +1124,19 @@ func withAmbientPolicyCorrections(decision types.ClassificationDecision, target 
 			decision.ReasonCodes = append(decision.ReasonCodes, "policy.alignment_requires_message")
 		}
 		return decision
+	}
+	if decision.Outcome == types.OutcomeSilent {
+		return decision
+	}
+	if isStableNonUrgentMetricObservation(target.Envelope.Text) && decision.Outcome != types.OutcomeReact {
+		return types.ClassificationDecision{
+			Outcome:            types.OutcomeReact,
+			Confidence:         max(decision.Confidence, 0.99),
+			ReasonCodes:        append(decision.ReasonCodes, "policy.stable_metric_reaction_only"),
+			DisclosureClass:    types.DisclosureDestinationSafe,
+			Reaction:           "warning",
+			AgentModelStrength: "none",
+		}
 	}
 	return decision
 }

@@ -615,7 +615,32 @@ func renderAgentFooter(metadata *types.SlackAgentFooter) string {
 	if metadata.DurationMS > 0 {
 		parts = append(parts, compactDuration(metadata.DurationMS))
 	}
+	if activities := compactAgentActivities(metadata.Activities); activities != "" {
+		parts = append(parts, "used "+activities)
+	}
 	return strings.Join(parts, "  •  ")
+}
+
+func compactAgentActivities(activities []string) string {
+	seen := make(map[string]struct{}, len(activities))
+	compact := make([]string, 0, len(activities))
+	for _, activity := range activities {
+		activity = strings.TrimSpace(strings.ToLower(activity))
+		if activity == "" {
+			continue
+		}
+		if _, exists := seen[activity]; exists {
+			continue
+		}
+		seen[activity] = struct{}{}
+		compact = append(compact, activity)
+	}
+	sort.Strings(compact)
+	if len(compact) > 4 {
+		remaining := len(compact) - 3
+		compact = append(compact[:3], fmt.Sprintf("%d more", remaining))
+	}
+	return strings.Join(compact, ", ")
 }
 
 func humanizeModelID(modelID string) string {

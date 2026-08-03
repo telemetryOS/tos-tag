@@ -69,6 +69,40 @@ func TestParseModelOutputPromotesMarkdownTableToNativeSegment(t *testing.T) {
 	}
 }
 
+func TestParseModelOutputNormalizesTypedTableRowShapes(t *testing.T) {
+	result, err := ParseModelOutput(`{"segments":[{"kind":"table","table":{"columns":[{"header":"Product"},{"header":"Power"},{"header":"Notes"}],"rows":[[{"text":"Mini"},{"text":"12V"}],[{"text":"Pro"},{"text":"PoE"},{"text":"Managed"},{"text":"Optional adapter"}]]}}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Segments) != 1 || result.Segments[0].Table == nil {
+		t.Fatalf("result = %#v", result)
+	}
+	rows := result.Segments[0].Table.Rows
+	if len(rows[0]) != 3 || rows[0][2].Text != "" {
+		t.Fatalf("short row = %#v", rows[0])
+	}
+	if len(rows[1]) != 3 || rows[1][2].Text != "Managed · Optional adapter" {
+		t.Fatalf("long row = %#v", rows[1])
+	}
+	if _, err := NewRenderer().Render(result); err != nil {
+		t.Fatalf("normalized table did not render: %v", err)
+	}
+}
+
+func TestParseModelOutputDegradesUnsafeSlackLinksToVisibleLabels(t *testing.T) {
+	result, err := ParseModelOutput(`{"segments":[{"kind":"mrkdwn_text","text":"See <file:///workspace/core/jobs/state.go|core/jobs/state.go> and <https://example.com/retry|the retry guide>."}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "See core/jobs/state.go and <https://example.com/retry|the retry guide>."
+	if len(result.Segments) != 1 || result.Segments[0].Text != want {
+		t.Fatalf("normalized text = %q", result.Segments[0].Text)
+	}
+	if _, err := NewRenderer().Render(result); err != nil {
+		t.Fatalf("normalized links did not render: %v", err)
+	}
+}
+
 func TestParseModelOutputLeavesPipeTextAndFencedTablesAlone(t *testing.T) {
 	for name, input := range map[string]string{
 		"ordinary pipe prose": `{"segments":[{"kind":"mrkdwn_text","text":"Choose A | B when appropriate."}]}`,

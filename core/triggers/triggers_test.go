@@ -99,3 +99,26 @@ func TestStoreRejectsCrossChannelSubscriptionOverwrite(t *testing.T) {
 		t.Fatalf("cross-channel overwrite changed owner: %#v", stored)
 	}
 }
+
+func TestCronHeartbeatAdvancesInConfiguredTimezone(t *testing.T) {
+	now := time.Date(2026, time.August, 3, 16, 0, 0, 0, time.UTC)
+	store := NewStore(func() time.Time { return now })
+	subscription := testSubscription(now)
+	subscription.Interval = 0
+	subscription.Cron = "0 9 * * 1-5"
+	subscription.Timezone = "America/Vancouver"
+	if _, err := store.PutContext(context.Background(), subscription); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvanceContext(context.Background(), subscription.OrganizationID, subscription.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := store.GetContext(context.Background(), subscription.OrganizationID, subscription.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, time.August, 4, 16, 0, 0, 0, time.UTC)
+	if !stored.NextRun.Equal(want) || stored.Timezone != "America/Vancouver" {
+		t.Fatalf("stored=%#v want next=%s", stored, want)
+	}
+}

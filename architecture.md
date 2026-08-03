@@ -53,8 +53,9 @@ may be observed, but only one observation wins admission and only one delivery
 with a given idempotency key is accepted.
 
 The optional user-authorized sync discovers public channels, private channels,
-DMs, and group DMs visible to the configured Slack user token and bootstraps a
-bounded history once per conversation. MongoDB stores content-free bootstrap
+and DMs visible to the configured Slack user token and bootstraps a bounded
+history once per conversation. Group DMs (mpim) are excluded from discovery,
+and live group-DM events are acknowledged without registration or retention. MongoDB stores content-free bootstrap
 completion and live-event watermarks independently from retained messages.
 Completed bot-joined channels receive a bounded startup and periodic gap repair
 strictly after their last watermark. Recovered ambient history is resolved
@@ -67,6 +68,15 @@ per-method pacing and still honor `Retry-After` in the background, keeping
 Socket Mode acknowledgement and live message processing responsive.
 
 ## Context and privacy
+
+Each channel has a context-history mode. `durable` is the default.
+`session_only` is available for noisy test destinations: history import and
+offline recovery are skipped, the destination context query is limited to its
+own messages observed after process startup, durable memory and organization
+situation facts are excluded, and memory curation/incident projection ignore
+the channel. The live event record remains durable for acknowledgement,
+idempotency, job recovery, and audit; it simply cannot become context in a
+later process session.
 
 The context builder selects authorized channels before querying content. It
 then applies a second post-query disclosure filter and creates an immutable,
@@ -380,6 +390,13 @@ ordinary posts and stream-failure fallback deterministically downgrade them to
 standard Sections/Tables while preserving accessible message fallback text.
 Formatted table cells are converted into native rich-text/link elements, and
 the same validation rejects unproven mentions inside every cell type.
+At the untrusted model boundary, typed table rows with missing cells are padded
+and surplus cells are folded into the final declared column so one recoverable
+shape mistake cannot discard an otherwise valid answer; all normal content,
+size, link, mention, and formatting validation still runs afterward.
+Unsupported model-created Slack link targets such as disposable local file
+paths similarly degrade to their visible label before validation; HTTP(S)
+references remain subject to the normal renderer link checks.
 Delivery records are durable and leased. Multipart sends reconcile immutable
 metadata so restart cannot duplicate already accepted parts.
 
@@ -387,12 +404,16 @@ Admitted full-agent thread work starts a Slack
 [Thinking Steps](https://slack.dev/slack-thinking-steps-ai-agents/) stream in
 the classifier-selected thread. The returned message timestamp is
 persisted on the leased job. Reviewed harness events become concise task-card
-updates from a fixed control-plane vocabulary; raw prompts, reasoning, tool
-arguments, tool output, and message deltas are never streamed. Exact HTTPS
+updates from a fixed control-plane vocabulary. Every native or reviewed tool
+call and every validated active skill replaces one shared current-action card,
+so all steps are visible while they happen without leaving completed-card clutter.
+Dynamic calls must declare active skill names from the injected allowlist. Raw prompts,
+reasoning, tool arguments, tool output, and message deltas are never streamed. Exact HTTPS
 artifact sources may be attached after the reviewed tool boundary validates
 them. On success, the durable delivery record carries the stream timestamp and
 `chat.stopStream` adds the validated Block Kit result as a chunks-mode block
-and finalizes that same message.
+and finalizes that same message. Successfully completed capability categories are
+deduplicated into the control-plane-owned model footer.
 Start reconciliation uses immutable Slack metadata, retries reuse the persisted
 timestamp, and unsupported stream operations fall back to ordinary durable
 delivery. Intentional reaction-only and short direct classifier outcomes do not
@@ -405,8 +426,10 @@ conversations and enrolls new conversations as `observe`. When explicitly
 enabled, it reconciles that human inventory with a bot-token inventory and
 derives `assist` only for public/private channels Tag has joined; membership
 events apply joins and leaves in real time, with bounded periodic inventory
-reconciliation as a fallback. DMs and group DMs are not auto-enabled. An
-optional destination allowlist can narrow this set further.
+reconciliation as a fallback. DMs are not auto-enabled, and group DMs (mpim)
+are ignored entirely: excluded from discovery, never persisted, and hidden
+from channel coverage. An optional destination allowlist can narrow this set
+further.
 Checked-in defaults remain stub/shadow/disabled and do not encode live IDs or
 secrets.
 
@@ -416,10 +439,27 @@ secrets.
 The directive is stored in MongoDB, audited, placed in the system context
 partition, and shown to both classifier and admitted agent.
 
-Routines enqueue ordinary reauthorized jobs on a schedule. Trigger
-subscriptions wake on an interval, rebuild the full destination-safe context,
-run the same direct classifier gate, and enqueue work only when admitted.
-Neither path bypasses policy, model routing, approval, or delivery controls.
+`/tag-mode` shows or changes the current channel's participation mode
+(`observe`, `assist`, or `proactive`) with an ephemeral reply. The command is
+workspace-bound, validated against the installation, audited as
+`channel_policy.mode_command`, and an explicit choice clears
+membership-managed participation so reconciliation cannot revert it. The
+management Channel coverage page offers the same control as an inline
+dropdown.
+
+Routines enqueue ordinary reauthorized jobs on a standard five-field cron
+schedule with an explicit IANA timezone. Trigger subscriptions wake on the
+same cron model, rebuild the full destination-safe context, run the direct
+classifier gate, and enqueue work only when admitted. The scheduler advances
+past missed windows without replay storms. Older fixed-interval records remain
+readable and executable until an operator migrates them. Neither path bypasses
+policy, model routing, approval, or delivery controls.
+
+The management **Automation** page combines classifier-gated subscriptions and
+direct routines into one operator view. It resolves channel/session scope in
+the control plane, exposes only the human schedule, timezone, instruction,
+confidence, and enabled state, and never requires workspace or session IDs in
+the browser form.
 
 ## Container topology
 
@@ -484,7 +524,7 @@ tests, vet, behavioral evals, gosec, and govulncheck. Network and credential
 tests are opt-in. `integration/codex_live_test.go` verifies the installed App
 Server handshake, dynamic-tool registration, model/effort routing, structured
 output, event normalization, and teardown against a real authenticated Codex
-runtime. `make eval-live` sends the 44 natural classifier messages through the
+runtime. `make eval-live` sends the 46 natural classifier messages through the
 configured direct OpenAI provider and scores outcomes, source grounding,
 restricted disclosure, placement, reaction semantics, and model/effort routing;
 fixture names and expected results are never part of the provider request.

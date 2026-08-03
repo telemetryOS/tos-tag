@@ -28,6 +28,14 @@ after the watermark; recovered ambient messages stay resolved context, while
 direct mentions return to the durable decision queue. Exceptional Web API
 reads are proactively paced per method.
 
+Each channel may independently select durable or `session_only` context
+history. A session-only destination skips Slack history bootstrap and offline
+catch-up, builds context solely from that destination's messages observed
+since the current process started, and does not recall or create durable
+memory/situation facts. Live operational records remain durable for
+acknowledgement, idempotency, recovery, and audit, but are not eligible as
+future-session conversational context for that destination.
+
 `core/memory` asynchronously consolidates changed human channel/thread scopes
 with Luna medium effort, stores source hashes, summaries, confidence, and
 source-bound facts in MongoDB, and recalls them through destination-safe
@@ -57,7 +65,7 @@ product content is available only through the
 fixed-host `telemetryos.product-docs` read tool, while arbitrary public research
 uses Codex's first-party live web search with untrusted-content handling and no
 credential or subprocess-network access. `tos_tag_trigger` separately manages
-classifier-gated channel heartbeat subscriptions with explicit trigger
+classifier-gated channel heartbeat subscriptions with explicit cron and IANA-timezone trigger
 authority. Ordinary `assist` traffic cannot launch full-agent work from an
 unaddressed declarative status update; only `proactive` or a deterministic
 invocation grant may do so.
@@ -90,14 +98,17 @@ Existing Wiki pages remain normal references, not produced artifacts: any
 provided reference uses the exact human HTTPS URL returned by the reviewed
 `url` read operation, and bare namespace/slugs are rejected before rendering.
 Full-agent results also receive one final context footer with the resolved
-model, effort, provider-reported turn tokens, and elapsed worker time. The
+model, effort, provider-reported turn tokens, elapsed worker time, and a compact
+allowlisted summary of successfully used capabilities. The
 control plane owns this metadata; model output and classifier-only replies do
 not carry it.
 
 Admitted full-agent thread jobs use Slack Thinking Steps in collapsed timeline mode.
 The control plane starts and owns the stream, emits only allowlisted operational
-milestones (for example, reading the Wiki, querying telemetry, or publishing a
-reviewed artifact), and finalizes the same message with the typed result.
+milestones, gives every native/reviewed tool call one stable in-progress then
+complete/error update on one rotating current-action task card, and shows each
+dynamically declared validated skill through that same transient card. Examples include reading the Wiki, querying telemetry, or
+publishing a reviewed artifact. It finalizes the same message with the typed result.
 Model deltas, tool arguments, raw outputs, private context, and chain-of-thought
 never enter the timeline. Reaction-only classifier decisions remain reactions.
 Slack requires a stream to reply to a user message, so the control plane does

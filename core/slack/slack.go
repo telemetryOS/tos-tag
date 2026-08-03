@@ -16,8 +16,9 @@ var (
 )
 
 type AcceptResult struct {
-	Duplicate bool
-	Ignored   bool
+	Duplicate       bool
+	Ignored         bool
+	ResolvedContext bool
 }
 
 type Handler func(context.Context, types.SlackEnvelope) (AcceptResult, error)
@@ -60,6 +61,24 @@ type DirectiveConfiguration struct {
 
 type DirectiveLoadHandler func(context.Context, DirectiveConfigurationRequest) (DirectiveConfiguration, error)
 type DirectiveSaveHandler func(context.Context, DirectiveConfigurationRequest) (DirectiveConfiguration, error)
+
+// ModeChangeRequest is a /tag-mode slash command scoped to one channel. Mode
+// is the raw requested mode; an empty Mode asks for the current mode only.
+type ModeChangeRequest struct {
+	OrganizationID string
+	WorkspaceID    string
+	ChannelID      string
+	UserID         string
+	Mode           string
+}
+
+type ModeChangeResult struct {
+	Mode     string
+	Previous string
+	Changed  bool
+}
+
+type ModeChangeHandler func(context.Context, ModeChangeRequest) (ModeChangeResult, error)
 
 type Ingress interface {
 	Start(context.Context, Handler) error

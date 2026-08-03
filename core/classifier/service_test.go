@@ -77,6 +77,7 @@ func TestDirectMentionPlacementPolicyCorrectsUnsafeClassifierPlacement(t *testin
 		"explicit thread request": "<@tos-tag> Reply in a thread. What is 2 + 2?",
 		"deep table surface":      "<@tos-tag> Compare the two approaches in a native table with three rows.",
 		"document surface":        "<@tos-tag> Write a detailed architecture document explaining how the control plane works.",
+		"implementation plan":     "<@tos-tag> What would we need to change to add exponential backoff safely?",
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := target(text)
@@ -86,6 +87,81 @@ func TestDirectMentionPlacementPolicyCorrectsUnsafeClassifierPlacement(t *testin
 				t.Fatalf("deep request escaped into channel: %#v", result)
 			}
 		})
+	}
+}
+
+func TestMentionStrongAgentRecommendationUsesThreadProgressSurface(t *testing.T) {
+	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		return types.ClassificationDecision{
+			Outcome:              types.OutcomeReplyInChannel,
+			Confidence:           .99,
+			ReasonCodes:          []string{"operational.synthesis"},
+			DisclosureClass:      types.DisclosureDestinationSafe,
+			RequiresFullAgent:    true,
+			Reaction:             "thinking_face",
+			AgentModelProfile:    "chatgpt-luna-max",
+			AgentModelStrength:   "strong",
+			AgentReasoningEffort: "max",
+		}, nil
+	}), false, .9, .95)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := target("<@tag> any operational issues?")
+	got.Envelope.IsMention = true
+	result := service.Decide(context.Background(), got, types.ContextPackRevision{})
+	if result.Effective.Outcome != types.OutcomeReplyInThread || !strings.Contains(strings.Join(result.Effective.ReasonCodes, ","), "policy.substantial_agent_thread") {
+		t.Fatalf("substantial mentioned work did not receive a threaded progress surface: %#v", result.Effective)
+	}
+}
+
+func TestMentionStrongThreadRecommendationIsNotDownconvertedAsBrief(t *testing.T) {
+	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		return types.ClassificationDecision{
+			Outcome:              types.OutcomeReplyInThread,
+			Confidence:           .99,
+			ReasonCodes:          []string{"operational.synthesis"},
+			DisclosureClass:      types.DisclosureDestinationSafe,
+			RequiresFullAgent:    true,
+			Reaction:             "rotating_light",
+			AgentModelProfile:    "chatgpt-luna-max",
+			AgentModelStrength:   "strong",
+			AgentReasoningEffort: "max",
+		}, nil
+	}), false, .9, .95)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := target("<@tag> any operational issues?")
+	got.Envelope.IsMention = true
+	result := service.Decide(context.Background(), got, types.ContextPackRevision{})
+	if result.Effective.Outcome != types.OutcomeReplyInThread || strings.Contains(strings.Join(result.Effective.ReasonCodes, ","), "policy.brief_surface_channel") {
+		t.Fatalf("strong threaded work was down-converted as brief: %#v", result.Effective)
+	}
+}
+
+func TestMentionExplicitChannelPlacementOverridesStrongThreadDefault(t *testing.T) {
+	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		return types.ClassificationDecision{
+			Outcome:              types.OutcomeReplyInThread,
+			Confidence:           .99,
+			ReasonCodes:          []string{"operational.synthesis"},
+			DisclosureClass:      types.DisclosureDestinationSafe,
+			RequiresFullAgent:    true,
+			Reaction:             "thinking_face",
+			AgentModelProfile:    "chatgpt-luna-max",
+			AgentModelStrength:   "strong",
+			AgentReasoningEffort: "max",
+		}, nil
+	}), false, .9, .95)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := target("<@tag> any operational issues? Reply in the channel.")
+	got.Envelope.IsMention = true
+	result := service.Decide(context.Background(), got, types.ContextPackRevision{})
+	if result.Effective.Outcome != types.OutcomeReplyInChannel || !strings.Contains(strings.Join(result.Effective.ReasonCodes, ","), "hard.explicit_channel_request") {
+		t.Fatalf("explicit channel placement was not preserved: %#v", result.Effective)
 	}
 }
 

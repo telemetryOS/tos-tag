@@ -53,7 +53,7 @@ func TestOpenAIClassifierUsesDirectStructuredResponsesAPI(t *testing.T) {
 	if received["model"] != "gpt-5.6-luna" || received["store"] != false {
 		t.Fatalf("unexpected Responses API request: %#v", received)
 	}
-	if instructions, _ := received["instructions"].(string); !strings.Contains(instructions, "brief, self-contained") || !strings.Contains(instructions, "deeper dive") || !strings.Contains(instructions, "active_thread") || !strings.Contains(instructions, "ambient alignment intervention") || !strings.Contains(instructions, "destination_recent_participant_ids") || !strings.Contains(instructions, "likely_addressed_to_agent") || !strings.Contains(instructions, "not a bare declaration") || !strings.Contains(instructions, "must not start full-agent work") || !strings.Contains(instructions, "conversation_focus") || !strings.Contains(instructions, "are we using it?") || !strings.Contains(instructions, "weather or forecast question") || !strings.Contains(instructions, "never claim the person is not a channel member") || !strings.Contains(instructions, "hammer_and_wrench marks implementation") || !strings.Contains(instructions, "speech_balloon marks a conversational explanation") || !strings.Contains(instructions, "direct_reply") || !strings.Contains(instructions, "one plain-text line") || !strings.Contains(instructions, "light/low profile") || !strings.Contains(instructions, "standard/medium profile") || !strings.Contains(instructions, "strong/max profile") || !strings.Contains(instructions, "document-sized synthesis") || !strings.Contains(instructions, "Agent Wiki artifact") || !strings.Contains(instructions, "formatting alone never justify max") || !strings.Contains(instructions, "never claim a direct mention when direct_mention is false") || !strings.Contains(instructions, "source_write_requested") || !strings.Contains(instructions, "authoritative_product_retrieval_required") || !strings.Contains(instructions, "marketing-messaging") || !strings.Contains(instructions, "Premium Trial") {
+	if instructions, _ := received["instructions"].(string); !strings.Contains(instructions, "brief, self-contained") || !strings.Contains(instructions, "deeper dive") || !strings.Contains(instructions, "what would need to change") || !strings.Contains(instructions, "active_thread") || !strings.Contains(instructions, "ambient alignment intervention") || !strings.Contains(instructions, "destination_recent_participant_ids") || !strings.Contains(instructions, "likely_addressed_to_agent") || !strings.Contains(instructions, "not a bare declaration") || !strings.Contains(instructions, "must not start full-agent work") || !strings.Contains(instructions, "conversation_focus") || !strings.Contains(instructions, "are we using it?") || !strings.Contains(instructions, "weather or forecast question") || !strings.Contains(instructions, "never claim the person is not a channel member") || !strings.Contains(instructions, "hammer_and_wrench marks implementation") || !strings.Contains(instructions, "speech_balloon marks a conversational explanation") || !strings.Contains(instructions, "direct_reply") || !strings.Contains(instructions, "one plain-text line") || !strings.Contains(instructions, "light/low profile") || !strings.Contains(instructions, "standard/medium profile") || !strings.Contains(instructions, "strong/max profile") || !strings.Contains(instructions, "document-sized synthesis") || !strings.Contains(instructions, "Agent Wiki artifact") || !strings.Contains(instructions, "formatting alone never justify max") || !strings.Contains(instructions, "never claim a direct mention when direct_mention is false") || !strings.Contains(instructions, "source_write_requested") || !strings.Contains(instructions, "authoritative_product_retrieval_required") || !strings.Contains(instructions, "marketing-messaging") || !strings.Contains(instructions, "Premium Trial") {
 		t.Fatalf("classifier placement guidance missing: %q", instructions)
 	}
 	inputs := received["input"].([]any)
@@ -122,7 +122,7 @@ func TestOpenAIRecommendationDefaultsOnlyMissingReaction(t *testing.T) {
 	}
 }
 
-func TestAmbientPolicyCorrectionsPreserveSilenceAndEnforceAdmittedPlacement(t *testing.T) {
+func TestAmbientPolicyCorrectionsSurfaceAlignmentAndEnforceAdmittedPlacement(t *testing.T) {
 	profiles := []advertisedAgentProfile{{ID: "light", Strength: "light", ReasoningEffort: "low"}, {ID: "standard", Strength: "standard", ReasoningEffort: "medium"}, {ID: "strong", Strength: "strong", ReasoningEffort: "max"}}
 	now := time.Now().UTC()
 	target := Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{ChannelID: "support", UserID: "U_ALEX", Text: "Checkout is healthy again.", EventTime: now}}
@@ -136,8 +136,8 @@ func TestAmbientPolicyCorrectionsPreserveSilenceAndEnforceAdmittedPlacement(t *t
 		t.Fatalf("recognized alignment channel reply was left below placement threshold: %#v", lowConfidenceChannel)
 	}
 	silentDecision := withAmbientPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeSilent}, target, pack, profiles)
-	if silentDecision.Outcome != types.OutcomeSilent {
-		t.Fatalf("classifier silence was overridden: %#v", silentDecision)
+	if silentDecision.Outcome != types.OutcomeReplyInChannel || !silentDecision.RequiresFullAgent || silentDecision.AgentModelProfile != "light" || silentDecision.AgentReasoningEffort != "low" || silentDecision.Reaction != "speech_balloon" || len(silentDecision.ReleasableEvidenceIDs) != 1 || silentDecision.ReleasableEvidenceIDs[0] != "development/1" || !slices.Contains(silentDecision.ReasonCodes, "policy.alignment_requires_message") {
+		t.Fatalf("silent public alignment conflict was not surfaced safely: %#v", silentDecision)
 	}
 
 	statusTarget := Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{ChannelID: "support", UserID: "U_ALEX", Text: "Is anyone else seeing checkout fail?"}}
@@ -203,6 +203,10 @@ func TestAmbientPolicyCorrectionsPreserveSilenceAndEnforceAdmittedPlacement(t *t
 	if addressedPraise.Reaction != "white_check_mark" || addressedPraise.DirectReply != "Thanks!" {
 		t.Fatalf("addressed praise reaction = %#v", addressedPraise)
 	}
+	addressedPraiseOverreach := withAddressedSocialPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, Confidence: .99, RequiresFullAgent: true, Reaction: "white_check_mark", AgentModelProfile: "light", AgentModelStrength: "light", AgentReasoningEffort: "low"}, Target{Envelope: types.SlackEnvelope{Text: "Nice work, Tag!"}})
+	if addressedPraiseOverreach.DirectReply != "Thanks!" || addressedPraiseOverreach.RequiresFullAgent || addressedPraiseOverreach.AgentModelProfile != "" || addressedPraiseOverreach.AgentModelStrength != "none" || addressedPraiseOverreach.Reaction != "white_check_mark" {
+		t.Fatalf("addressed praise provider overreach was not collapsed to a direct reply: %#v", addressedPraiseOverreach)
+	}
 	threadPraise := withAddressedSocialPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeSilent, Confidence: .9, ReasonCodes: []string{"social"}, AgentModelStrength: "none"}, Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "Appreciate the clear matrix, Tag!"}})
 	if threadPraise.Outcome != types.OutcomeReplyInThread || threadPraise.DirectReply != "Happy to help!" || threadPraise.RequiresFullAgent || threadPraise.Reaction != "white_check_mark" {
 		t.Fatalf("active-thread praise remained silent: %#v", threadPraise)
@@ -254,6 +258,10 @@ func TestAmbientPolicyCorrectionsPreserveSilenceAndEnforceAdmittedPlacement(t *t
 	if readOnlyAnalysis.Outcome != types.OutcomeReplyInThread || readOnlyAnalysis.SourceWriteRequested || !readOnlyAnalysis.RequiresFullAgent || readOnlyAnalysis.AgentModelStrength != "standard" || readOnlyAnalysis.AgentReasoningEffort != "medium" {
 		t.Fatalf("read-only code analysis floor was not enforced: %#v", readOnlyAnalysis)
 	}
+	providerWriteFlag := withReadOnlyCodeAnalysisPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, Confidence: .99, DirectReply: sourceWriteRedirectReply, SourceWriteRequested: true, Reaction: "speech_balloon", AgentModelStrength: "none"}, Target{Envelope: types.SlackEnvelope{Text: "Review the Gateway authentication code and explain how token validation works."}}, profiles)
+	if providerWriteFlag.Outcome != types.OutcomeReplyInThread || providerWriteFlag.DirectReply != "" || providerWriteFlag.SourceWriteRequested || !providerWriteFlag.RequiresFullAgent || providerWriteFlag.AgentModelStrength != "standard" {
+		t.Fatalf("provider source-write overreach was not recovered as read-only analysis: %#v", providerWriteFlag)
+	}
 	codeOwnership := withReadOnlyCodeAnalysisPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, Confidence: .91, RequiresFullAgent: true, AgentModelProfile: "light", AgentModelStrength: "light", AgentReasoningEffort: "low"}, Target{Envelope: types.SlackEnvelope{Text: "Which package owns the progress timeline, and what are its main responsibilities?"}}, profiles)
 	if codeOwnership.Outcome != types.OutcomeReplyInThread || codeOwnership.SourceWriteRequested || !codeOwnership.RequiresFullAgent || codeOwnership.AgentModelStrength != "standard" || codeOwnership.AgentReasoningEffort != "medium" {
 		t.Fatalf("code ownership question missed the read-only analysis floor: %#v", codeOwnership)
@@ -273,6 +281,14 @@ func TestAmbientPolicyCorrectionsPreserveSilenceAndEnforceAdmittedPlacement(t *t
 	nonProductSchedule := withProductKnowledgePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInThread, ProductRetrievalRequired: true, RequiresFullAgent: true}, Target{Envelope: types.SlackEnvelope{Text: "<@tos-tag> when does the deploy window start?", IsMention: true}}, profiles)
 	if nonProductSchedule.ProductRetrievalRequired {
 		t.Fatalf("operational deploy scheduling was mistaken for product knowledge: %#v", nonProductSchedule)
+	}
+	nonProductOperationalStatus := withProductKnowledgePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, ProductRetrievalRequired: true, RequiresFullAgent: true, AgentModelProfile: "strong", AgentModelStrength: "strong", AgentReasoningEffort: "max"}, Target{Envelope: types.SlackEnvelope{Text: "<@tos-tag> any operational issues?", IsMention: true}}, profiles)
+	if nonProductOperationalStatus.ProductRetrievalRequired {
+		t.Fatalf("operational status synthesis was mistaken for product knowledge: %#v", nonProductOperationalStatus)
+	}
+	nonProductOperationalTopic := withProductKnowledgePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, TopicIDs: []string{"feature-regression"}, RequiresFullAgent: true, AgentModelProfile: "strong", AgentModelStrength: "strong", AgentReasoningEffort: "max"}, Target{Envelope: types.SlackEnvelope{Text: "<@tos-tag> any operational issues?", IsMention: true}}, profiles)
+	if nonProductOperationalTopic.ProductRetrievalRequired || slices.Contains(nonProductOperationalTopic.ReasonCodes, "policy.authoritative_product_retrieval") {
+		t.Fatalf("context topic mislabeled operational status as product knowledge: %#v", nonProductOperationalTopic)
 	}
 	unrelatedQuestion := withAmbientPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeSilent, Confidence: .95, ReasonCodes: []string{"ambient"}}, Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Text: "Does anyone know what changed in the API deploy?"}}, types.ContextPackRevision{}, profiles)
 	if unrelatedQuestion.Outcome != types.OutcomeSilent {
@@ -321,6 +337,19 @@ func TestConversationalReferenceUsesImmediatelyPrecedingTagTurn(t *testing.T) {
 	}
 	if focus := destinationConversationFocus(target, pack.Sources, 8); len(focus) != 2 || focus[0].ID != "tos-tag/1.0" || focus[1].ID != "tos-tag/2.0" {
 		t.Fatalf("conversation focus = %#v", focus)
+	}
+}
+
+func TestAmbientPolicyCorrectionSurfacesDestinationSafeAlignmentConflictFromSilentPrediction(t *testing.T) {
+	profiles := []advertisedAgentProfile{{ID: "light", Strength: "light", ReasoningEffort: "low"}, {ID: "standard", Strength: "standard", ReasoningEffort: "medium"}}
+	now := time.Date(2026, 8, 3, 18, 0, 0, 0, time.UTC)
+	target := Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{ChannelID: "support", UserID: "U_ALEX", Text: "Checkout is healthy again.", EventTime: now}}
+	pack := types.ContextPackRevision{Sources: []types.ContextSource{{
+		ID: "development/1", ChannelID: "development", AuthorID: "U_TOM", Provenance: "human_message", Text: "Checkout is still timing out for every request.", ObservedAt: now.Add(-time.Minute), DisclosureClass: types.DisclosureDestinationSafe,
+	}}}
+	got := withAmbientPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeSilent, Confidence: .9, ReasonCodes: []string{"provider_silent"}, DisclosureClass: types.DisclosureDestinationSafe, AgentModelStrength: "none"}, target, pack, profiles)
+	if got.Outcome != types.OutcomeReplyInChannel || !got.RequiresFullAgent || got.Reaction != "speech_balloon" || got.AgentModelStrength != "light" || len(got.ReleasableEvidenceIDs) != 1 || got.ReleasableEvidenceIDs[0] != "development/1" || !strings.Contains(got.ResponseIntent, "<@U_TOM>") || !strings.Contains(got.ResponseIntent, "<#development>") {
+		t.Fatalf("alignment correction = %#v", got)
 	}
 }
 

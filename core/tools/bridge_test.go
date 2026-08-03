@@ -175,7 +175,7 @@ func TestTriggerBridgeIsChannelScopedAndResumesExactApprovedMutation(t *testing.
 	bridge := &Bridge{jobs: queue, approvals: approvalStore, audit: auditLog, approvalCoordinator: coordinator, triggers: triggerStore, scopes: make(map[string]JobScope)}
 	bridge.scopes["first"] = JobScope{OrganizationID: "org", WorkspaceID: "team", ChannelID: "channel", ThreadTS: "100.1", JobID: string(job.ID), AttemptID: "attempt-1", LeaseToken: job.Lease.Token, SteeringEpoch: job.SteeringEpoch, ExpiresAt: time.Now().Add(time.Minute)}
 	enabled := true
-	input := triggerSubscriptionRequest{Operation: "put", ID: "incident-watch", Instruction: "Check for an unresolved incident.", IntervalSeconds: 300, MinConfidence: .8, Enabled: &enabled}
+	input := triggerSubscriptionRequest{Operation: "put", ID: "incident-watch", Instruction: "Check for an unresolved incident.", Cron: "*/5 * * * *", Timezone: "America/Vancouver", MinConfidence: .8, Enabled: &enabled}
 	status, body := triggerBridgeCall(t, bridge, "first", input)
 	if status != http.StatusConflict {
 		t.Fatalf("status=%d body=%s", status, body)
@@ -207,7 +207,7 @@ func TestTriggerBridgeIsChannelScopedAndResumesExactApprovedMutation(t *testing.
 	bridge.scopes["second"] = JobScope{OrganizationID: "org", WorkspaceID: "team", ChannelID: "channel", ThreadTS: "100.1", JobID: string(job.ID), AttemptID: "attempt-2", LeaseToken: job.Lease.Token, SteeringEpoch: job.SteeringEpoch, ExpiresAt: time.Now().Add(time.Minute)}
 	input.ApprovalID = requested.ApprovalID
 	status, body = triggerBridgeCall(t, bridge, "second", input)
-	if status != http.StatusOK || !bytes.Contains(body, []byte(`"id":"incident-watch"`)) {
+	if status != http.StatusOK || !bytes.Contains(body, []byte(`"id":"incident-watch"`)) || !bytes.Contains(body, []byte(`"cron":"*/5 * * * *"`)) {
 		t.Fatalf("status=%d body=%s", status, body)
 	}
 	status, body = triggerBridgeCall(t, bridge, "second", triggerSubscriptionRequest{Operation: "list"})
@@ -227,7 +227,7 @@ func TestTriggerBridgeRejectsInvalidMutationBeforeApproval(t *testing.T) {
 	bridge := &Bridge{jobs: queue, approvals: approvalStore, audit: auditLog, triggers: triggers.NewStore(nil), scopes: map[string]JobScope{
 		"capability": {OrganizationID: "org", WorkspaceID: "team", ChannelID: "channel", ThreadTS: "100.1", JobID: string(job.ID), AttemptID: "attempt", LeaseToken: job.Lease.Token, SteeringEpoch: job.SteeringEpoch, ExpiresAt: time.Now().Add(time.Minute)},
 	}}
-	status, body := triggerBridgeCall(t, bridge, "capability", triggerSubscriptionRequest{Operation: "put", ID: "invalid", Instruction: "too frequent", IntervalSeconds: 30})
+	status, body := triggerBridgeCall(t, bridge, "capability", triggerSubscriptionRequest{Operation: "put", ID: "invalid", Instruction: "invalid schedule", Cron: "not a cron", Timezone: "UTC"})
 	if status != http.StatusUnprocessableEntity || !bytes.Contains(body, []byte("invalid_trigger_subscription")) {
 		t.Fatalf("status=%d body=%s", status, body)
 	}

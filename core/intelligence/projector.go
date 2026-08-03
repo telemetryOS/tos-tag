@@ -98,11 +98,18 @@ func (p *Mongo) Project(ctx context.Context, observation models.Observation) (Re
 	if _, err := p.db.Collection(models.CollectionDerivations).DeleteMany(ctx, bson.M{"organization_id": observation.OrganizationID, "source_id": observation.PublicID}); err != nil {
 		return Result{}, err
 	}
+	count, err := p.db.Collection(models.CollectionChannels).CountDocuments(ctx, bson.M{"organization_id": observation.OrganizationID, "team_id": observation.TeamID, "channel_id": observation.ChannelID, "context_history_mode": string(types.ContextHistorySessionOnly)})
+	if err != nil {
+		return Result{}, err
+	}
+	if count > 0 {
+		return p.advance(ctx, observation, nil)
+	}
 	if observation.EventType == string(types.SlackEventDelete) {
 		return p.advance(ctx, observation, nil)
 	}
 	var message models.ChannelMessage
-	err := p.db.Collection(models.CollectionMessages).FindOne(ctx, bson.M{"organization_id": observation.OrganizationID, "team_id": observation.TeamID, "channel_id": observation.ChannelID, "message_ts": messageTS, "deleted": false, "expires_at": bson.M{"$gt": p.now().UTC()}}).Decode(&message)
+	err = p.db.Collection(models.CollectionMessages).FindOne(ctx, bson.M{"organization_id": observation.OrganizationID, "team_id": observation.TeamID, "channel_id": observation.ChannelID, "message_ts": messageTS, "deleted": false, "expires_at": bson.M{"$gt": p.now().UTC()}}).Decode(&message)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return p.advance(ctx, observation, nil)
 	}

@@ -10,12 +10,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/telemetryos/tos-tag/core/activity"
+	"github.com/telemetryos/tos-tag/core/marketplace"
 	"github.com/telemetryos/tos-tag/core/workers"
 )
 
@@ -239,6 +242,64 @@ func TestCodexSlackOutputSchemaIncludesSafeAgentPresentationBlocks(t *testing.T)
 		t.Fatal(err)
 	}
 	assertStrictObjectSchemas(t, normalized, "$")
+}
+
+func TestCodexDynamicToolsRequireValidatedSkillNames(t *testing.T) {
+	tools := codexDynamicTools([]marketplace.SkillSnapshot{{Name: "product-knowledge"}, {Name: "wiki"}})
+	if len(tools) != 2 {
+		t.Fatalf("dynamic tools = %#v", tools)
+	}
+	for _, tool := range tools {
+		schema, _ := tool["inputSchema"].(map[string]any)
+		required, _ := schema["required"].([]string)
+		if !slices.Contains(required, "skill_names") {
+			t.Fatalf("%s does not require skill_names: %#v", tool["name"], schema)
+		}
+		properties, _ := schema["properties"].(map[string]any)
+		skillSchema, _ := properties["skill_names"].(map[string]any)
+		items, _ := skillSchema["items"].(map[string]any)
+		values, _ := items["enum"].([]string)
+		if !reflect.DeepEqual(values, []string{"product-knowledge", "wiki"}) || skillSchema["minItems"] != 1 || skillSchema["uniqueItems"] != true {
+			t.Fatalf("%s skill schema = %#v", tool["name"], skillSchema)
+		}
+	}
+}
+
+func TestPrepareToolInvocationValidatesSkillsAndStripsProgressMetadata(t *testing.T) {
+	session := &codexWorkerSession{allowedSkills: map[string]struct{}{"product-knowledge": {}, "wiki": {}}}
+	invocation, forwarded, err := session.prepareToolInvocation("call-1", "tos_tag_tool", json.RawMessage(`{"skill_names":["product-knowledge","wiki","wiki"],"tool_id":"telemetryos.wiki","operation_id":"read","arguments":["get","primer/node-mini"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invocation.CallID != "call-1" || invocation.ToolID != "telemetryos.wiki" || invocation.OperationID != "read" || invocation.ResourceAction != "get" || !reflect.DeepEqual(invocation.SkillNames, []string{"product-knowledge", "wiki"}) {
+		t.Fatalf("invocation = %#v", invocation)
+	}
+	if bytes.Contains(forwarded, []byte("skill_names")) || !bytes.Contains(forwarded, []byte("primer/node-mini")) {
+		t.Fatalf("forwarded arguments = %s", forwarded)
+	}
+	if _, _, err := session.prepareToolInvocation("call-2", "tos_tag_tool", json.RawMessage(`{"skill_names":["untrusted-skill"],"tool_id":"telemetryos.wiki","operation_id":"read","arguments":[]}`)); err == nil {
+		t.Fatal("unavailable skill was accepted")
+	}
+}
+
+func TestWorkerCodexNotificationsExposeSafeSkillAndNativeToolLifecycle(t *testing.T) {
+	session := &codexWorkerSession{threadID: "thread-1", events: make(chan Event, 8), errs: make(chan error, 1)}
+	session.notification("item/started", json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","startedAtMs":1,"item":{"id":"input-1","type":"userMessage","content":[{"type":"skill","name":"product-knowledge","path":"/private/skill"}]}}`))
+	session.notification("item/started", json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","startedAtMs":2,"item":{"id":"web-1","type":"webSearch","query":"private query"}}`))
+	session.notification("item/completed", json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","completedAtMs":3,"item":{"id":"web-1","type":"webSearch","query":"private query","action":{"type":"search"}}}`))
+
+	var observed []Event
+	for len(session.events) > 0 {
+		observed = append(observed, <-session.events)
+	}
+	if len(observed) != 4 || observed[0].Type != "skill.execution.started" || observed[0].Data["skill_name"] != "product-knowledge" || observed[1].Type != "tool.execution.started" || observed[2].Type != "web.search.completed" || observed[3].Type != "tool.execution.completed" {
+		t.Fatalf("events = %#v", observed)
+	}
+	progressOnly := []Event{observed[0], observed[1], observed[3]}
+	encoded, _ := json.Marshal(progressOnly)
+	if bytes.Contains(encoded, []byte("private query")) || bytes.Contains(encoded, []byte("/private/skill")) {
+		t.Fatalf("progress events leaked private values: %s", encoded)
+	}
 }
 
 func assertStrictObjectSchemas(t *testing.T, value any, path string) {

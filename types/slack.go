@@ -2,6 +2,13 @@ package types
 
 import "time"
 
+type ContextHistoryMode string
+
+const (
+	ContextHistoryDurable     ContextHistoryMode = "durable"
+	ContextHistorySessionOnly ContextHistoryMode = "session_only"
+)
+
 type SlackEventKind string
 
 const (
@@ -10,12 +17,18 @@ const (
 	SlackEventDelete  SlackEventKind = "message_delete"
 )
 
+// SlackChannelKindGroupDM identifies multi-party direct messages (Slack
+// channel_type "mpim"). tos-tag ignores these conversations entirely: they are
+// excluded from discovery, live persistence, and channel coverage.
+const SlackChannelKindGroupDM = "mpim"
+
 type SlackEnvelope struct {
 	OrganizationID string         `json:"organization_id"`
 	EnvelopeID     string         `json:"envelope_id"`
 	EventID        string         `json:"event_id"`
 	TeamID         string         `json:"team_id"`
 	ChannelID      string         `json:"channel_id"`
+	ChannelKind    string         `json:"channel_kind,omitempty"`
 	MessageTS      string         `json:"message_ts"`
 	ThreadTS       string         `json:"thread_ts,omitempty"`
 	UserID         string         `json:"user_id,omitempty"`

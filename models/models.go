@@ -147,6 +147,7 @@ type Channel struct {
 	MaxResponsesPerHour              int           `bson:"max_responses_per_hour"`
 	MaxConcurrentJobs                int           `bson:"max_concurrent_jobs"`
 	DefaultModelProfile              string        `bson:"default_model_profile,omitempty"`
+	ContextHistoryMode               string        `bson:"context_history_mode,omitempty"`
 	ApproverUserIDs                  []string      `bson:"approver_user_ids,omitempty"`
 	BotIsMember                      bool          `bson:"bot_is_member"`
 	BotMembershipKnown               bool          `bson:"bot_membership_known"`
