@@ -2,6 +2,7 @@ package harness
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -297,6 +298,21 @@ func TestCompletedToolOperationExposesOnlyToolIdentity(t *testing.T) {
 	}
 	if toolID, operationID, resourceAction := completedToolOperation("tos_tag_trigger", json.RawMessage(`{"operation":"list"}`)); toolID != "" || operationID != "" || resourceAction != "" {
 		t.Fatalf("non-marketplace operation leaked as tool completion=%q/%q/%q", toolID, operationID, resourceAction)
+	}
+}
+
+func TestWorkerCodexPublishesReviewedToolIdentityWithoutArguments(t *testing.T) {
+	activityFeed := activity.New(10)
+	session := &codexWorkerSession{activity: activityFeed, organizationID: "org", jobID: "job", attemptID: "attempt", threadID: "thread"}
+	arguments := json.RawMessage(`{"tool_id":"telemetryos.code","operation_id":"read","arguments":["versions","tos-tag","go"]}`)
+	session.publishToolResult("item/tool/call", "completed", "tos_tag_tool", arguments)
+	records := activityFeed.Snapshot("org", 10)
+	if len(records) != 1 || records[0].Kind != "codex.tool" || records[0].Details["tool_id"] != "telemetryos.code" || records[0].Details["operation_id"] != "read" || records[0].Details["resource_action"] != "versions" {
+		t.Fatalf("tool activity = %#v", records)
+	}
+	encoded, _ := json.Marshal(records[0])
+	if bytes.Contains(encoded, []byte("tos-tag")) {
+		t.Fatalf("tool activity leaked arguments: %s", encoded)
 	}
 }
 

@@ -15,9 +15,11 @@ required or permitted in normal tests, fixtures, or behavioral evals.
 
 The explicitly approved local development deployment may observe all
 user-authorized conversations and bootstrap bounded history once. Durable,
-content-free per-conversation completion state prevents repeated bulk reads on
-restart; Socket Mode advances the watermark and newly discovered or interrupted
-conversations alone re-enter the paced bootstrap. Newly discovered
+content-free per-conversation completion state prevents full replay on restart.
+Completed bot-joined channels receive bounded post-watermark repair; ambient
+history remains resolved context and only human direct mentions can become
+pending decisions. First-time history and
+observe-only conversations never gain output authority from catch-up. Newly discovered
 conversations begin observe-only; public/private channels become assist only
 after an independent bot-token inventory or membership event confirms Tag has
 joined. Leaving reverts the channel to observe before further execution or

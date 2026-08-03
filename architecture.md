@@ -56,11 +56,13 @@ The optional user-authorized sync discovers public channels, private channels,
 DMs, and group DMs visible to the configured Slack user token and bootstraps a
 bounded history once per conversation. MongoDB stores content-free bootstrap
 completion and live-event watermarks independently from retained messages.
-Ordinary restarts therefore rely on Socket Mode and skip completed history;
-periodic discovery resumes interrupted work and bootstraps only newly visible
-conversations. Discovery grants observation only: every new conversation is
-enrolled as `observe`, private content remains destination-local, and no output
-authority is inferred. Exceptional Slack history reads use proactive
+Completed bot-joined channels receive a bounded startup and periodic gap repair
+strictly after their last watermark. Recovered ambient history is resolved
+context; only a human direct mention, including one in a recovered thread, can
+re-enter the normal decision queue. First-time bootstrap history never becomes
+work, observe-only conversations are excluded from actionable catch-up, and no
+cross-channel authority is inferred. Newly visible conversations still receive
+only their bounded one-time bootstrap. Exceptional Slack history reads use proactive
 per-method pacing and still honor `Retry-After` in the background, keeping
 Socket Mode acknowledgement and live message processing responsive.
 
@@ -144,6 +146,17 @@ immaterial differences. Recent destination participants are a conversational
 signal, not a channel-membership claim. The worker uses `team-alignment` to
 attribute reports neutrally and verify when needed. Restricted context and
 unverified agent output can never ground this behavior.
+
+Assist-mode initiative is a deterministic control-plane grant, not a model
+judgment. Full-agent work is allowed for direct mentions, active Tag threads,
+explicit addresses, clear questions, conversationally addressed requests,
+authoritative product questions, destination-safe alignment interventions, and
+operator-created triggers. The fact that Tag authored the previous channel turn
+is useful only for routing a question or request; it does not authorize a bare
+declarative status update. The classifier service suppresses an unauthorized
+recommendation with `policy.unsolicited_assist_work`, and the pipeline applies
+the same check again immediately before admission. Proactive channels retain
+classifier-gated initiative for declarative failures and incidents.
 
 Natural messages are evaluated without prompt-like hints such as “stay silent”
 or “reply in a thread.” Those phrases are tested only when they are the user's
@@ -471,7 +484,7 @@ tests, vet, behavioral evals, gosec, and govulncheck. Network and credential
 tests are opt-in. `integration/codex_live_test.go` verifies the installed App
 Server handshake, dynamic-tool registration, model/effort routing, structured
 output, event normalization, and teardown against a real authenticated Codex
-runtime. `make eval-live` sends the 39 natural classifier messages through the
+runtime. `make eval-live` sends the 44 natural classifier messages through the
 configured direct OpenAI provider and scores outcomes, source grounding,
 restricted disclosure, placement, reaction semantics, and model/effort routing;
 fixture names and expected results are never part of the provider request.

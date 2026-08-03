@@ -272,9 +272,13 @@ context sync, and explicit output channel allowlist shown in
 
 Context history is bootstrapped once per authorized conversation. MongoDB
 retains content-free completion state and a live-event watermark, so ordinary
-restarts rely on Socket Mode instead of rescanning the configured lookback.
-The periodic discovery pass fetches history only for new or previously
-interrupted conversations. Exceptional history reads are proactively paced by
+restarts never replay the configured lookback as new work. On startup and the
+periodic membership pass, bot-joined channels receive a bounded catch-up from
+the last durable watermark: ambient messages are imported as resolved context,
+while a human direct mention, including one in a recovered thread, re-enters
+the normal decision queue. First-time bootstrap mentions remain context-only, and
+observe-only conversations are not polled for actionable catch-up. Exceptional
+history reads are proactively paced by
 `TAG__SLACK__CONTEXT_SYNC_REQUEST_INTERVAL` (default `1200ms`) and still honor
 Slack's `Retry-After` response.
 
@@ -339,7 +343,7 @@ classifier mode:
 | --- | --- |
 | `observe` | Persist authorized context; never react or answer |
 | `mention` | Consider direct mentions and active tos-tag threads only |
-| `assist` | Classify ordinary ambient conversation and act only above policy thresholds |
+| `assist` | Answer useful ambient questions and authorized interventions, but never launch full-agent work from an unaddressed declarative status update |
 | `proactive` | Permit classifier-gated actionable background behavior as well as assist behavior |
 
 With `TAG__SLACK__AUTO_ASSIST_JOINED_CHANNELS=true`, Slack membership owns the
@@ -357,6 +361,16 @@ investigations, tools, tables, artifacts, or likely follow-up belong in a
 thread. Short greetings and thanks can be answered directly by the classifier
 without starting Codex. Integration-authored messages are deterministically
 suppressed to prevent loops.
+
+Assist initiative is enforced independently of the model. A direct mention,
+active Tag thread, explicit address, clear question, conversationally addressed
+request, authoritative product question, destination-safe alignment
+intervention, or operator-created trigger may admit work. Tag having spoken
+last does not authorize a bare status declaration. Any full-agent recommendation
+without one of those grants is converted to `silent` with
+`policy.unsolicited_assist_work` before admission and checked again immediately
+before job creation. `proactive` channels retain classifier-gated incident
+initiative.
 
 For ambient team alignment, the classifier may surface a material conflict
 between the current statement and a recent destination-safe public report from
@@ -449,7 +463,7 @@ authority. The reviewed dynamic-tool catalog is the separate allowlist:
 
 | Tool ID | Operations | Approval | Purpose | Default sync |
 | --- | --- | --- | --- | --- |
-| `telemetryos.code` | `read` | Risk-based | Permanently read-only list/search/read of bounded Aion source without a mount or shell | Enabled |
+| `telemetryos.code` | `read` | Risk-based | Permanently read-only list/search/read and deterministic version evidence for bounded Aion source without a mount or shell | Enabled |
 | `telemetryos.product-docs` | `read` | Never | Fixed-host reads of the public docs index/pages and corporate `llms-full.txt` | Enabled |
 | `telemetryos.linear` | `read`, `write` | Risk-based | Linear issue workflows | Enabled |
 | `telemetryos.wiki` | `read`, `write`, `delete` | Never for page read/write; always for recoverable page soft-delete | Page-only Agent Wiki CRUD | Enabled |
@@ -476,8 +490,12 @@ bindings may be returned by a helper only when the manifest marks them
 tokens and other bindings remain argv-blocked and output-redacted. The same
 setup enables
 `telemetryos.code`, a reviewed read-only view of `TAG_AION_DEVELOPER_PATH` with
-fixed-string search and bounded file reads. Full-agent workers do not receive a
-source mount, a generic shell, runtime environment files, or credential paths.
+fixed-string search, bounded file reads, and a single-call version-evidence path
+covering manifests, standard build pins, and relevant CI selectors. Full-agent
+workers do not receive a source mount, a generic shell, runtime environment
+files, or credential paths. Tool failures return bounded redacted diagnostics,
+produce content-free audit receipts, and appear in the real-time activity feed
+with only tool, operation, and allowlisted action identity.
 The credential-free `telemetryos.product-docs` tool remains separately restricted
 to `docs.telemetryos.com` Markdown pages discovered through `llms.txt` and the
 fixed `www.telemetryos.com/llms-full.txt` corporate source. Product questions
@@ -586,15 +604,15 @@ govulncheck.
 Latest complete baseline (2026-08-02):
 
 - all Go tests, race tests, and `go vet`: pass;
-- deterministic behavioral evaluation: `41/41` (39 natural classifier messages
+- deterministic behavioral evaluation: `46/46` (44 natural classifier messages
   plus context-cap and deduplication invariants), including silence, placement,
-  privacy, routing, reaction, source-write intake, and mandatory product
-  retrieval contracts;
-- live direct OpenAI classifier evaluation: `41/41`, with 31 real provider
-  calls, eight hard-policy suppressions that bypassed the provider, complete
+  privacy, routing, reaction, source-write intake, mandatory product retrieval,
+  conversational-reference, Wiki CRUD, and assist/proactive initiative contracts;
+- live direct OpenAI classifier evaluation: `46/46`, with 36 real provider
+  calls and complete
   grounding/disclosure/placement/routing/reaction scores, and approximately
-  `1.45s` mean end-to-end case latency;
-- `gosec`: 0 issues across 81 Go files and 19,907 lines;
+  `1.82s` mean end-to-end case latency;
+- `gosec`: 0 issues across 88 Go files and 24,092 lines;
 - `govulncheck`: no reachable or imported vulnerable packages; one advisory is
   present in a required module but its affected package is not imported or
   called;
@@ -639,8 +657,8 @@ separately, and inspect only redacted structured logs.
 ```bash
 make test                 # deterministic test suite
 make race                 # race detector
-make eval                 # deterministic 41-case behavioral gate
-make eval-live            # opt-in 41-case live OpenAI classifier gate
+make eval                 # deterministic 46-case behavioral gate
+make eval-live            # opt-in 46-case live OpenAI classifier gate
 make security             # gosec + govulncheck
 make verify               # full local gate
 make run-live             # host live runtime from ignored runtime.env

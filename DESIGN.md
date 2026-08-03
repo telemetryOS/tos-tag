@@ -22,8 +22,10 @@ to that architecture.
 Live Slack uses the `core/slack` Socket Mode adapter behind explicit
 configuration; the deterministic stub remains the default test boundary.
 The same package persists per-conversation history-bootstrap completion and
-live watermarks in MongoDB. Startup skips completed conversations, periodic
-discovery seeds only new/interrupted conversations, and the exceptional Web API
+live watermarks in MongoDB. New conversations receive a context-only bootstrap.
+Completed bot-joined channels receive a bounded startup and periodic gap scan
+after the watermark; recovered ambient messages stay resolved context, while
+direct mentions return to the durable decision queue. Exceptional Web API
 reads are proactively paced per method.
 
 `core/memory` asynchronously consolidates changed human channel/thread scopes
@@ -55,7 +57,10 @@ product content is available only through the
 fixed-host `telemetryos.product-docs` read tool, while arbitrary public research
 uses Codex's first-party live web search with untrusted-content handling and no
 credential or subprocess-network access. `tos_tag_trigger` separately manages
-classifier-gated channel heartbeat subscriptions.
+classifier-gated channel heartbeat subscriptions with explicit trigger
+authority. Ordinary `assist` traffic cannot launch full-agent work from an
+unaddressed declarative status update; only `proactive` or a deterministic
+invocation grant may do so.
 
 Source reads are permanently read-only at catalog load and immediately before
 execution; there is no approval path for source mutation. For authoritative

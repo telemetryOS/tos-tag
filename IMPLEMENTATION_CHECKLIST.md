@@ -54,6 +54,11 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Add the ambiguous Premium-to-Enterprise plan-transition regression and
   pass the 38-message deterministic and live provider matrices (`40/40` with
   infrastructure invariants), without leaking evaluator intent.
+- [x] Enforce assist/proactive initiative independently of the classifier,
+  preserve rejected predictions for audit, recheck immediately before job
+  admission, keep operator-created heartbeat triggers authorized, and pass the
+  44-message deterministic and live provider matrices (`46/46` with
+  infrastructure invariants) plus a zero-reply/zero-job `#tos-tag` canary.
 - [x] Fall back conservatively on timeout or malformed output.
 
 ## 4. Durable jobs and concurrency
@@ -213,6 +218,7 @@ Only mark an item complete when source and verification evidence exist.
   independent bot-membership reconciliation, optional joined-channel assist,
   and destination-local private/DM disclosure checks.
 - [x] Persist per-conversation Slack bootstrap completion and live watermarks,
-  skip completed history on restart, resume only new/interrupted conversations,
-  and proactively pace exceptional Web API reads.
+  keep first-time history context-only, catch up completed bot-joined channels
+  after downtime, requeue only human direct mentions, and proactively pace
+  exceptional Web API reads.
 - [x] Final exhaustive tracked-tree search confirms no stale runtime surface.

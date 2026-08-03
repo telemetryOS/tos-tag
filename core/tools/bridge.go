@@ -230,7 +230,19 @@ func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := b.gateway.Execute(r.Context(), input.ToolID, GatewayRequest{Request: Request{OrganizationID: scope.OrganizationID, JobID: scope.JobID, OperationID: input.OperationID, Args: input.Arguments, Capability: Capability{ToolID: bundle.Manifest.ID, ToolVersion: bundle.Manifest.Version, OperationID: input.OperationID, AttemptToken: scope.AttemptID, SteeringEpoch: scope.SteeringEpoch, ExpiresAt: minTime(scope.ExpiresAt, time.Now().UTC().Add(time.Duration(operation.TimeoutSeconds)*time.Second))}}})
 	if err != nil {
-		writeBridge(w, http.StatusUnprocessableEntity, map[string]any{"error": "tool_failed", "detail": err.Error()})
+		metadata := map[string]any{"tool_id": input.ToolID, "operation_id": input.OperationID, "exit_code": result.ExitCode, "duration_ms": result.Duration.Milliseconds(), "error_code": toolExecutionErrorCode(err)}
+		if _, appendErr := b.audit.Append(r.Context(), audit.AppendRequest{OrganizationID: scope.OrganizationID, Type: "tool.execution.failed", ActorID: "agent:" + scope.JobID, ResourceID: executionID, RetentionEpoch: time.Now().UTC().Format("2006-01"), IdempotencyKey: "tool-execution/" + executionID + "/failed", Metadata: metadata}); appendErr != nil {
+			writeBridge(w, http.StatusServiceUnavailable, map[string]any{"error": "audit_unavailable"})
+			return
+		}
+		response := map[string]any{"error": "tool_failed", "detail": err.Error(), "error_code": metadata["error_code"], "exit_code": result.ExitCode}
+		// Executor output is already bounded and has declared secret values
+		// redacted. Returning it on failure lets the worker correct invalid typed
+		// arguments instead of blindly retrying until the callback deadline.
+		if result.Output != "" {
+			response["output"] = result.Output
+		}
+		writeBridge(w, http.StatusUnprocessableEntity, response)
 		return
 	}
 	if _, err := b.audit.Append(r.Context(), audit.AppendRequest{OrganizationID: scope.OrganizationID, Type: "tool.execution.completed", ActorID: "agent:" + scope.JobID, ResourceID: executionID, RetentionEpoch: time.Now().UTC().Format("2006-01"), IdempotencyKey: "tool-execution/" + executionID + "/completed", Metadata: map[string]any{"tool_id": input.ToolID, "operation_id": input.OperationID, "exit_code": result.ExitCode}}); err != nil {
@@ -238,6 +250,30 @@ func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeBridge(w, http.StatusOK, result)
+}
+
+func toolExecutionErrorCode(err error) string {
+	if err == nil {
+		return "none"
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case strings.Contains(err.Error(), "exit code"):
+		return "nonzero_exit"
+	case strings.Contains(err.Error(), "output exceeded"):
+		return "output_limit"
+	case strings.Contains(err.Error(), "environment binding"):
+		return "binding_unavailable"
+	case strings.Contains(err.Error(), "capability"):
+		return "capability_invalid"
+	case strings.Contains(err.Error(), "script hash changed"):
+		return "bundle_changed"
+	default:
+		return "execution_failed"
+	}
 }
 
 func effectiveApprovalPolicy(operation Operation) string {

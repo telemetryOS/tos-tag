@@ -1,6 +1,7 @@
 package deliveries
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -13,7 +14,7 @@ import (
 )
 
 func TestSlackOutputPromptContainsRequiredContract(t *testing.T) {
-	required := []string{"header, mrkdwn_text", "context, divider, table, card, carousel, image, or artifact", "Never add model, reasoning effort, token usage, or latency metadata", "trusted runtime measurements", "sortable, paginated Data Table", "Never put actions", "published durable document or download", "Keep short and medium answers in Slack", "Agent Wiki artifacts namespace", "20,000 visible characters", "soft planning signal, not a hard cutoff", "exact HTTPS URL returned by the tool", "Never fabricate, predict, or reconstruct a Wiki URL", "no Wiki artifact was created", "<https://example.com|descriptive label>", "Wiki get or url", "Never expose a namespace/slug", "*bold*", "_italic_", "single backticks", "literal identifier containing an underscore", "byte-for-byte", "reply_in_channel to replyinchannel", "triple-backtick", "complete table", "Do not preface or follow", "Never emit actions", "Do not choose or alter"}
+	required := []string{"header, mrkdwn_text", "context, divider, table, card, carousel, image, or artifact", "every explicit part of the request", "Never leave a heading, label, or trailing colon", "Never add model, reasoning effort, token usage, or latency metadata", "trusted runtime measurements", "sortable, paginated Data Table", "Never put actions", "published durable document or download", "Keep short and medium answers in Slack", "Agent Wiki artifacts namespace", "20,000 visible characters", "soft planning signal, not a hard cutoff", "exact HTTPS URL returned by the tool", "Never fabricate, predict, or reconstruct a Wiki URL", "no Wiki artifact was created", "at most one optional header", "no more than two short sentences", "Omit tool narration", "<https://example.com|descriptive label>", "Wiki get or url", "Never expose a namespace/slug", "*bold*", "_italic_", "single backticks", "literal identifier containing an underscore", "byte-for-byte", "reply_in_channel to replyinchannel", "triple-backtick", "complete table", "Do not preface or follow", "Never emit actions", "Do not choose or alter"}
 	for _, value := range required {
 		if !strings.Contains(SlackOutputPrompt, value) {
 			t.Errorf("prompt missing %q", value)
@@ -106,6 +107,56 @@ func TestArtifactSegmentRequiresSameAttemptToolProvenance(t *testing.T) {
 	}
 	if err := ValidateArtifactProvenance(result, map[string]struct{}{"https://wiki.example/artifacts/architecture-guide": {}}); err != nil {
 		t.Fatalf("tool-produced artifact was rejected: %v", err)
+	}
+}
+
+func TestPublishedArtifactSummaryIsCompactAndCanonical(t *testing.T) {
+	artifactURL := "https://wiki.example/artifacts/architecture-guide"
+	result := types.SlackResult{Segments: []types.SlackSegment{
+		{Kind: types.SlackSegmentHeader, Text: "Architecture published"},
+		{Kind: types.SlackSegmentMRKDWN, Text: "A concise synopsis.\n\n<" + artifactURL + "|Open it>"},
+		{Kind: types.SlackSegmentContext, Text: "Revision 3"},
+		{Kind: types.SlackSegmentDivider},
+		{Kind: types.SlackSegmentMRKDWN, Text: "A repeated copy of the document body."},
+		{Kind: types.SlackSegmentMRKDWN, Text: "The link again: <" + artifactURL + "|open>."},
+	}}
+
+	compacted := CompactPublishedArtifactSummary(result, map[string]struct{}{artifactURL: {}})
+	if len(compacted.Segments) != 3 {
+		t.Fatalf("segments = %#v", compacted.Segments)
+	}
+	if compacted.Segments[0].Kind != types.SlackSegmentHeader || compacted.Segments[1].Text != "A concise synopsis." {
+		t.Fatalf("summary segments = %#v", compacted.Segments[:2])
+	}
+	artifact := compacted.Segments[2]
+	if artifact.Kind != types.SlackSegmentArtifact || artifact.Artifact == nil || artifact.Artifact.URL != artifactURL || artifact.Artifact.MediaType != "text/html" {
+		t.Fatalf("artifact segment = %#v", artifact)
+	}
+	if err := ValidateArtifactProvenance(compacted, map[string]struct{}{artifactURL: {}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublishedArtifactSummaryDropsWorkerChatterAndRepeatedLinks(t *testing.T) {
+	artifactURL := "https://wiki.example/artifacts/architecture-guide"
+	chatty := "Published revision 3 covering ingestion, privacy-scoped context, classification, workers, reviewed tools, and Slack delivery. Confirmed runtime facts are separated from unconfirmed details.\n\n<" + artifactURL + "|Open the architecture reference>\n\nWiki write succeeded and was verified with a same-attempt read. The document is ready for future operators. End of publication summary."
+	result := types.SlackResult{Segments: []types.SlackSegment{
+		{Kind: types.SlackSegmentHeader, Text: "Architecture reference published"},
+		{Kind: types.SlackSegmentMRKDWN, Text: chatty},
+		{Kind: types.SlackSegmentContext, Text: "Wiki write succeeded and was verified"},
+		{Kind: types.SlackSegmentMRKDWN, Text: "Artifact link: <" + artifactURL + "|open>"},
+	}}
+
+	compacted := CompactPublishedArtifactSummary(result, map[string]struct{}{artifactURL: {}})
+	if len(compacted.Segments) != 3 {
+		t.Fatalf("segments = %#v", compacted.Segments)
+	}
+	if got := compacted.Segments[1].Text; got != "Published revision 3 covering ingestion, privacy-scoped context, classification, workers, reviewed tools, and Slack delivery. Confirmed runtime facts are separated from unconfirmed details." {
+		t.Fatalf("synopsis = %q", got)
+	}
+	encoded, _ := json.Marshal(compacted)
+	if bytes.Contains(encoded, []byte("same-attempt")) || bytes.Count(encoded, []byte(artifactURL)) != 1 {
+		t.Fatalf("chatty or repeated artifact output survived: %s", encoded)
 	}
 }
 

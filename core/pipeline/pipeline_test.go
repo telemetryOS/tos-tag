@@ -921,6 +921,81 @@ func TestContextHistoryImportCannotCreateDecisionAndRespectsExplicitUnenrollment
 	}
 }
 
+func TestOfflineCatchUpQueuesDirectMentionButKeepsAmbientHistoryResolved(t *testing.T) {
+	cfg := contextSyncConfig()
+	cfg.Slack.BotUserID = "U-tag"
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
+	_, err := scopes.PutChannel(context.Background(), orgconfig.ChannelPolicy{
+		OrganizationID: "org-test", TeamID: "team-test", ChannelID: "tos-tag", Enrolled: true,
+		ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 6, MaxConcurrentJobs: 2,
+		MembershipRevision: "member/v1", MembershipRefreshedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	p := &Pipeline{deps: Dependencies{
+		Config: &cfg, Logger: blackbox.New(), Scopes: scopes, Observations: observations,
+		Sessions: sessions.NewMemoryStore(nil),
+	}}
+
+	ambient := envelope("message/team-test/tos-tag/500.001", "tos-tag", "500.001", "overnight deploy completed")
+	if err := p.RecoverContextEnvelope(context.Background(), ambient); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := observations.ClaimPending(context.Background(), "worker", time.Minute); !errors.Is(err, observer.ErrNoPendingObservation) {
+		t.Fatalf("ambient offline history became work: %v", err)
+	}
+
+	direct := envelope("message/team-test/tos-tag/500.002", "tos-tag", "500.002", "how did we do overnight <@U-tag>")
+	direct.IsMention = true
+	if err := p.RecoverContextEnvelope(context.Background(), direct); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := observations.ClaimPending(context.Background(), "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.MessageTS != direct.MessageTS || !claimed.IsMention || claimed.DecisionState != "processing" {
+		t.Fatalf("recovered direct mention = %#v", claimed)
+	}
+}
+
+func TestOfflineCatchUpQueuesReplyOnlyForExistingTagThread(t *testing.T) {
+	cfg := contextSyncConfig()
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
+	_, err := scopes.PutChannel(context.Background(), orgconfig.ChannelPolicy{
+		OrganizationID: "org-test", TeamID: "team-test", ChannelID: "tos-tag", Enrolled: true,
+		ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 6, MaxConcurrentJobs: 2,
+		MembershipRevision: "member/v1", MembershipRefreshedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observationStore := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	sessionStore := sessions.NewMemoryStore(nil)
+	if _, _, err := sessionStore.Resolve(context.Background(), "org-test", "team-test", "tos-tag", "root.001"); err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Scopes: scopes, Observations: observationStore, Sessions: sessionStore}}
+	reply := envelope("message/team-test/tos-tag/500.003", "tos-tag", "500.003", "go ahead")
+	reply.ThreadTS = "root.001"
+	if err := p.RecoverContextEnvelope(context.Background(), reply); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := observationStore.ClaimPending(context.Background(), "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.MessageTS != reply.MessageTS || claimed.RootThreadTS != "root.001" {
+		t.Fatalf("recovered active-thread reply = %#v", claimed)
+	}
+}
+
 func TestLiveSlackEnvelopeAdvancesDurableContextWatermark(t *testing.T) {
 	cfg := contextSyncConfig()
 	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
@@ -1070,7 +1145,7 @@ func TestHeartbeatClassifierUsesDestinationFilteredContextAndOutputPolicy(t *tes
 	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test"})
 	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
 	for _, policy := range []orgconfig.ChannelPolicy{
-		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "tos-tag", Enrolled: true, ParticipationMode: types.ModeProactive, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
+		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "tos-tag", Enrolled: true, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
 		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "public-status", Enrolled: true, ParticipationMode: types.ModeObserve, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
 		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "private-alerts", Enrolled: true, Restricted: true, ParticipationMode: types.ModeObserve, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now},
 	} {
@@ -1186,13 +1261,13 @@ func containsString(values []string, target string) bool {
 }
 
 func TestAgentInputContainsOnlyDestinationSafeContext(t *testing.T) {
-	input := buildAgentInput("Compare the classifier, worker, and delivery reconciler across responsibility and retry behavior.", types.ContextPackRevision{Sources: []types.ContextSource{
+	input := buildAgentInput(types.SlackEnvelope{ChannelID: "alerts", MessageTS: "2.0", Text: "Compare the classifier, worker, and delivery reconciler across responsibility and retry behavior."}, types.ContextPackRevision{Sources: []types.ContextSource{
 		{ID: "system/classifier", Partition: types.PartitionSystem, Text: "internal classifier", DisclosureClass: types.DisclosureDestinationSafe},
 		{ID: "directive/1", ChannelID: "alerts", Partition: types.PartitionSystem, Provenance: "operator_directive", Text: "Investigate every alert using OTel evidence.", DisclosureClass: types.DisclosureDestinationSafe},
 		{ID: "alerts/1", ChannelID: "alerts", ChannelName: "development", AuthorID: "U_TOM", Partition: types.PartitionEvidence, Provenance: "human_message", Text: "Production incident active", ObservedAt: time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC), DisclosureClass: types.DisclosureDestinationSafe},
 		{ID: "private/2", ChannelID: "private", ChannelName: "leadership", AuthorID: "U_SECRET", Partition: types.PartitionSituation, Text: "restricted details", DisclosureClass: types.DisclosureRestrictedAwareness},
 	}}, types.ClassificationDecision{ResponseIntent: "reconcile status", ReleasableEvidenceIDs: []string{"alerts/1"}, ProductRetrievalRequired: true})
-	if !strings.Contains(input, "Production incident active") || !strings.Contains(input, "Investigate every alert using OTel evidence.") || !strings.Contains(input, `"response_intent":"reconcile status"`) || !strings.Contains(input, `"releasable_evidence_ids":["alerts/1"]`) || !strings.Contains(input, `"authoritative_product_retrieval_required":true`) || !strings.Contains(input, `"source_write_requested":false`) || !strings.Contains(input, `"presentation_requirements":["native_table"]`) || !strings.Contains(input, `"channel_name":"development"`) || !strings.Contains(input, `"author_id":"U_TOM"`) || !strings.Contains(input, `"observed_at":"2026-08-01T12:00:00Z"`) || strings.Contains(input, "restricted details") || strings.Contains(input, "leadership") || strings.Contains(input, "U_SECRET") || strings.Contains(input, "internal classifier") {
+	if !strings.Contains(input, "Production incident active") || !strings.Contains(input, "Investigate every alert using OTel evidence.") || !strings.Contains(input, `"response_intent":"reconcile status"`) || !strings.Contains(input, `"releasable_evidence_ids":["alerts/1"]`) || !strings.Contains(input, `"authoritative_product_retrieval_required":true`) || !strings.Contains(input, `"source_write_requested":false`) || !strings.Contains(input, `"presentation_requirements":["native_table"]`) || !strings.Contains(input, `"conversation_focus"`) || !strings.Contains(input, `"channel_name":"development"`) || !strings.Contains(input, `"author_id":"U_TOM"`) || !strings.Contains(input, `"observed_at":"2026-08-01T12:00:00Z"`) || strings.Contains(input, "restricted details") || strings.Contains(input, "leadership") || strings.Contains(input, "U_SECRET") || strings.Contains(input, "internal classifier") {
 		t.Fatalf("unsafe agent input: %s", input)
 	}
 	allowed := trustedMentionAllowlist(input)
@@ -1207,7 +1282,10 @@ func TestPresentationRequirementsPreferNativeTablesForRepeatedComparisons(t *tes
 		want    bool
 	}{
 		"three-way repeated comparison": {request: "Compare the classifier, worker, and reconciler across authority, state, and retry behavior.", want: true},
+		"comparison by repeated fields": {request: "Compare the classifier, worker, and reconciler by role, inputs, outputs, and failure behavior.", want: true},
+		"difference phrasing":           {request: "What is the difference between the worker and the delivery reconciler?", want: true},
 		"natural product choice":        {request: "What would make me choose a Node Pro instead of a Node Mini?", want: true},
+		"pick one product over another": {request: "When would I pick Node Mini over Node Pro?", want: true},
 		"explicit matrix":               {request: "Give me a rollout matrix for these checks.", want: true},
 		"simple substitution":           {request: "Can I use Ethernet instead of Wi-Fi?", want: false},
 		"ordinary explanation":          {request: "Explain why MongoDB owns durable state.", want: false},
@@ -1237,6 +1315,7 @@ func TestCurrentAgentRuntimeContractOutranksHistoricalContext(t *testing.T) {
 		"direct, stateless, tool-free OpenAI Responses API call",
 		"Codex App Server in a disposable worker",
 		"TelemetryOS source access is permanently read-only",
+		"bounded version workflow",
 		"authoritative_product_retrieval_required",
 		"marketing-messaging skill",
 		"telemetryos-documentation skill",

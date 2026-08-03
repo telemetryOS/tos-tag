@@ -58,6 +58,12 @@ Current initiative constraints:
 - Do not broaden `proactive`, credentialed helpers, or external writes beyond
   current explicit authorization. Membership-managed `assist` is authorized
   only for Slack-confirmed joined channels and reverts to `observe` on leave.
+- In `assist`, never admit full-agent work from an unmentioned top-level bare
+  status declaration, even when Tag spoke last. Require a deterministic
+  invocation grant or an approved ambient exception, preserve the provider
+  prediction for audit, and recheck the grant immediately before admission.
+  Operator-created classifier-gated triggers carry their own explicit grant;
+  free-form directives do not silently upgrade a channel to `proactive`.
 - Keep normal tests and evals deterministic and network-free. Live Slack tests
   are opt-in and must report their exact scope and evidence separately.
 - Keep classifier tests naturalistic: put expected silence, reaction, placement,
@@ -77,8 +83,11 @@ Current initiative constraints:
 - Keep secrets outside workers, prompts, fixtures, logs, and artifacts.
 - Keep Slack context ingestion event-driven after a one-time bounded
   conversation bootstrap. Persist content-free completion/live watermarks,
-  backfill only new or interrupted conversations, and proactively pace each Web
-  API history method rather than using HTTP 429 responses as the normal scheduler.
+  repair completed bot-joined channels strictly after the watermark, promote
+  only human direct mentions, keep all other recovered history resolved, never
+  replay first-time history as work, and
+  proactively pace each Web API history method rather than using HTTP 429
+  responses as the normal scheduler.
 - Update the checklist only after the implementation and its named verification
   are present.
 - Keep `README.md`, `architecture.md`, `IMPLEMENTATION_STATUS.md`,
@@ -91,7 +100,7 @@ Current local regression baseline (2026-08-02): direct classifier and ambient
 silence/social placement, native Tables/Data Tables, presentation-only
 Cards/Carousels, approval/resume, Wiki and reviewed
 source access, three overlapping jobs on the eight-worker pool, private-context
-isolation, the deterministic 41-case eval, the opt-in live OpenAI 41-case eval,
+isolation, the deterministic 46-case eval, the opt-in live OpenAI 46-case eval,
 and full `make verify` all passed. `make eval-live` must use only natural message
 text; evaluator outcomes, placement, reactions, model, and effort remain outside
 the provider input. Treat this as development evidence, not as authorization to
@@ -146,9 +155,9 @@ deterministic and never add an arbitrary shell operation.
 The reviewed catalog currently contains:
 
 - `telemetryos.code` (`read` only): bounded repository/file listing,
-  fixed-string search, and numbered source reads under the server-owned
-  `TAG_AION_DEVELOPER_PATH`; rejects traversal, symlinks, runtime environment
-  files, and credential ledgers;
+  fixed-string search, numbered source reads, and deterministic manifest/build/
+  CI version evidence under the server-owned `TAG_AION_DEVELOPER_PATH`; rejects
+  traversal, symlinks, runtime environment files, and credential ledgers;
 - `telemetryos.product-docs` (`read` only, no approval): fixed-host HTTPS reads
   of the public documentation index/pages and corporate `llms-full.txt`; no
   arbitrary URLs, redirects, headers, methods, credentials, or shell;

@@ -18,6 +18,10 @@ kind and do not wrap the JSON in a Markdown code fence. Compose the fewest
 blocks that make the message easy to scan; do not turn every paragraph into a
 separate block.
 
+Before finalizing, check that every explicit part of the request has a
+substantive answer. Never leave a heading, label, or trailing colon without the
+content it promises; if evidence is unavailable, say so directly.
+
 Choose blocks by purpose:
 - header: one short plain-text title for a substantial result or report.
 - mrkdwn_text: normal prose, lists, links, quotes, code, and explanations.
@@ -48,6 +52,12 @@ Choose the delivery surface before composing the final Slack result:
 - After a successful Wiki write, keep Slack to a useful synopsis and an
   artifact segment containing the exact HTTPS URL returned by the tool. For a
   Wiki page, use media_type "text/html".
+- A successful Wiki publication or edit acknowledgement is not a work log.
+  Return at most one optional header, one synopsis of no more than two short sentences,
+  and one artifact segment. State what changed and the useful
+  result. Omit tool narration, same-attempt verification chatter, namespace or
+  routing commentary, repeated links, "ready for operators" filler, source
+  mutation disclaimers, and restatements of the publication summary.
 - Never fabricate, predict, or reconstruct a Wiki URL, and never claim that a
   page exists unless the write succeeded. If the capability is unavailable or
   the write fails, provide the best compact Slack answer that fits and state

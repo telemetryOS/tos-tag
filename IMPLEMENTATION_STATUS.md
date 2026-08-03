@@ -58,8 +58,9 @@ commands, tests, and active documentation have been removed.
 - Socket Mode ingress with durable-before-ack observation and duplicate
   suppression.
 - Message/edit/delete/thread handling and user-authorized context bootstrap,
-  with durable per-conversation completion/live watermarks, new-channel-only
-  refresh work, and proactive per-method Slack pacing.
+  with durable per-conversation completion/live watermarks, context-only initial
+  history, post-watermark recovery of missed direct messages in bot-joined
+  channels, and proactive per-method Slack pacing.
 - Destination-local privacy for private channels, DMs, and group DMs.
 - Public cross-channel context for classifier decisions when authorized.
 - Asynchronous Luna memory curation for changed channel/thread scopes, with
@@ -132,12 +133,17 @@ commands, tests, and active documentation have been removed.
 Current migration evidence:
 
 - full verification components: pass, including all Go packages, the race
-  detector, vet, security scans, and the expanded `41/41` deterministic
+  detector, vet, security scans, and the expanded `46/46` deterministic
   behavioral eval;
-- opt-in direct OpenAI classifier eval: `41/41`, with `31` real provider calls,
-  eight pre-provider hard suppressions, and approximately `1.56s` mean case
+- opt-in direct OpenAI classifier eval: `46/46`, with `36` real provider calls
+  and approximately `1.82s` mean case
   latency; natural Slack text contained no evaluator outcome, placement,
   reaction, model, effort, or method hints;
+- live `#tos-tag` assist-initiative canary: the direct provider recommended
+  strong/max background work for an unmentioned declarative synthetic incident,
+  while the runtime recorded effective `silent` with
+  `policy.unsolicited_assist_work`; Slack had zero replies and Mongo had zero
+  jobs for the observation;
 - `gosec`: `0` issues across `81` files and `19,907` lines;
 - `govulncheck`: no called vulnerabilities (one vulnerable required module is
   not reached by the program);
@@ -191,9 +197,15 @@ Current migration evidence:
   failing the sync. The current policy additionally reconciles bot membership:
   joined public/private channels derive assist, other conversations stay
   observe-only, and private/DM context remains destination-local;
-- restart-wide context rescans have been removed: completed conversations are
-  skipped from durable Mongo state, interrupted/new conversations resume in the
-  periodic discovery pass, and live Socket Mode events advance each watermark;
+- 2026-08-03 offline direct-message recovery: pass. With the prior `#tos-tag`
+  watermark at 03:25 UTC, startup recovered the human `@tag` question posted at
+  15:49 UTC while the runtime was unavailable, classified it, ran one max-effort
+  worker, and durably delivered the answer in the original thread. A subsequent
+  startup recovered zero messages, confirming the watermark/idempotency guard;
+- restart-wide context replay has been removed: first-time bootstrap stays
+  resolved context, completed bot-joined channels scan only after their durable
+  watermark, missed human mentions re-enter the decision queue, and all ambient
+  catch-up remains context-only;
 - tracked source/config dependency search for the removed runtime: clean.
 
 The host runtime is live on the migrated binary. A fresh persistent container

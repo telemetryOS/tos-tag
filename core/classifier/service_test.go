@@ -2,6 +2,7 @@ package classifier
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -108,7 +109,7 @@ func TestDirectMentionKeepsValidLowConfidenceRoutingRecommendation(t *testing.T)
 	}
 }
 
-func TestDirectMentionStillRequiresHighConfidenceForClassifierDirectReply(t *testing.T) {
+func TestDirectMentionUsesSafeFallbackForLowConfidenceSocialReply(t *testing.T) {
 	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
 		return types.ClassificationDecision{
 			Outcome: types.OutcomeReplyInChannel, Confidence: .72, ReasonCodes: []string{"social"},
@@ -122,8 +123,23 @@ func TestDirectMentionStillRequiresHighConfidenceForClassifierDirectReply(t *tes
 	got := target("<@tos-tag> thanks!")
 	got.Envelope.IsMention = true
 	result := service.Decide(context.Background(), got, types.ContextPackRevision{})
-	if result.Effective.Outcome != types.OutcomeSilent || result.Effective.ReasonCodes[0] != "classifier.direct_reply_unavailable" {
-		t.Fatalf("low-confidence direct social reply was admitted: %#v", result)
+	if result.Effective.Outcome != types.OutcomeReplyInChannel || result.Effective.DirectReply != "You're welcome!" || result.Effective.RequiresFullAgent || result.Effective.ReasonCodes[0] != "policy.social_direct_reply_fallback" {
+		t.Fatalf("low-confidence direct social reply did not use the safe fallback: %#v", result)
+	}
+}
+
+func TestDirectSocialFallbackSurvivesClassifierFailure(t *testing.T) {
+	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		return types.ClassificationDecision{}, errors.New("provider unavailable")
+	}), false, .9, .98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := target("<@tos-tag> nice work!")
+	got.Envelope.IsMention = true
+	result := service.Decide(context.Background(), got, types.ContextPackRevision{})
+	if result.Effective.Outcome != types.OutcomeReplyInChannel || result.Effective.DirectReply != "Thanks!" || result.Effective.Reaction != "white_check_mark" || result.Effective.RequiresFullAgent {
+		t.Fatalf("classifier failure dropped a safe social acknowledgement: %#v", result)
 	}
 }
 
@@ -476,6 +492,93 @@ func TestProactiveModeActsOnActionableStatementInChannel(t *testing.T) {
 	result := newService(t, false).Decide(context.Background(), got, types.ContextPackRevision{})
 	if result.Effective.Outcome != types.OutcomeReplyInChannel || result.Effective.Confidence < 0.98 {
 		t.Fatalf("proactive statement was not admitted in-channel: %#v", result)
+	}
+}
+
+func TestAssistModeBlocksUnsolicitedDeclarativeAgentWork(t *testing.T) {
+	background := types.ClassificationDecision{
+		Outcome: types.OutcomeStartBackgroundJob, Confidence: .99,
+		ReasonCodes: []string{"active_incident"}, ResponseIntent: "investigate the incident",
+		DisclosureClass: types.DisclosureDestinationSafe, RequiresFullAgent: true,
+		Reaction: "rotating_light", AgentModelProfile: "strong", AgentModelStrength: "strong", AgentReasoningEffort: "max",
+	}
+	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		return background, nil
+	}), false, .9, .98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 2, 18, 30, 0, 0, time.UTC)
+	got := target("The orange-cart staging checkout is currently unavailable; incident TEST-427 is active.")
+	got.Envelope.ChannelID = "tos-tag"
+	got.Envelope.MessageTS = "2.0"
+	got.Envelope.UserID = "U_ALEX"
+	got.Envelope.EventTime = now
+	pack := types.ContextPackRevision{Sources: []types.ContextSource{
+		{ID: "tos-tag/2.0", ChannelID: "tos-tag", AuthorID: "U_ALEX", Provenance: "human_message", Text: got.Envelope.Text, ObservedAt: now, DisclosureClass: types.DisclosureDestinationSafe},
+		{ID: "tos-tag/1.0", ChannelID: "tos-tag", AuthorID: "U_TAG", Provenance: "agent_output_unverified", Text: "Previous Tag answer", ObservedAt: now.Add(-time.Minute), DisclosureClass: types.DisclosureDestinationSafe},
+	}}
+	if !likelyConversationallyAddressedToAgent(got, pack) {
+		t.Fatal("fixture must prove that Tag speaking last is insufficient authority")
+	}
+	result := service.Decide(context.Background(), got, pack)
+	if result.Predicted.Outcome != types.OutcomeStartBackgroundJob || result.Effective.Outcome != types.OutcomeSilent || !result.Shadowed || result.Effective.ReasonCodes[0] != "policy.unsolicited_assist_work" {
+		t.Fatalf("unsolicited assist work was admitted: %#v", result)
+	}
+
+	// The pipeline calls the same gate again immediately before admission; the
+	// check must be idempotent and preserve the original prediction.
+	result = EnforceParticipation(result, got, pack)
+	if result.Predicted.Outcome != types.OutcomeStartBackgroundJob || result.Effective.Outcome != types.OutcomeSilent || result.Effective.ReasonCodes[0] != "policy.unsolicited_assist_work" {
+		t.Fatalf("participation backstop was not idempotent: %#v", result)
+	}
+}
+
+func TestAssistInitiativeRequiresARealInvocationSignal(t *testing.T) {
+	decision := types.ClassificationDecision{
+		Outcome: types.OutcomeStartBackgroundJob, Confidence: .99,
+		ReasonCodes: []string{"work"}, ResponseIntent: "do the requested work",
+		DisclosureClass: types.DisclosureDestinationSafe, RequiresFullAgent: true, Reaction: "eyes",
+	}
+	baseResult := Result{Predicted: decision, Effective: decision}
+	now := time.Date(2026, 8, 2, 18, 35, 0, 0, time.UTC)
+	conversation := types.ContextPackRevision{Sources: []types.ContextSource{
+		{ID: "tos-tag/2.0", ChannelID: "tos-tag", AuthorID: "U_ALEX", Provenance: "human_message", Text: "Investigate the checkout failures.", ObservedAt: now, DisclosureClass: types.DisclosureDestinationSafe},
+		{ID: "tos-tag/1.0", ChannelID: "tos-tag", AuthorID: "U_TAG", Provenance: "agent_output_unverified", Text: "Previous Tag answer", ObservedAt: now.Add(-time.Minute), DisclosureClass: types.DisclosureDestinationSafe},
+	}}
+	for name, candidate := range map[string]Target{
+		"direct mention": {
+			Mode: types.ModeAssist, Envelope: types.SlackEnvelope{IsMention: true, Text: "<@tag> checkout is unavailable."},
+		},
+		"active thread": {
+			Mode: types.ModeAssist, ActiveThread: true, Envelope: types.SlackEnvelope{Text: "Checkout is unavailable."},
+		},
+		"addressed declaration": {
+			Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Text: "Tag, checkout is unavailable."},
+		},
+		"conversational request": {
+			Mode: types.ModeAssist, Envelope: types.SlackEnvelope{ChannelID: "tos-tag", MessageTS: "2.0", UserID: "U_ALEX", Text: "Investigate the checkout failures.", EventTime: now},
+		},
+		"authorized trigger": {
+			Mode: types.ModeAssist, AuthorizedTrigger: true, Envelope: types.SlackEnvelope{Text: "Check whether checkout needs attention."},
+		},
+		"proactive declaration": {
+			Mode: types.ModeProactive, Envelope: types.SlackEnvelope{Text: "Checkout is unavailable."},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := EnforceParticipation(baseResult, candidate, conversation)
+			if result.Effective.Outcome != types.OutcomeStartBackgroundJob {
+				t.Fatalf("authorized initiative was suppressed: %#v", result)
+			}
+		})
+	}
+
+	product := decision
+	product.ProductRetrievalRequired = true
+	productTarget := Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Text: "What is the Premium Trial about"}}
+	if result := EnforceParticipation(Result{Predicted: product, Effective: product}, productTarget, types.ContextPackRevision{}); result.Effective.Outcome != types.OutcomeStartBackgroundJob {
+		t.Fatalf("ambient product question was suppressed: %#v", result)
 	}
 }
 

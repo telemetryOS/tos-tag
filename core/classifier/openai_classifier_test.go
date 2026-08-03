@@ -53,7 +53,7 @@ func TestOpenAIClassifierUsesDirectStructuredResponsesAPI(t *testing.T) {
 	if received["model"] != "gpt-5.6-luna" || received["store"] != false {
 		t.Fatalf("unexpected Responses API request: %#v", received)
 	}
-	if instructions, _ := received["instructions"].(string); !strings.Contains(instructions, "brief, self-contained") || !strings.Contains(instructions, "deeper dive") || !strings.Contains(instructions, "active_thread") || !strings.Contains(instructions, "ambient alignment intervention") || !strings.Contains(instructions, "destination_recent_participant_ids") || !strings.Contains(instructions, "likely_addressed_to_agent") || !strings.Contains(instructions, "weather or forecast question") || !strings.Contains(instructions, "never claim the person is not a channel member") || !strings.Contains(instructions, "hammer_and_wrench marks implementation") || !strings.Contains(instructions, "speech_balloon marks a conversational explanation") || !strings.Contains(instructions, "direct_reply") || !strings.Contains(instructions, "one plain-text line") || !strings.Contains(instructions, "light/low profile") || !strings.Contains(instructions, "standard/medium profile") || !strings.Contains(instructions, "strong/max profile") || !strings.Contains(instructions, "document-sized synthesis") || !strings.Contains(instructions, "Agent Wiki artifact") || !strings.Contains(instructions, "formatting alone never justify max") || !strings.Contains(instructions, "never claim a direct mention when direct_mention is false") || !strings.Contains(instructions, "source_write_requested") || !strings.Contains(instructions, "authoritative_product_retrieval_required") || !strings.Contains(instructions, "marketing-messaging") || !strings.Contains(instructions, "Premium Trial") {
+	if instructions, _ := received["instructions"].(string); !strings.Contains(instructions, "brief, self-contained") || !strings.Contains(instructions, "deeper dive") || !strings.Contains(instructions, "active_thread") || !strings.Contains(instructions, "ambient alignment intervention") || !strings.Contains(instructions, "destination_recent_participant_ids") || !strings.Contains(instructions, "likely_addressed_to_agent") || !strings.Contains(instructions, "not a bare declaration") || !strings.Contains(instructions, "must not start full-agent work") || !strings.Contains(instructions, "conversation_focus") || !strings.Contains(instructions, "are we using it?") || !strings.Contains(instructions, "weather or forecast question") || !strings.Contains(instructions, "never claim the person is not a channel member") || !strings.Contains(instructions, "hammer_and_wrench marks implementation") || !strings.Contains(instructions, "speech_balloon marks a conversational explanation") || !strings.Contains(instructions, "direct_reply") || !strings.Contains(instructions, "one plain-text line") || !strings.Contains(instructions, "light/low profile") || !strings.Contains(instructions, "standard/medium profile") || !strings.Contains(instructions, "strong/max profile") || !strings.Contains(instructions, "document-sized synthesis") || !strings.Contains(instructions, "Agent Wiki artifact") || !strings.Contains(instructions, "formatting alone never justify max") || !strings.Contains(instructions, "never claim a direct mention when direct_mention is false") || !strings.Contains(instructions, "source_write_requested") || !strings.Contains(instructions, "authoritative_product_retrieval_required") || !strings.Contains(instructions, "marketing-messaging") || !strings.Contains(instructions, "Premium Trial") {
 		t.Fatalf("classifier placement guidance missing: %q", instructions)
 	}
 	inputs := received["input"].([]any)
@@ -65,7 +65,7 @@ func TestOpenAIClassifierUsesDirectStructuredResponsesAPI(t *testing.T) {
 	if !classifierPayload.DirectMention || classifierPayload.ActiveThread {
 		t.Fatalf("classifier placement context = %#v", classifierPayload)
 	}
-	if classifierPayload.MessageAuthorID != "U_ALEX" || classifierPayload.DestinationChannelID != "support" || len(classifierPayload.DestinationRecentParticipantIDs) != 1 || classifierPayload.DestinationRecentParticipantIDs[0] != "U_ALEX" || classifierPayload.DestinationRecentHumanCount != 1 || classifierPayload.LikelyAddressedToAgent || classifierPayload.PreviousDestinationMessageFromAgent || classifierPayload.Sources[0].AuthorID != "U_TOM" || classifierPayload.Sources[0].ChannelName != "development" || !classifierPayload.Sources[0].ObservedAt.Equal(now.Add(-time.Minute)) {
+	if classifierPayload.MessageAuthorID != "U_ALEX" || classifierPayload.DestinationChannelID != "support" || len(classifierPayload.DestinationRecentParticipantIDs) != 1 || classifierPayload.DestinationRecentParticipantIDs[0] != "U_ALEX" || classifierPayload.DestinationRecentHumanCount != 1 || classifierPayload.LikelyAddressedToAgent || classifierPayload.PreviousDestinationMessageFromAgent || len(classifierPayload.ConversationFocus) != 1 || classifierPayload.ConversationFocus[0].ID != "support/1" || classifierPayload.Sources[0].AuthorID != "U_TOM" || classifierPayload.Sources[0].ChannelName != "development" || !classifierPayload.Sources[0].ObservedAt.Equal(now.Add(-time.Minute)) {
 		t.Fatalf("classifier attribution context = %#v", classifierPayload)
 	}
 	reasoning := received["reasoning"].(map[string]any)
@@ -149,6 +149,14 @@ func TestAmbientPolicyCorrectionsPreserveSilenceAndEnforceAdmittedPlacement(t *t
 	if err := validateRecommendation(answer, profiles, []string{"rotating_light"}); err != nil {
 		t.Fatalf("corrected operational answer is not a valid recommendation: %v (%#v)", err, answer)
 	}
+	missingAgentFlag := withAmbientPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, ReasonCodes: []string{"incident_status"}, Reaction: "thinking_face", AgentModelStrength: "none"}, statusTarget, statusPack, profiles)
+	missingAgentFlag = withCanonicalAgentProfile(missingAgentFlag, profiles)
+	if !missingAgentFlag.RequiresFullAgent || missingAgentFlag.AgentModelProfile != "light" || missingAgentFlag.AgentReasoningEffort != "low" || len(missingAgentFlag.ReleasableEvidenceIDs) != 1 || missingAgentFlag.ReleasableEvidenceIDs[0] != "alerts/1" || !slices.Contains(missingAgentFlag.ReasonCodes, "policy.operational_question_requires_answer") {
+		t.Fatalf("operational reply without agent fields was not normalized: %#v", missingAgentFlag)
+	}
+	if err := validateRecommendation(missingAgentFlag, profiles, []string{"thinking_face"}); err != nil {
+		t.Fatalf("normalized operational reply is not a valid recommendation: %v (%#v)", err, missingAgentFlag)
+	}
 
 	background := withBackgroundProfileFloor(types.ClassificationDecision{Outcome: types.OutcomeStartBackgroundJob, RequiresFullAgent: true, AgentModelProfile: "light", AgentModelStrength: "light", AgentReasoningEffort: "low", ReasonCodes: []string{"work"}}, Target{Envelope: types.SlackEnvelope{Text: "Investigate the token exposure in production systems."}}, profiles)
 	if background.AgentModelProfile != "strong" || background.AgentReasoningEffort != "max" {
@@ -157,6 +165,10 @@ func TestAmbientPolicyCorrectionsPreserveSilenceAndEnforceAdmittedPlacement(t *t
 	canonical := withCanonicalAgentProfile(types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, RequiresFullAgent: true, AgentModelProfile: "light", AgentModelStrength: "standard", AgentReasoningEffort: "low", ReasonCodes: []string{"reply"}}, profiles)
 	if canonical.AgentModelProfile != "standard" || canonical.AgentModelStrength != "standard" || canonical.AgentReasoningEffort != "medium" || !slices.Contains(canonical.ReasonCodes, "policy.canonical_agent_profile") {
 		t.Fatalf("cross-product profile recommendation was not normalized: %#v", canonical)
+	}
+	inferredAgent := withCanonicalAgentProfile(types.ClassificationDecision{Outcome: types.OutcomeReplyInThread, ReasonCodes: []string{"answer"}, Reaction: "thinking_face", AgentModelStrength: "none"}, profiles)
+	if !inferredAgent.RequiresFullAgent || inferredAgent.AgentModelProfile != "light" || inferredAgent.AgentModelStrength != "light" || inferredAgent.AgentReasoningEffort != "low" || !slices.Contains(inferredAgent.ReasonCodes, "policy.agent_requirement_inferred") {
+		t.Fatalf("missing full-agent requirement was not inferred from the outcome: %#v", inferredAgent)
 	}
 	agentWithDirectReply := withCanonicalAgentProfile(types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, RequiresFullAgent: true, DirectReply: "Thanks!", AgentModelProfile: "light", AgentModelStrength: "light", AgentReasoningEffort: "low", ReasonCodes: []string{"substantive"}}, profiles)
 	if agentWithDirectReply.DirectReply != "" || !agentWithDirectReply.RequiresFullAgent || !slices.Contains(agentWithDirectReply.ReasonCodes, "policy.agent_direct_reply_cleared") {
@@ -223,6 +235,18 @@ func TestAmbientPolicyCorrectionsPreserveSilenceAndEnforceAdmittedPlacement(t *t
 	if writeRedirect.Outcome != types.OutcomeReplyInChannel || writeRedirect.DirectReply != sourceWriteRedirectReply || !writeRedirect.SourceWriteRequested || writeRedirect.ProductRetrievalRequired || writeRedirect.RequiresFullAgent || writeRedirect.AgentModelStrength != "none" {
 		t.Fatalf("source write redirect = %#v", writeRedirect)
 	}
+	wikiEdit := withSourceWritePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInThread, Confidence: .95, ReasonCodes: []string{"artifact_update"}, SourceWriteRequested: true, DirectReply: sourceWriteRedirectReply, RequiresFullAgent: true, AgentModelProfile: "chatgpt-luna-low", AgentModelStrength: "light", AgentReasoningEffort: "low"}, Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "Add a validation section to the architecture reference you just published."}})
+	if wikiEdit.Outcome != types.OutcomeReplyInThread || wikiEdit.DirectReply != "" || wikiEdit.SourceWriteRequested || !wikiEdit.RequiresFullAgent || wikiEdit.AgentModelStrength != "standard" || wikiEdit.AgentReasoningEffort != "medium" || !slices.Contains(wikiEdit.ReasonCodes, "policy.wiki_page_crud_not_source_write") {
+		t.Fatalf("Wiki page CRUD was mistaken for a source write: %#v", wikiEdit)
+	}
+	wikiEditWithSourceText := withSourceWritePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInThread, Confidence: .95, SourceWriteRequested: true, DirectReply: sourceWriteRedirectReply}, Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "Add a short validation section to the architecture reference covering privacy refusal and source-write redirection."}})
+	if wikiEditWithSourceText.SourceWriteRequested || wikiEditWithSourceText.DirectReply != "" || !wikiEditWithSourceText.RequiresFullAgent || wikiEditWithSourceText.AgentModelStrength != "standard" {
+		t.Fatalf("Wiki body subject was mistaken for a separate source mutation: %#v", wikiEditWithSourceText)
+	}
+	mixedWikiAndSourceWrite := withSourceWritePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInThread, Confidence: .95}, Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "Update the architecture reference and then edit the code to match it."}})
+	if !mixedWikiAndSourceWrite.SourceWriteRequested || mixedWikiAndSourceWrite.DirectReply != sourceWriteRedirectReply {
+		t.Fatalf("explicit mixed Wiki and source mutation bypassed the source boundary: %#v", mixedWikiAndSourceWrite)
+	}
 	if !isObviousSourceWriteRequest("Please patch the login regression") || isObviousSourceWriteRequest("Please review the login code and explain it") {
 		t.Fatal("source write heuristic did not preserve the read-only distinction")
 	}
@@ -254,6 +278,14 @@ func TestAmbientPolicyCorrectionsPreserveSilenceAndEnforceAdmittedPlacement(t *t
 	if unrelatedQuestion.Outcome != types.OutcomeSilent {
 		t.Fatalf("unrelated ambient question was admitted: %#v", unrelatedQuestion)
 	}
+	providerOverreach := withAmbientPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeStartBackgroundJob, Confidence: .95, ReasonCodes: []string{"ambient_question"}, RequiresFullAgent: true, Reaction: "eyes", AgentModelProfile: "standard", AgentModelStrength: "standard", AgentReasoningEffort: "medium"}, Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Text: "Does anyone know what changed in the API deploy?"}}, types.ContextPackRevision{}, profiles)
+	if providerOverreach.Outcome != types.OutcomeSilent || providerOverreach.RequiresFullAgent || providerOverreach.Reaction != "" || providerOverreach.AgentModelStrength != "none" || !slices.Contains(providerOverreach.ReasonCodes, "policy.undirected_ambient_question") {
+		t.Fatalf("undirected ambient question started work: %#v", providerOverreach)
+	}
+	ambientProductQuestion := withAmbientPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInThread, Confidence: .99, ReasonCodes: []string{"product"}, ProductRetrievalRequired: true, RequiresFullAgent: true, Reaction: "thinking_face", AgentModelProfile: "standard", AgentModelStrength: "standard", AgentReasoningEffort: "medium"}, Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Text: "Does anyone know how Premium differs from Enterprise?"}}, types.ContextPackRevision{}, profiles)
+	if ambientProductQuestion.Outcome != types.OutcomeReplyInThread || !ambientProductQuestion.ProductRetrievalRequired {
+		t.Fatalf("undirected product question was suppressed: %#v", ambientProductQuestion)
+	}
 }
 
 func TestConversationalAddressWeatherClarificationStaysInClassifier(t *testing.T) {
@@ -271,6 +303,39 @@ func TestConversationalAddressWeatherClarificationStaysInClassifier(t *testing.T
 	unchanged := withConversationalAddressPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeSilent, ReasonCodes: []string{"ambient"}}, target, pack)
 	if unchanged.Outcome != types.OutcomeSilent {
 		t.Fatalf("multi-human context was treated as directly addressed: %#v", unchanged)
+	}
+}
+
+func TestConversationalReferenceUsesImmediatelyPrecedingTagTurn(t *testing.T) {
+	profiles := []advertisedAgentProfile{{ID: "light", Strength: "light", ReasoningEffort: "low"}, {ID: "standard", Strength: "standard", ReasoningEffort: "medium"}, {ID: "strong", Strength: "strong", ReasoningEffort: "max"}}
+	now := time.Date(2026, 8, 2, 18, 0, 0, 0, time.UTC)
+	target := Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{ChannelID: "tos-tag", MessageTS: "3.0", UserID: "U_ALEX", Text: "are we using it?", EventTime: now}}
+	pack := types.ContextPackRevision{Sources: []types.ContextSource{
+		{ID: "tos-tag/3.0", ChannelID: "tos-tag", AuthorID: "U_ALEX", Provenance: "human_message", Text: target.Envelope.Text, ObservedAt: now, DisclosureClass: types.DisclosureDestinationSafe},
+		{ID: "tos-tag/2.0", ChannelID: "tos-tag", AuthorID: "U_TAG", Provenance: "agent_output_unverified", Text: "The latest stable Go release is go1.26.5.", ObservedAt: now.Add(-30 * time.Second), DisclosureClass: types.DisclosureDestinationSafe},
+		{ID: "tos-tag/1.0", ChannelID: "tos-tag", AuthorID: "U_ALEX", Provenance: "human_message", Text: "What's the latest stable Go release?", ObservedAt: now.Add(-time.Minute), DisclosureClass: types.DisclosureDestinationSafe},
+	}}
+	got := withConversationalReferencePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInThread, Confidence: .9, ReasonCodes: []string{"ambiguous_reference"}}, target, pack, profiles)
+	if got.Outcome != types.OutcomeReplyInChannel || !got.RequiresFullAgent || got.AgentModelProfile != "standard" || got.AgentReasoningEffort != "medium" || !strings.Contains(got.ResponseIntent, `tos-tag/2.0`) || !strings.Contains(got.ResponseIntent, "container/build pins") || !strings.Contains(got.ResponseIntent, "Do not infer that a patch is unpinned") || !slices.Contains(got.ReasonCodes, "policy.conversational_reference") {
+		t.Fatalf("conversational reference = %#v", got)
+	}
+	if focus := destinationConversationFocus(target, pack.Sources, 8); len(focus) != 2 || focus[0].ID != "tos-tag/1.0" || focus[1].ID != "tos-tag/2.0" {
+		t.Fatalf("conversation focus = %#v", focus)
+	}
+}
+
+func TestClarificationFollowupComposesUnresolvedRequest(t *testing.T) {
+	profiles := []advertisedAgentProfile{{ID: "light", Strength: "light", ReasoningEffort: "low"}, {ID: "standard", Strength: "standard", ReasoningEffort: "medium"}, {ID: "strong", Strength: "strong", ReasoningEffort: "max"}}
+	now := time.Date(2026, 8, 2, 18, 1, 0, 0, time.UTC)
+	target := Target{Mode: types.ModeAssist, ActiveThread: true, Envelope: types.SlackEnvelope{ChannelID: "tos-tag", MessageTS: "3.0", ThreadTS: "1.0", UserID: "U_ALEX", Text: "latest go release", EventTime: now}}
+	pack := types.ContextPackRevision{Sources: []types.ContextSource{
+		{ID: "tos-tag/3.0", ChannelID: "tos-tag", AuthorID: "U_ALEX", Partition: types.PartitionThread, Provenance: "human_message", Text: target.Envelope.Text, ObservedAt: now, DisclosureClass: types.DisclosureDestinationSafe},
+		{ID: "tos-tag/2.0", ChannelID: "tos-tag", AuthorID: "U_TAG", Partition: types.PartitionThread, Provenance: "agent_output_unverified", Text: "What does it refer to—the latest Go release or something else?", ObservedAt: now.Add(-20 * time.Second), DisclosureClass: types.DisclosureDestinationSafe},
+		{ID: "tos-tag/1.0", ChannelID: "tos-tag", AuthorID: "U_ALEX", Partition: types.PartitionThread, Provenance: "human_message", Text: "are we using it?", ObservedAt: now.Add(-40 * time.Second), DisclosureClass: types.DisclosureDestinationSafe},
+	}}
+	got := withClarificationFollowupPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInThread, Confidence: .9, RequiresFullAgent: true, AgentModelProfile: "light", AgentModelStrength: "light", AgentReasoningEffort: "low"}, target, pack, profiles)
+	if got.Outcome != types.OutcomeReplyInThread || got.AgentModelProfile != "standard" || got.AgentReasoningEffort != "medium" || !strings.Contains(got.ResponseIntent, `tos-tag/2.0`) || !strings.Contains(got.ResponseIntent, `tos-tag/1.0`) || !strings.Contains(got.ResponseIntent, "do not answer or explain the clarification fragment") || !slices.Contains(got.ReasonCodes, "policy.clarification_followup_composition") {
+		t.Fatalf("clarification follow-up = %#v", got)
 	}
 }
 

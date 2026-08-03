@@ -51,7 +51,7 @@ Never encode live IDs/secrets in tracked files.
 - `core/slack`: Socket Mode ingress, Block Kit rendering, interactions, and
   `/tag-directive` modal, plus Slack-native Thinking Steps streaming for
   admitted full-agent work; durable one-time context bootstrap and proactively
-  paced new/interrupted-conversation history repair.
+  paced post-watermark catch-up for direct messages missed while offline.
 - `core/approvals`: exact-action Slack approval/resume.
 - `core/routines`, `core/triggers`: scheduled and classifier-gated background
   work.
@@ -72,6 +72,17 @@ threads continue in thread.
 The classifier may directly produce one short social response for greetings,
 thanks, farewells, praise, or light banter. Substantive answers require an
 admitted full-agent job.
+
+`assist` does not grant autonomous incident initiative. A full-agent outcome
+requires a deterministic invocation grant or approved ambient exception: a
+mention, active Tag thread, explicit address, clear question, conversationally
+addressed request, authoritative product question, destination-safe alignment
+intervention, or operator-created trigger. Tag being the previous speaker is
+not sufficient for a bare declaration. Preserve a rejected provider prediction
+for audit, suppress its effective action with
+`policy.unsolicited_assist_work`, and apply the same gate again immediately
+before pipeline admission. Only `proactive` mode may treat an unaddressed
+declarative failure or incident as initiative by itself.
 
 Admitted full-agent thread jobs use a collapsed Slack Thinking Steps timeline. The Go
 control plane owns `chat.startStream`, safe task updates, and `chat.stopStream`;
@@ -269,7 +280,7 @@ Before completion:
 make verify
 ```
 
-The deterministic classifier gate contains 39 natural messages plus context-cap
+The deterministic classifier gate contains 44 natural messages plus context-cap
 and deduplication invariants. To run the same cases through the configured real
 OpenAI classifier, with expected behavior kept outside provider input:
 

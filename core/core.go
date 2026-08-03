@@ -614,6 +614,9 @@ func (c *Core) startContextRefresh(parent context.Context) {
 				}
 				stats := run.Stats()
 				c.Logger.WithCtx(blackbox.Ctx{"channels_discovered": stats.ChannelsDiscovered, "channels_registered": stats.ChannelsRegistered}).Info("Slack membership reconciliation completed")
+				if _, err := c.contextSync.CatchUp(ctx, run, c.pipeline.RecoverContextEnvelope); err != nil && ctx.Err() == nil {
+					c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Warn("Slack direct-message catch-up stopped before completion")
+				}
 				if _, err := c.contextSync.Backfill(ctx, run, c.pipeline.ImportContextEnvelope); err != nil && ctx.Err() == nil {
 					c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Warn("Slack incremental context bootstrap stopped before completion")
 				}
@@ -647,6 +650,9 @@ func (c *Core) startContextBackfill(parent context.Context) {
 	run := c.contextRun
 	go func() {
 		defer close(c.contextDone)
+		if _, err := c.contextSync.CatchUp(ctx, run, c.pipeline.RecoverContextEnvelope); err != nil && ctx.Err() == nil {
+			c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Error("Slack startup direct-message catch-up stopped before completion")
+		}
 		if _, err := c.contextSync.Backfill(ctx, run, c.pipeline.ImportContextEnvelope); err != nil && ctx.Err() == nil {
 			c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Error("Slack user context backfill stopped before completion")
 		}

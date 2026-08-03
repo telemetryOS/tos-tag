@@ -129,6 +129,48 @@ case "${verb}" in
       -- "${pattern}" "${scope}" || status=$?; (( status <= 1 )) || exit "${status}"; }) \
       | awk -v limit="${limit}" 'NR <= limit { print }'
     ;;
+  versions)
+    [[ "$#" -eq 2 ]] || die "versions requires a repository directory and ecosystem"
+    relative="$1"
+    ecosystem="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+    directory="$(resolve_directory "${relative}")"
+    case "${ecosystem}" in
+      go)
+        found=0
+        for candidate in go.mod go.work .tool-versions Dockerfile Dockerfile.dev; do
+          [[ -f "${directory}/${candidate}" && ! -L "${directory}/${candidate}" ]] || continue
+          case "${candidate}" in
+            go.mod|go.work)
+              while IFS= read -r line; do
+                printf '%s:%s\n' "${relative}/${candidate}" "${line}"
+                found=1
+              done < <(rg -n --no-heading --color never '^(go|toolchain)[[:space:]]+' "${directory}/${candidate}" || true)
+              ;;
+            .tool-versions)
+              while IFS= read -r line; do
+                printf '%s:%s\n' "${relative}/${candidate}" "${line}"
+                found=1
+              done < <(rg -n --no-heading --color never '^golang[[:space:]]+' "${directory}/${candidate}" || true)
+              ;;
+            Dockerfile|Dockerfile.dev)
+              while IFS= read -r line; do
+                printf '%s:%s\n' "${relative}/${candidate}" "${line}"
+                found=1
+              done < <(rg -n --no-heading --color never '(^|[[:space:]])(FROM[[:space:]]+)?golang:' "${directory}/${candidate}" || true)
+              ;;
+          esac
+        done
+        while IFS= read -r workflow; do
+          while IFS= read -r line; do
+            printf '%s:%s\n' "${workflow#"${root}/"}" "${line}"
+            found=1
+          done < <(rg -n --no-heading --color never '(go-version|GO_VERSION)' "${workflow}" || true)
+        done < <(find "${directory}/.github/workflows" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) 2>/dev/null | LC_ALL=C sort)
+        (( found == 1 )) || die "no Go version evidence found"
+        ;;
+      *) die "supported version ecosystems: go" ;;
+    esac
+    ;;
   read)
     [[ "$#" -ge 1 && "$#" -le 3 ]] || die "read requires a file and optional start/end lines"
     relative="$1"
@@ -143,6 +185,6 @@ case "${verb}" in
       | awk -v line="${start}" '{ printf "%d:%s\n", line + NR - 1, $0 }'
     ;;
   *)
-    die "supported verbs: repos, files, search, read"
+    die "supported verbs: repos, files, search, read, versions"
     ;;
 esac

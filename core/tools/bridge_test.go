@@ -40,7 +40,7 @@ func TestBridgeFencesReadToolAndRequiresIndependentApprovalForWrite(t *testing.T
 
 	root := t.TempDir()
 	script := filepath.Join(root, "tool.sh")
-	if err := os.WriteFile(script, []byte("printf 'ok:%s' \"$1\"\n"), 0o700); err != nil {
+	if err := os.WriteFile(script, []byte("if [ \"$1\" = fail ]; then printf 'safe diagnostic' >&2; exit 7; fi\nprintf 'ok:%s' \"$1\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	bundle := Bundle{Root: root, Manifest: Manifest{ID: "demo", Version: "v1", Script: "tool.sh", Operations: []Operation{{ID: "read", Risk: "read", TimeoutSeconds: 2, MaxOutputBytes: 1024}, {ID: "write", Risk: "write", TimeoutSeconds: 2, MaxOutputBytes: 1024}, {ID: "trusted-write", Risk: "write", Approval: ApprovalNever, TimeoutSeconds: 2, MaxOutputBytes: 1024}}}}
@@ -69,6 +69,20 @@ func TestBridgeFencesReadToolAndRequiresIndependentApprovalForWrite(t *testing.T
 	status, body := bridgeCall(t, bridge, capability, bridgeRequest{ToolID: "demo", OperationID: "read", Arguments: []string{"one"}})
 	if status != http.StatusOK || !bytes.Contains(body, []byte("ok:one")) {
 		t.Fatalf("status=%d body=%s", status, body)
+	}
+
+	status, body = bridgeCall(t, bridge, capability, bridgeRequest{ToolID: "demo", OperationID: "read", Arguments: []string{"fail"}})
+	if status != http.StatusUnprocessableEntity || !bytes.Contains(body, []byte(`"error_code":"nonzero_exit"`)) || !bytes.Contains(body, []byte("safe diagnostic")) {
+		t.Fatalf("failed tool status=%d body=%s", status, body)
+	}
+	var foundFailure bool
+	for _, receipt := range auditLog.List("org") {
+		if receipt.Type == "tool.execution.failed" && receipt.Metadata["error_code"] == "nonzero_exit" && receipt.Metadata["exit_code"] == float64(7) {
+			foundFailure = true
+		}
+	}
+	if !foundFailure {
+		t.Fatal("failed tool execution was not recorded with a content-free error code")
 	}
 
 	status, body = bridgeCall(t, bridge, capability, bridgeRequest{ToolID: "demo", OperationID: "write", Arguments: []string{"two"}})

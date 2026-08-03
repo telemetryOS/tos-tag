@@ -24,11 +24,16 @@ type Target struct {
 	Envelope      types.SlackEnvelope
 	Mode          types.ParticipationMode
 	ActiveThread  bool
-	KillSwitched  bool
-	WorkflowLoop  bool
-	Unsupported   bool
-	Deleted       bool
-	SelfAuthored  bool
+	// AuthorizedTrigger distinguishes an operator-created heartbeat or trigger
+	// subscription from ordinary ambient Slack traffic. A trigger may request
+	// classifier-gated work without pretending that its instruction was a
+	// mention or widening the channel's participation mode.
+	AuthorizedTrigger bool
+	KillSwitched      bool
+	WorkflowLoop      bool
+	Unsupported       bool
+	Deleted           bool
+	SelfAuthored      bool
 }
 
 type Result struct {
@@ -79,7 +84,85 @@ func (s *Service) Decide(ctx context.Context, target Target, pack types.ContextP
 	if s.shadow {
 		return Result{Predicted: predicted, Effective: silent("admission.shadow_mode"), Shadowed: true}
 	}
-	return Result{Predicted: predicted, Effective: predicted}
+	return EnforceParticipation(Result{Predicted: predicted, Effective: predicted}, target, pack)
+}
+
+// EnforceParticipation is the model-independent initiative boundary. It is
+// intentionally safe to call more than once: Service applies it after ambient
+// classification, and the pipeline applies it again immediately before
+// admission so a future classifier implementation cannot bypass the rule.
+func EnforceParticipation(result Result, target Target, pack types.ContextPackRevision) Result {
+	effective := result.Effective
+	if target.Mode != types.ModeAssist || effective.DirectReply != "" || !outcomeNeedsAgent(effective.Outcome) {
+		return result
+	}
+	if assistInitiativeAuthorized(target, pack, effective) {
+		return result
+	}
+	return Suppress(result, "policy.unsolicited_assist_work")
+}
+
+func assistInitiativeAuthorized(target Target, pack types.ContextPackRevision, decision types.ClassificationDecision) bool {
+	if target.Envelope.IsMention || target.ActiveThread || target.AuthorizedTrigger || explicitlyAddressesTag(target.Envelope.Text) {
+		return true
+	}
+	question := looksLikeQuestion(target.Envelope.Text)
+	questionOrRequest := question || looksLikeExplicitRequest(target.Envelope.Text)
+	// Assist mode is allowed to answer a clear question; the classifier still
+	// decides whether the particular ambient question is useful enough to answer.
+	if question {
+		return true
+	}
+	if likelyConversationallyAddressedToAgent(target, pack) && questionOrRequest {
+		return true
+	}
+	// Product questions are an intentional ambient assist surface, including
+	// natural questions that omit a final question mark.
+	if decision.ProductRetrievalRequired && questionOrRequest {
+		return true
+	}
+	// A destination-safe operational question or a deterministic public
+	// alignment conflict is also an intentional assist-mode intervention.
+	if asksOperationalStatus(target.Envelope.Text) && len(decision.ReleasableEvidenceIDs) > 0 {
+		return true
+	}
+	_, aligned := alignmentConflict(target, pack)
+	return aligned
+}
+
+func looksLikeQuestion(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	if normalized == "" {
+		return false
+	}
+	if strings.Contains(normalized, "?") {
+		return true
+	}
+	for _, prefix := range []string{
+		"what ", "why ", "how ", "when ", "where ", "who ", "which ",
+		"is ", "are ", "am ", "do ", "does ", "did ", "can ", "could ",
+		"would ", "should ", "will ", "has ", "have ",
+	} {
+		if strings.HasPrefix(normalized, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeExplicitRequest(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	for _, prefix := range []string{
+		"please ",
+		"tell me", "show me", "give me", "help me", "check ", "investigate ",
+		"look into ", "review ", "explain ", "compare ", "summarize ", "find ",
+		"create ", "update ", "edit ", "add ", "remove ", "delete ", "run ",
+	} {
+		if strings.HasPrefix(normalized, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) predict(ctx context.Context, target Target, pack types.ContextPackRevision) types.ClassificationDecision {
@@ -103,9 +186,10 @@ func (s *Service) predict(ctx context.Context, target Target, pack types.Context
 		// An active thread is a hard participation trigger, but the direct
 		// classifier still gets the first chance to recognize natural social
 		// language and answer without starting a worker. If that decision is
-		// unavailable, preserve the prior fail-safe behavior below.
+		// unavailable, use a fixed destination-safe acknowledgement rather than
+		// dropping an unmistakably social turn.
 		if isDirectSocialCandidate(target.Envelope.Text) {
-			return silent("thread.social_acknowledgement")
+			return directSocialFallback(target.Envelope.Text, true)
 		}
 		return types.ClassificationDecision{
 			Outcome:           types.OutcomeReplyInThread,
@@ -132,7 +216,7 @@ func (s *Service) predict(ctx context.Context, target Target, pack types.Context
 			}
 		}
 		if isDirectSocialCandidate(target.Envelope.Text) {
-			return silent("classifier.direct_reply_unavailable")
+			return directSocialFallback(target.Envelope.Text, false)
 		}
 		return directMentionFallback(target.Envelope.Text)
 	}
@@ -375,6 +459,44 @@ func isDirectSocialCandidate(text string) bool {
 	}
 }
 
+func directSocialFallback(text string, activeThread bool) types.ClassificationDecision {
+	normalized := normalizedSocialText(text)
+	reply := "Happy to help!"
+	reaction := "white_check_mark"
+	switch {
+	case containsAny(normalized, "morning"):
+		reply, reaction = "Morning!", "speech_balloon"
+	case containsAny(normalized, "afternoon"):
+		reply, reaction = "Good afternoon!", "speech_balloon"
+	case containsAny(normalized, "evening"):
+		reply, reaction = "Good evening!", "speech_balloon"
+	case containsAny(normalized, "hello", "hey", "hiya", "how are you", "how's it going", "whats up", "what's up"):
+		reply, reaction = "Hey!", "speech_balloon"
+	case containsAny(normalized, "bye", "goodbye", "see you", "later"):
+		reply, reaction = "See you!", "speech_balloon"
+	case containsAny(normalized, "nice work", "great work", "good work", "well done", "good bot", "you're great", "you are great"):
+		reply = "Thanks!"
+	case containsAny(normalized, "lol", "lmao", "haha", "😂", "😄"):
+		reply, reaction = "😄", "speech_balloon"
+	case containsAny(normalized, "thanks", "thank you", "thx", "ty", "appreciate", "cheers"):
+		reply = "You're welcome!"
+	}
+	outcome := types.OutcomeReplyInChannel
+	if activeThread {
+		outcome = types.OutcomeReplyInThread
+	}
+	return types.ClassificationDecision{
+		Outcome:            outcome,
+		Confidence:         1,
+		ReasonCodes:        []string{"policy.social_direct_reply_fallback"},
+		ResponseIntent:     "brief social acknowledgement",
+		DirectReply:        reply,
+		DisclosureClass:    types.DisclosureDestinationSafe,
+		Reaction:           reaction,
+		AgentModelStrength: "none",
+	}
+}
+
 func hasSubstantiveSocialTail(text string) bool {
 	tail := strings.TrimSpace(text)
 	for _, prefix := range []string{
@@ -559,6 +681,25 @@ func (DeterministicClassifier) Decide(_ context.Context, target Target, pack typ
 	lower := strings.ToLower(target.Envelope.Text)
 	if corrected := withConversationalAddressPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeSilent, ReasonCodes: []string{"deterministic.ambient"}}, target, pack); corrected.Outcome != types.OutcomeSilent {
 		return corrected, nil
+	}
+	if corrected := withConversationalReferencePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeSilent, ReasonCodes: []string{"deterministic.ambient"}}, target, pack, nil); corrected.Outcome != types.OutcomeSilent {
+		return corrected, nil
+	}
+	if corrected := withClarificationFollowupPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeSilent, ReasonCodes: []string{"deterministic.ambient"}}, target, pack, nil); corrected.Outcome != types.OutcomeSilent {
+		return corrected, nil
+	}
+	if isObviousWikiPageCRUDRequest(target.Envelope.Text) {
+		return types.ClassificationDecision{
+			Outcome:              types.OutcomeReplyInThread,
+			Confidence:           0.99,
+			ReasonCodes:          []string{"deterministic.wiki_page_crud"},
+			ResponseIntent:       "perform the requested Agent Wiki page CRUD through the reviewed Wiki capability",
+			DisclosureClass:      types.DisclosureDestinationSafe,
+			RequiresFullAgent:    true,
+			Reaction:             "eyes",
+			AgentModelStrength:   "standard",
+			AgentReasoningEffort: "medium",
+		}, nil
 	}
 	if isObviousSourceWriteRequest(target.Envelope.Text) {
 		return withSourceWritePolicyCorrections(types.ClassificationDecision{ReasonCodes: []string{"deterministic.source_write"}}, target), nil

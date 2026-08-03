@@ -66,14 +66,14 @@ func TestBehavioralFixturesAreNaturalistic(t *testing.T) {
 }
 
 func TestBehavioralEvalIncludesExpandedNaturalisticMatrix(t *testing.T) {
-	if got := len(Fixtures()); got != 39 {
-		t.Fatalf("behavioral classifier fixtures=%d, want 39 plus two infrastructure invariants", got)
+	if got := len(Fixtures()); got != 44 {
+		t.Fatalf("behavioral classifier fixtures=%d, want 44 plus two infrastructure invariants", got)
 	}
 	score, err := Run()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if score.Total != 41 {
-		t.Fatalf("behavioral eval total=%d, want 41", score.Total)
+	if score.Total != 46 {
+		t.Fatalf("behavioral eval total=%d, want 46", score.Total)
 	}
 }

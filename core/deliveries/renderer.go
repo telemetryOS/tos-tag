@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/telemetryos/tos-tag/types"
@@ -29,6 +30,7 @@ const (
 	maxCardTextCharacters  = 200
 	maxCardTitleCharacters = 150
 	maxCarouselCards       = 10
+	maxArtifactSynopsis    = 600
 )
 
 var (
@@ -257,6 +259,130 @@ func ValidateArtifactProvenance(result types.SlackResult, producedURLs map[strin
 		}
 	}
 	return nil
+}
+
+// CompactPublishedArtifactSummary makes the durable document, rather than a
+// second copy of it in Slack, the canonical long-form result. A model can
+// still produce a useful title and synopsis, but any
+// successful same-attempt artifact publication is represented exactly once by
+// a typed artifact segment even when the model forgot that part of the output
+// contract.
+func CompactPublishedArtifactSummary(result types.SlackResult, producedURLs map[string]struct{}) types.SlackResult {
+	if len(producedURLs) == 0 {
+		return result
+	}
+	urls := make([]string, 0, len(producedURLs))
+	for artifactURL := range producedURLs {
+		urls = append(urls, artifactURL)
+	}
+	sort.Strings(urls)
+
+	var header, synopsis *types.SlackSegment
+	artifacts := make(map[string]types.SlackArtifact, len(urls))
+	for _, segment := range result.Segments {
+		switch segment.Kind {
+		case types.SlackSegmentHeader:
+			if header == nil {
+				copy := segment
+				header = &copy
+			}
+		case types.SlackSegmentMRKDWN:
+			if synopsis == nil {
+				copy := segment
+				synopsis = &copy
+			}
+		case types.SlackSegmentArtifact:
+			if segment.Artifact != nil {
+				if _, ok := producedURLs[segment.Artifact.URL]; ok {
+					artifacts[segment.Artifact.URL] = *segment.Artifact
+				}
+			}
+		}
+	}
+
+	segments := make([]types.SlackSegment, 0, 2+len(urls))
+	if header != nil {
+		segments = append(segments, *header)
+	}
+	if synopsis != nil {
+		copy := *synopsis
+		copy.Text = compactPublishedArtifactSynopsis(stripPublishedArtifactLinks(copy.Text, urls))
+		if copy.Text != "" {
+			segments = append(segments, copy)
+		}
+	}
+	for _, artifactURL := range urls {
+		artifact, ok := artifacts[artifactURL]
+		if !ok {
+			artifact = types.SlackArtifact{Name: "Open the published document", MediaType: "text/html", URL: artifactURL}
+		}
+		segments = append(segments, types.SlackSegment{Kind: types.SlackSegmentArtifact, Artifact: &artifact})
+	}
+	result.Segments = segments
+	return result
+}
+
+func compactPublishedArtifactSynopsis(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+
+	// Publication acknowledgements should communicate the result, not mirror a
+	// worker transcript. Keep only the first paragraph and at most two complete
+	// sentences; the canonical document and control-plane footer carry the rest.
+	if split := regexp.MustCompile(`\n\s*\n`).Split(text, 2); len(split) > 0 {
+		text = split[0]
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	runes := []rune(text)
+	sentences := 0
+	cut := len(runes)
+	for index, character := range runes {
+		if character != '.' && character != '!' && character != '?' {
+			continue
+		}
+		if index+1 < len(runes) && !unicode.IsSpace(runes[index+1]) {
+			continue
+		}
+		sentences++
+		if sentences == 2 {
+			cut = index + 1
+			break
+		}
+	}
+	runes = runes[:cut]
+	if len(runes) > maxArtifactSynopsis {
+		cut = maxArtifactSynopsis
+		for cut > 0 && !unicode.IsSpace(runes[cut-1]) {
+			cut--
+		}
+		if cut == 0 {
+			cut = maxArtifactSynopsis
+		}
+		runes = append([]rune(strings.TrimSpace(string(runes[:cut]))), '…')
+	}
+	return strings.TrimSpace(string(runes))
+}
+
+func stripPublishedArtifactLinks(text string, urls []string) string {
+	for _, artifactURL := range urls {
+		link := regexp.MustCompile(`<` + regexp.QuoteMeta(artifactURL) + `(?:\|[^>]*)?>`)
+		text = link.ReplaceAllString(text, "")
+		text = strings.ReplaceAll(text, artifactURL, "")
+	}
+	lines := strings.Split(text, "\n")
+	compacted := lines[:0]
+	previousBlank := false
+	for _, line := range lines {
+		blank := strings.TrimSpace(line) == ""
+		if blank && previousBlank {
+			continue
+		}
+		compacted = append(compacted, strings.TrimRight(line, " \t"))
+		previousBlank = blank
+	}
+	return strings.TrimSpace(strings.Join(compacted, "\n"))
 }
 
 type Payload struct {
@@ -820,7 +946,7 @@ func validateMRKDWN(text string, allowedMentions types.SlackMentionAllowlist) er
 	if gfmLinkPattern.MatchString(text) {
 		return fmt.Errorf("%w: GitHub link syntax is not allowed", ErrInvalidResult)
 	}
-	if strings.Contains(text, "**") {
+	if containsDoubleAsteriskOutsideCode(text) {
 		return fmt.Errorf("%w: double-asterisk bold is not Slack mrkdwn", ErrInvalidResult)
 	}
 	for _, entity := range slackEntityPattern.FindAllString(text, -1) {

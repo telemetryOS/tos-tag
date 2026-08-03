@@ -28,6 +28,20 @@ func TestParseModelOutputSupportsCanonicalLegacyAndPlainText(t *testing.T) {
 	}
 }
 
+func TestParseModelOutputNormalizesGitHubBoldWithoutChangingCode(t *testing.T) {
+	result, err := ParseModelOutput("{\"segments\":[{\"kind\":\"mrkdwn_text\",\"text\":\"**Healthy** with `value ** 2`\\n\\n```python\\nvalue ** 3\\n```\"}]}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "*Healthy* with `value ** 2`\n\n```python\nvalue ** 3\n```"
+	if len(result.Segments) != 1 || result.Segments[0].Text != want {
+		t.Fatalf("normalized text = %q", result.Segments[0].Text)
+	}
+	if _, err := NewRenderer().Render(result); err != nil {
+		t.Fatalf("normalized result did not render: %v", err)
+	}
+}
+
 func TestParseModelOutputPromotesMarkdownTableToNativeSegment(t *testing.T) {
 	result, err := ParseModelOutput(`{"segments":[{"kind":"mrkdwn_text","text":"Summary first.\n\n| Boundary | Owner |\n|---|:---:|\n| Classifier | Go control plane |\n| Worker | Codex App Server |\n\nClosing note."}]}`)
 	if err != nil {

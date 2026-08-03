@@ -29,6 +29,7 @@ type fakeContextSyncAPI struct {
 	conversationIn *slackapi.GetConversationsForUserParameters
 	listCalls      int
 	historyCalls   []string
+	historyParams  []slackapi.GetConversationHistoryParameters
 	historyCallAt  []time.Time
 	replyCalls     []string
 }
@@ -53,6 +54,7 @@ func (f *fakeContextSyncAPI) GetConversationsForUserContext(_ context.Context, p
 
 func (f *fakeContextSyncAPI) GetConversationHistoryContext(_ context.Context, params *slackapi.GetConversationHistoryParameters) (*slackapi.GetConversationHistoryResponse, error) {
 	f.historyCalls = append(f.historyCalls, params.ChannelID)
+	f.historyParams = append(f.historyParams, *params)
 	f.historyCallAt = append(f.historyCallAt, time.Now())
 	if f.historyLimits[params.ChannelID] > 0 {
 		f.historyLimits[params.ChannelID]--
@@ -62,6 +64,105 @@ func (f *fakeContextSyncAPI) GetConversationHistoryContext(_ context.Context, pa
 		return nil, err
 	}
 	return &slackapi.GetConversationHistoryResponse{Messages: f.history[params.ChannelID]}, nil
+}
+
+func TestContextSyncCatchUpRepairsOnlyCompletedBotJoinedChannels(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	previous := now.Add(-2 * time.Hour)
+	mentionTS := fmt.Sprintf("%d.%06d", now.Add(-time.Hour).Unix(), now.Add(-time.Hour).Nanosecond()/1_000)
+	ambientTS := fmt.Sprintf("%d.%06d", now.Add(-30*time.Minute).Unix(), now.Add(-30*time.Minute).Nanosecond()/1_000)
+	state := NewMemoryContextSyncStateStore()
+	for _, channelID := range []string{"C-joined", "C-observe"} {
+		if err := state.CompleteBootstrap(context.Background(), "org", "team", channelID, previous); err != nil {
+			t.Fatal(err)
+		}
+	}
+	joined := testSlackChannel("C-joined", "joined", false)
+	botJoined := joined
+	botJoined.IsMember = true
+	api := &fakeContextSyncAPI{
+		channels:    []slackapi.Channel{joined, testSlackChannel("C-observe", "observe", false)},
+		botChannels: []slackapi.Channel{botJoined, testSlackChannel("C-observe", "observe", false)},
+		history: map[string][]slackapi.Message{
+			"C-joined": {
+				{Msg: slackapi.Msg{Timestamp: mentionTS, User: "U-human", Text: "status <@U-tag|tag (local)>"}},
+				{Msg: slackapi.Msg{Timestamp: ambientTS, User: "U-human", Text: "ambient update"}},
+			},
+			"C-observe": {{Msg: slackapi.Msg{Timestamp: mentionTS, User: "U-human", Text: "must not be polled"}}},
+		},
+	}
+	syncer, err := newContextSyncerWithAPIs(ContextSyncOptions{
+		OrganizationID: "org", TeamID: "team", BotUserID: "U-tag", Lookback: 24 * time.Hour, Timeout: time.Second,
+		MaxChannels: 10, MaxMessages: 10, MessagesPerChannel: 10, StateStore: state,
+	}, api, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := syncer.Discover(context.Background(), func(context.Context, types.SlackContextChannel) (bool, error) { return true, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.syncThrough = now
+	var recovered []types.SlackEnvelope
+	stats, err := syncer.CatchUp(context.Background(), run, func(_ context.Context, envelope types.SlackEnvelope) error {
+		recovered = append(recovered, envelope)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ChannelsCaughtUp != 1 || stats.MessagesRecovered != 2 || len(recovered) != 2 {
+		t.Fatalf("catch-up stats=%#v recovered=%#v", stats, recovered)
+	}
+	if len(api.historyCalls) != 1 || api.historyCalls[0] != "C-joined" {
+		t.Fatalf("catch-up polled non-member conversations: %v", api.historyCalls)
+	}
+	if len(api.historyParams) != 1 || api.historyParams[0].Oldest != slackHistoryTimestamp(previous) || api.historyParams[0].Latest != slackHistoryTimestamp(now) {
+		t.Fatalf("catch-up history window = %#v", api.historyParams)
+	}
+	if !recovered[0].IsMention && !recovered[1].IsMention {
+		t.Fatalf("direct mention was not recognized: %#v", recovered)
+	}
+	states, err := state.List(context.Background(), "org", "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !states["C-joined"].SyncedThrough.Equal(now) || !states["C-observe"].SyncedThrough.Equal(previous) {
+		t.Fatalf("catch-up watermarks = %#v", states)
+	}
+}
+
+func TestContextSyncCatchUpNeverReplaysInitialHistory(t *testing.T) {
+	nowTS := fmt.Sprintf("%d.000001", time.Now().UTC().Unix())
+	joined := testSlackChannel("C-new", "new", false)
+	botJoined := joined
+	botJoined.IsMember = true
+	api := &fakeContextSyncAPI{
+		channels:    []slackapi.Channel{joined},
+		botChannels: []slackapi.Channel{botJoined},
+		history:     map[string][]slackapi.Message{"C-new": {{Msg: slackapi.Msg{Timestamp: nowTS, User: "U-human", Text: "old <@U-tag>"}}}},
+	}
+	syncer, err := newContextSyncerWithAPIs(ContextSyncOptions{
+		OrganizationID: "org", TeamID: "team", BotUserID: "U-tag", Lookback: time.Hour, Timeout: time.Second,
+		MaxChannels: 10, MaxMessages: 10, MessagesPerChannel: 10, StateStore: NewMemoryContextSyncStateStore(),
+	}, api, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := syncer.Discover(context.Background(), func(context.Context, types.SlackContextChannel) (bool, error) { return true, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := syncer.CatchUp(context.Background(), run, func(context.Context, types.SlackEnvelope) error {
+		t.Fatal("initial history entered catch-up")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ChannelsCaughtUp != 0 || len(api.historyCalls) != 0 {
+		t.Fatalf("initial history was replayed: stats=%#v calls=%v", stats, api.historyCalls)
+	}
 }
 
 func TestContextSyncDoesNotReadHistoryForLocallyUnauthorizedChannel(t *testing.T) {

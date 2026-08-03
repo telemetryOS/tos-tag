@@ -533,7 +533,7 @@ func (w *WorkerCodex) serverRequest(ctx context.Context, session *codexWorkerSes
 		if success {
 			status = "completed"
 		}
-		session.publish(method, "outbound", status, "Returned reviewed tool result to Codex App Server")
+		session.publishToolResult(method, status, request.Tool, request.Arguments)
 		if success {
 			if toolID, operationID, resourceAction := completedToolOperation(request.Tool, request.Arguments); toolID != "" {
 				data := map[string]any{"tool_id": toolID, "operation_id": operationID}
@@ -576,6 +576,31 @@ func (s *codexWorkerSession) publish(method, direction, status, title string) {
 		details["session_id"] = sessionID
 	}
 	s.activity.Publish(activity.Record{OrganizationID: s.organizationID, Category: "codex", Kind: "codex.rpc", Level: codexActivityLevel(status), Title: title, Summary: direction + " · " + method + " · " + status, Details: details, OccurredAt: time.Now().UTC()})
+}
+
+func (s *codexWorkerSession) publishToolResult(method, status, dynamicTool string, arguments json.RawMessage) {
+	if s.activity == nil {
+		return
+	}
+	s.mu.Lock()
+	sessionID := s.threadID
+	s.mu.Unlock()
+	details := map[string]any{"job_id": s.jobID, "attempt_id": s.attemptID, "method": method, "direction": "outbound", "status": status, "dynamic_tool": dynamicTool}
+	if sessionID != "" {
+		details["session_id"] = sessionID
+	}
+	if toolID, operationID, resourceAction := completedToolOperation(dynamicTool, arguments); toolID != "" {
+		details["tool_id"] = toolID
+		details["operation_id"] = operationID
+		if resourceAction != "" {
+			details["resource_action"] = resourceAction
+		}
+	}
+	title := "Reviewed tool call completed"
+	if status == "failed" {
+		title = "Reviewed tool call failed"
+	}
+	s.activity.Publish(activity.Record{OrganizationID: s.organizationID, Category: "codex", Kind: "codex.tool", Level: codexActivityLevel(status), Title: title, Summary: "outbound · " + method + " · " + status, Details: details, OccurredAt: time.Now().UTC()})
 }
 
 func codexActivityLevel(status string) string {
@@ -622,7 +647,8 @@ func completedToolOperation(tool string, arguments json.RawMessage) (string, str
 	resourceAction := ""
 	if len(request.Arguments) > 0 {
 		switch request.ToolID + "/" + request.OperationID + "/" + request.Arguments[0] {
-		case "telemetryos.wiki/read/get", "telemetryos.wiki/read/search", "telemetryos.product-docs/read/docs-index", "telemetryos.product-docs/read/docs-page", "telemetryos.product-docs/read/corporate-full":
+		case "telemetryos.wiki/read/get", "telemetryos.wiki/read/search", "telemetryos.product-docs/read/docs-index", "telemetryos.product-docs/read/docs-page", "telemetryos.product-docs/read/corporate-full",
+			"telemetryos.code/read/repos", "telemetryos.code/read/files", "telemetryos.code/read/search", "telemetryos.code/read/read", "telemetryos.code/read/versions":
 			resourceAction = request.Arguments[0]
 		}
 	}
@@ -723,9 +749,9 @@ func codexDynamicTools() []map[string]any {
 	return []map[string]any{
 		{
 			"type": "function", "name": "tos_tag_tool",
-			"description": "Run one reviewed tos-tag marketplace operation through the current job capability. Write, destructive, and admin operations require an independently approved approval_id.",
+			"description": "Run one reviewed tos-tag marketplace operation through the current job capability. Calls must be sequential, narrowly scoped, and complete within the callback deadline; never fan out parallel source searches. For a Go version/adoption question, call telemetryos.code read once with arguments [\"versions\",\"<repo>\",\"go\"] before any broader source lookup. Write, destructive, and admin operations require an independently approved approval_id.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"tool_id", "operation_id", "arguments"}, "properties": map[string]any{
-				"tool_id": map[string]any{"type": "string"}, "operation_id": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"},
+				"tool_id": map[string]any{"type": "string"}, "operation_id": map[string]any{"type": "string", "enum": []string{"read", "write", "delete"}}, "arguments": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"},
 			}},
 		},
 		{

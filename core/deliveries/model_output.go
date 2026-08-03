@@ -25,14 +25,14 @@ func ParseModelOutput(output string) (types.SlackResult, error) {
 		raw = strings.TrimSpace(raw[index:])
 	}
 	if !strings.HasPrefix(raw, "{") && !strings.HasPrefix(raw, "[") {
-		return promoteMarkdownTables(types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: raw}}}), nil
+		return promoteMarkdownTables(normalizeModelSlackMarkdown(types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: raw}}})), nil
 	}
 
 	var result types.SlackResult
 	if strings.HasPrefix(raw, "{") {
 		if err := json.Unmarshal([]byte(raw), &result); err == nil && len(result.Segments) > 0 {
 			if modelSegmentsAllowed(result.Segments) {
-				return promoteMarkdownTables(result), nil
+				return promoteMarkdownTables(normalizeModelSlackMarkdown(result)), nil
 			}
 			return types.SlackResult{}, fmt.Errorf("model output cannot emit privileged Slack segments")
 		}
@@ -53,18 +53,79 @@ func ParseModelOutput(output string) (types.SlackResult, error) {
 				kind = legacy.Type
 			}
 			if kind != "" && kind != types.SlackSegmentApproval && kind != types.SlackSegmentNotice && legacy.Notice == nil {
-				return promoteMarkdownTables(types.SlackResult{Segments: []types.SlackSegment{{Kind: kind, Text: legacy.Text, Table: legacy.Table, Card: legacy.Card, Carousel: legacy.Carousel, Image: legacy.Image, Artifact: legacy.Artifact}}}), nil
+				return promoteMarkdownTables(normalizeModelSlackMarkdown(types.SlackResult{Segments: []types.SlackSegment{{Kind: kind, Text: legacy.Text, Table: legacy.Table, Card: legacy.Card, Carousel: legacy.Carousel, Image: legacy.Image, Artifact: legacy.Artifact}}})), nil
 			}
 		}
 	}
 	var segments []types.SlackSegment
 	if err := json.Unmarshal([]byte(raw), &segments); err == nil && len(segments) > 0 {
 		if modelSegmentsAllowed(segments) {
-			return promoteMarkdownTables(types.SlackResult{Segments: segments}), nil
+			return promoteMarkdownTables(normalizeModelSlackMarkdown(types.SlackResult{Segments: segments})), nil
 		}
 		return types.SlackResult{}, fmt.Errorf("model output cannot emit privileged Slack segments")
 	}
 	return types.SlackResult{}, fmt.Errorf("model output violates %s", SlackOutputContractVersion)
+}
+
+// normalizeModelSlackMarkdown repairs the common GitHub-Markdown bold form at
+// the untrusted model boundary. Literal code is preserved byte-for-byte; the
+// renderer still validates the normalized result and all mention/link rules.
+func normalizeModelSlackMarkdown(result types.SlackResult) types.SlackResult {
+	for segmentIndex := range result.Segments {
+		segment := &result.Segments[segmentIndex]
+		switch segment.Kind {
+		case types.SlackSegmentMRKDWN, types.SlackSegmentContext:
+			segment.Text = normalizeSlackBold(segment.Text)
+		case types.SlackSegmentTable:
+			if segment.Table == nil {
+				continue
+			}
+			for rowIndex := range segment.Table.Rows {
+				for cellIndex := range segment.Table.Rows[rowIndex] {
+					cell := &segment.Table.Rows[rowIndex][cellIndex]
+					if cell.Type == "rich_text" {
+						cell.Text = normalizeSlackBold(cell.Text)
+					}
+				}
+			}
+		}
+	}
+	return result
+}
+
+func normalizeSlackBold(text string) string {
+	return mapOutsideCode(text, func(fragment string) string {
+		return strings.ReplaceAll(fragment, "**", "*")
+	})
+}
+
+func containsDoubleAsteriskOutsideCode(text string) bool {
+	found := false
+	_ = mapOutsideCode(text, func(fragment string) string {
+		found = found || strings.Contains(fragment, "**")
+		return fragment
+	})
+	return found
+}
+
+func mapOutsideCode(text string, transform func(string) string) string {
+	lines := strings.Split(text, "\n")
+	inFence := false
+	for lineIndex, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		parts := strings.Split(line, "`")
+		for partIndex := 0; partIndex < len(parts); partIndex += 2 {
+			parts[partIndex] = transform(parts[partIndex])
+		}
+		lines[lineIndex] = strings.Join(parts, "`")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // promoteMarkdownTables turns a conventional pipe table in model prose into
