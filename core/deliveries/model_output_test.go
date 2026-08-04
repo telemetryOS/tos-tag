@@ -123,6 +123,20 @@ func TestParseModelOutputDegradesUnsafeSlackLinksToVisibleLabels(t *testing.T) {
 	}
 }
 
+func TestParseModelOutputNormalizesGitHubLinksWithoutChangingCode(t *testing.T) {
+	result, err := ParseModelOutput(`{"segments":[{"kind":"mrkdwn_text","text":"See [Node Pro](https://example.com/node-pro) and [local config](file:///tmp/config). Keep ` + "`[literal](https://example.com)`" + `."}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "See <https://example.com/node-pro|Node Pro> and local config. Keep `[literal](https://example.com)`."
+	if len(result.Segments) != 1 || result.Segments[0].Text != want {
+		t.Fatalf("normalized text = %q", result.Segments[0].Text)
+	}
+	if _, err := NewRenderer().Render(result); err != nil {
+		t.Fatalf("normalized result did not render: %v", err)
+	}
+}
+
 func TestParseModelOutputLeavesPipeTextAndFencedTablesAlone(t *testing.T) {
 	for name, input := range map[string]string{
 		"ordinary pipe prose": `{"segments":[{"kind":"mrkdwn_text","text":"Choose A | B when appropriate."}]}`,

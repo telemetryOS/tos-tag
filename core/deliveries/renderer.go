@@ -35,7 +35,7 @@ const (
 
 var (
 	ErrInvalidResult     = errors.New("invalid Slack result")
-	gfmLinkPattern       = regexp.MustCompile(`\[[^\]\n]+\]\([^)\n]+\)`)
+	gfmLinkPattern       = regexp.MustCompile(`\[([^\]\n]+)\]\(([^)\n]+)\)`)
 	slackLinkPattern     = regexp.MustCompile(`<([^>|]+)\|([^>]+)>`)
 	slackBareLinkPattern = regexp.MustCompile(`<([A-Za-z][A-Za-z0-9+.-]*:[^>|]+)>`)
 	slackEntityPattern   = regexp.MustCompile(`<(?:@|#|!)[^>]*>`)
@@ -969,7 +969,7 @@ func validateMRKDWN(text string, allowedMentions types.SlackMentionAllowlist) er
 	if !utf8.ValidString(text) || strings.ContainsRune(text, '\x00') {
 		return fmt.Errorf("%w: invalid text encoding", ErrInvalidResult)
 	}
-	if gfmLinkPattern.MatchString(text) {
+	if containsGFMLinkOutsideCode(text) {
 		return fmt.Errorf("%w: GitHub link syntax is not allowed", ErrInvalidResult)
 	}
 	if containsDoubleAsteriskOutsideCode(text) {

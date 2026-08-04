@@ -98,7 +98,24 @@ func normalizeModelSlackResult(result types.SlackResult) types.SlackResult {
 // links remain clickable; unsupported Slack-style targets degrade to their
 // visible label. The renderer still validates every surviving link.
 func normalizeModelSlackLinks(result types.SlackResult) types.SlackResult {
+	normalizeGFM := func(text string) string {
+		return mapOutsideCode(text, func(fragment string) string {
+			return gfmLinkPattern.ReplaceAllStringFunc(fragment, func(candidate string) string {
+				match := gfmLinkPattern.FindStringSubmatch(candidate)
+				if len(match) != 3 {
+					return candidate
+				}
+				label := strings.TrimSpace(match[1])
+				parsed, err := url.Parse(strings.TrimSpace(match[2]))
+				if err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http") && parsed.Host != "" {
+					return "<" + parsed.String() + "|" + escapeLabel(label) + ">"
+				}
+				return label
+			})
+		})
+	}
 	normalize := func(text string) string {
+		text = normalizeGFM(text)
 		return slackLinkPattern.ReplaceAllStringFunc(text, func(candidate string) string {
 			match := slackLinkPattern.FindStringSubmatch(candidate)
 			if len(match) != 3 {
@@ -216,6 +233,15 @@ func containsDoubleAsteriskOutsideCode(text string) bool {
 	found := false
 	_ = mapOutsideCode(text, func(fragment string) string {
 		found = found || strings.Contains(fragment, "**")
+		return fragment
+	})
+	return found
+}
+
+func containsGFMLinkOutsideCode(text string) bool {
+	found := false
+	_ = mapOutsideCode(text, func(fragment string) string {
+		found = found || gfmLinkPattern.MatchString(fragment)
 		return fragment
 	})
 	return found

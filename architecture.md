@@ -425,7 +425,9 @@ shape mistake cannot discard an otherwise valid answer; all normal content,
 size, link, mention, and formatting validation still runs afterward.
 Unsupported model-created Slack link targets such as disposable local file
 paths similarly degrade to their visible label before validation; HTTP(S)
-references remain subject to the normal renderer link checks.
+references remain subject to the normal renderer link checks. Common
+GitHub-Markdown links are normalized to Slack mrkdwn outside literal code;
+unsafe targets degrade to their visible label instead of failing the job.
 Delivery records are durable and leased. Multipart sends reconcile immutable
 metadata so restart cannot duplicate already accepted parts.
 
