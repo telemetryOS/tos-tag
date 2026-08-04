@@ -172,9 +172,23 @@ func (s *ContextSyncer) Discover(parent context.Context, register ContextChannel
 	if err != nil {
 		return run, err
 	}
-	botMembership, err := s.listBotMembership(ctx)
+	botMembership, botChannels, err := s.listBotMembership(ctx)
 	if err != nil {
 		return run, err
+	}
+	seenChannels := make(map[string]bool, len(channels))
+	for _, channel := range channels {
+		seenChannels[channel.ID] = true
+	}
+	for _, channel := range botChannels {
+		if !channel.IsIM || seenChannels[channel.ID] {
+			continue
+		}
+		if len(channels) >= s.options.MaxChannels {
+			return run, fmt.Errorf("combined Slack context channel count exceeds configured maximum %d", s.options.MaxChannels)
+		}
+		channels = append(channels, channel)
+		seenChannels[channel.ID] = true
 	}
 	run.stats.ChannelsDiscovered = len(channels)
 	registeredChannels := make([]slackapi.Channel, 0, len(channels))
@@ -189,7 +203,7 @@ func (s *ContextSyncer) Discover(parent context.Context, register ContextChannel
 			// Only bot-joined channels can produce Slack output. Restrict the
 			// frequent missed-event repair pass to those channels so hundreds of
 			// observe-only conversations do not create a polling workload.
-			if channel.IsIM || ((channel.IsChannel || channel.IsGroup) && botMembership[channel.ID]) {
+			if botMembership[channel.ID] && (channel.IsIM || channel.IsChannel || channel.IsGroup) {
 				catchUpChannels = append(catchUpChannels, channel)
 			}
 			run.stats.ChannelsRegistered++
@@ -201,8 +215,20 @@ func (s *ContextSyncer) Discover(parent context.Context, register ContextChannel
 	if err != nil {
 		return run, err
 	}
+	catchUpIDs := make(map[string]bool, len(catchUpChannels))
 	for _, channel := range catchUpChannels {
+		catchUpIDs[channel.ID] = true
+	}
+	for _, channel := range registeredChannels {
 		state := states[channel.ID]
+		if !catchUpIDs[channel.ID] {
+			if !state.CatchUpThrough.IsZero() {
+				if err := s.options.StateStore.CancelCatchUp(ctx, s.options.OrganizationID, s.options.TeamID, channel.ID, state.CatchUpThrough); err != nil {
+					return run, err
+				}
+			}
+			continue
+		}
 		if !state.BootstrapCompleted || !state.SyncedThrough.Before(run.syncThrough) {
 			continue
 		}
@@ -418,35 +444,37 @@ func (s *ContextSyncer) backfillActiveThread(ctx context.Context, channel slacka
 	return imported, false, latestImported, nil
 }
 
-func (s *ContextSyncer) listBotMembership(ctx context.Context) (map[string]bool, error) {
+func (s *ContextSyncer) listBotMembership(ctx context.Context) (map[string]bool, []slackapi.Channel, error) {
 	membership := make(map[string]bool)
+	channels := make([]slackapi.Channel, 0)
 	cursor := ""
 	count := 0
 	for {
 		limit := min(200, s.options.MaxChannels-count)
 		if limit <= 0 {
-			return nil, fmt.Errorf("Slack bot channel count exceeds configured maximum %d", s.options.MaxChannels)
+			return nil, nil, fmt.Errorf("Slack bot channel count exceeds configured maximum %d", s.options.MaxChannels)
 		}
 		result, err := withSlackRateLimitRetry(ctx, s, "bot users.conversations", func() (contextChannelPage, error) {
 			page, next, callErr := s.botAPI.GetBotConversationsForUserContext(ctx, &slackapi.GetConversationsForUserParameters{
-				Cursor: cursor, Types: []string{"public_channel", "private_channel"}, Limit: limit, ExcludeArchived: true, TeamID: s.options.TeamID,
+				Cursor: cursor, Types: []string{"public_channel", "private_channel", "im"}, Limit: limit, ExcludeArchived: true, TeamID: s.options.TeamID,
 			})
 			return contextChannelPage{channels: page, nextCursor: next}, callErr
 		})
 		if err != nil {
-			return nil, fmt.Errorf("list bot conversations: %w", err)
+			return nil, nil, fmt.Errorf("list bot conversations: %w", err)
 		}
 		count += len(result.channels)
+		channels = append(channels, result.channels...)
 		for _, channel := range result.channels {
 			// users.conversations only returns conversations the token owner is
 			// a member of, so presence in this bounded result is authoritative.
 			membership[channel.ID] = true
 		}
 		if result.nextCursor == "" {
-			return membership, nil
+			return membership, channels, nil
 		}
 		if count >= s.options.MaxChannels {
-			return nil, fmt.Errorf("Slack bot channel count exceeds configured maximum %d", s.options.MaxChannels)
+			return nil, nil, fmt.Errorf("Slack bot channel count exceeds configured maximum %d", s.options.MaxChannels)
 		}
 		cursor = result.nextCursor
 	}
@@ -815,6 +843,7 @@ func contextChannel(organizationID, teamID string, channel slackapi.Channel, bot
 		name = channel.User
 	}
 	isChannel := channel.IsChannel || channel.IsGroup
+	botMembershipKnown := isChannel || channel.IsIM
 	return types.SlackContextChannel{
 		OrganizationID:     organizationID,
 		TeamID:             teamID,
@@ -823,8 +852,8 @@ func contextChannel(organizationID, teamID string, channel slackapi.Channel, bot
 		Restricted:         channelRestricted(channel),
 		RestrictionKnown:   true,
 		IsChannel:          isChannel,
-		BotIsMember:        isChannel && botMembership[channel.ID],
-		BotMembershipKnown: isChannel,
+		BotIsMember:        botMembershipKnown && botMembership[channel.ID],
+		BotMembershipKnown: botMembershipKnown,
 	}
 }
 

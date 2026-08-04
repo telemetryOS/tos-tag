@@ -289,8 +289,9 @@ context sync, and explicit output channel allowlist shown in
 Context history is bootstrapped once per authorized conversation. MongoDB
 retains content-free completion state and a live-event watermark, so ordinary
 restarts never replay the configured lookback as new work. On startup and the
-periodic membership pass, bot-joined channels receive a bounded catch-up from
-the last durable watermark: ambient messages are imported as resolved context,
+periodic membership pass, bot-joined channels and bot-visible DMs receive a
+bounded catch-up from the last durable watermark. User-token-only DMs remain
+context-only and are not incorrectly polled with the bot token: ambient messages are imported as resolved context,
 while a human direct mention, including one in a recovered thread, re-enters
 the normal decision queue. First-time bootstrap mentions remain context-only, and
 observe-only conversations are not polled for actionable catch-up. Exceptional

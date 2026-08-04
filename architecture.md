@@ -61,8 +61,11 @@ process restarts while a bounded catch-up is still active, the durable recovery
 window is extended to the new startup boundary and its pagination restarts from
 that upper bound; stale workers cannot complete the superseded window. This
 prevents repeated restarts from advancing past a newer offline gap.
-Completed bot-joined channels receive a bounded startup and periodic gap repair
-strictly after their last watermark. Recovered ambient history is resolved
+Completed bot-joined channels and direct-message conversations returned by the
+bot token receive a bounded startup and periodic gap repair strictly after their
+last watermark. User-token-only DMs remain available for authorized context
+bootstrap but are never polled with the bot token; any stale actionable cursor
+is cleared without advancing its prior watermark. Recovered ambient history is resolved
 context; only a human direct mention, including one in a recovered thread, can
 re-enter the normal decision queue. First-time bootstrap history never becomes
 work, observe-only conversations are excluded from actionable catch-up, and no

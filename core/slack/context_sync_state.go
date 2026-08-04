@@ -19,6 +19,7 @@ type ContextSyncStateStore interface {
 	List(context.Context, string, string) (map[string]models.SlackContextSyncState, error)
 	Advance(context.Context, string, string, string, time.Time) error
 	BeginCatchUp(context.Context, string, string, string, time.Time) error
+	CancelCatchUp(context.Context, string, string, string, time.Time) error
 	CheckpointCatchUp(context.Context, string, string, string, time.Time, time.Time) error
 	CheckpointThreadCatchUp(context.Context, string, string, string, time.Time, string, time.Time) error
 	CompleteCatchUp(context.Context, string, string, string, time.Time) error
@@ -102,6 +103,23 @@ func (s *MongoContextSyncStateStore) BeginCatchUp(ctx context.Context, organizat
 	)
 	if err != nil {
 		return fmt.Errorf("begin Slack context catch-up: %w", err)
+	}
+	return nil
+}
+
+func (s *MongoContextSyncStateStore) CancelCatchUp(ctx context.Context, organizationID, teamID, channelID string, through time.Time) error {
+	if organizationID == "" || teamID == "" || channelID == "" || through.IsZero() {
+		return fmt.Errorf("invalid Slack context catch-up cancellation")
+	}
+	_, err := s.db.Collection(models.CollectionSlackContextSync).UpdateOne(ctx,
+		bson.M{"organization_id": organizationID, "team_id": teamID, "channel_id": channelID, "catch_up_through": through.UTC()},
+		bson.M{
+			"$unset": bson.M{"catch_up_through": "", "catch_up_latest": "", "catch_up_threads": "", "live_through": ""},
+			"$set":   bson.M{"updated_at": s.now().UTC()},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("cancel Slack context catch-up: %w", err)
 	}
 	return nil
 }
@@ -265,6 +283,26 @@ func (s *MemoryContextSyncStateStore) BeginCatchUp(_ context.Context, organizati
 	state.CatchUpThrough = through.UTC()
 	state.CatchUpLatest = through.UTC()
 	state.CatchUpThreads = nil
+	state.UpdatedAt = time.Now().UTC()
+	s.states[key] = state
+	return nil
+}
+
+func (s *MemoryContextSyncStateStore) CancelCatchUp(_ context.Context, organizationID, teamID, channelID string, through time.Time) error {
+	if organizationID == "" || teamID == "" || channelID == "" || through.IsZero() {
+		return fmt.Errorf("invalid Slack context catch-up cancellation")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := contextSyncStateKey(organizationID, teamID, channelID)
+	state := s.states[key]
+	if !state.CatchUpThrough.Equal(through.UTC()) {
+		return nil
+	}
+	state.CatchUpThrough = time.Time{}
+	state.CatchUpLatest = time.Time{}
+	state.CatchUpThreads = nil
+	state.LiveThrough = time.Time{}
 	state.UpdatedAt = time.Now().UTC()
 	s.states[key] = state
 	return nil

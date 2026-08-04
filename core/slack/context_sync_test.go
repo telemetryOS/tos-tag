@@ -199,8 +199,8 @@ func TestContextSyncCatchUpIncludesAuthorizedDirectMessages(t *testing.T) {
 	}
 	direct := slackapi.Channel{GroupConversation: slackapi.GroupConversation{Conversation: slackapi.Conversation{ID: "D-direct", IsIM: true, User: "U-human"}}}
 	api := &fakeContextSyncAPI{
-		channels: []slackapi.Channel{direct},
-		history:  map[string][]slackapi.Message{"D-direct": {{Msg: slackapi.Msg{Timestamp: messageTS, User: "U-human", Text: "can you catch this up?"}}}},
+		botChannels: []slackapi.Channel{direct},
+		history:     map[string][]slackapi.Message{"D-direct": {{Msg: slackapi.Msg{Timestamp: messageTS, User: "U-human", Text: "can you catch this up?"}}}},
 	}
 	syncer, err := newContextSyncerWithAPIs(ContextSyncOptions{
 		OrganizationID: "org", TeamID: "team", BotUserID: "U-tag", Lookback: 24 * time.Hour, Timeout: time.Second,
@@ -225,6 +225,53 @@ func TestContextSyncCatchUpIncludesAuthorizedDirectMessages(t *testing.T) {
 	}
 	if len(api.historyCalls) != 1 || api.historyCalls[0] != "D-direct" {
 		t.Fatalf("direct-message history calls = %v", api.historyCalls)
+	}
+}
+
+func TestContextSyncCatchUpExcludesUserOnlyDirectMessagesAndClearsStaleCursor(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	previous := now.Add(-time.Hour)
+	state := NewMemoryContextSyncStateStore()
+	if err := state.CompleteBootstrap(context.Background(), "org", "team", "D-user-only", previous); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.BeginCatchUp(context.Background(), "org", "team", "D-user-only", now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	direct := slackapi.Channel{GroupConversation: slackapi.GroupConversation{Conversation: slackapi.Conversation{ID: "D-user-only", IsIM: true, User: "U-other"}}}
+	api := &fakeContextSyncAPI{
+		channels:    []slackapi.Channel{direct},
+		botChannels: []slackapi.Channel{},
+		history:     map[string][]slackapi.Message{"D-user-only": {{Msg: slackapi.Msg{Timestamp: fmt.Sprintf("%d.000001", now.Unix()), User: "U-other", Text: "not a Tag DM"}}}},
+	}
+	syncer, err := newContextSyncerWithAPIs(ContextSyncOptions{
+		OrganizationID: "org", TeamID: "team", BotUserID: "U-tag", Lookback: 24 * time.Hour, Timeout: time.Second,
+		MaxChannels: 10, MaxMessages: 10, MessagesPerChannel: 10, StateStore: state,
+	}, api, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := syncer.Discover(context.Background(), func(_ context.Context, channel types.SlackContextChannel) (bool, error) {
+		if channel.BotIsMember || !channel.BotMembershipKnown {
+			t.Fatalf("user-only DM membership = %#v", channel)
+		}
+		return true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncer.CatchUp(context.Background(), run, func(context.Context, types.SlackEnvelope) error {
+		t.Fatal("user-only DM entered actionable catch-up")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	states, err := state.List(context.Background(), "org", "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !states["D-user-only"].CatchUpThrough.IsZero() || len(api.historyCalls) != 0 {
+		t.Fatalf("user-only DM retained actionable catch-up: state=%#v calls=%v", states["D-user-only"], api.historyCalls)
 	}
 }
 
@@ -644,13 +691,20 @@ func TestContextSyncReconcilesBotMembershipSeparatelyFromUserVisibility(t *testi
 	if len(got) != 2 || !got[0].IsChannel || !got[0].BotMembershipKnown || !got[0].BotIsMember || !got[1].BotMembershipKnown || got[1].BotIsMember {
 		t.Fatalf("bot membership reconciliation = %#v", got)
 	}
-	if api.botListCalls != 1 || api.botConversationIn == nil || len(api.botConversationIn.Types) != 2 {
+	if api.botListCalls != 1 || api.botConversationIn == nil || len(api.botConversationIn.Types) != 3 {
 		t.Fatalf("bot membership request = %#v calls=%d", api.botConversationIn, api.botListCalls)
 	}
+	foundIM := false
 	for _, conversationType := range api.botConversationIn.Types {
-		if conversationType == "im" || conversationType == "mpim" {
-			t.Fatalf("bot membership request included non-channel type %q", conversationType)
+		if conversationType == "im" {
+			foundIM = true
 		}
+		if conversationType == "mpim" {
+			t.Fatalf("bot membership request included group-DM type %q", conversationType)
+		}
+	}
+	if !foundIM {
+		t.Fatal("bot membership request omitted direct messages")
 	}
 }
 
