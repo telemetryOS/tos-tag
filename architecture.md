@@ -56,7 +56,11 @@ The optional user-authorized sync discovers public channels, private channels,
 and DMs visible to the configured Slack user token and bootstraps a bounded
 history once per conversation. Group DMs (mpim) are excluded from discovery,
 and live group-DM events are acknowledged without registration or retention. MongoDB stores content-free bootstrap
-completion and live-event watermarks independently from retained messages.
+completion and live-event watermarks independently from retained messages. If a
+process restarts while a bounded catch-up is still active, the durable recovery
+window is extended to the new startup boundary and its pagination restarts from
+that upper bound; stale workers cannot complete the superseded window. This
+prevents repeated restarts from advancing past a newer offline gap.
 Completed bot-joined channels receive a bounded startup and periodic gap repair
 strictly after their last watermark. Recovered ambient history is resolved
 context; only a human direct mention, including one in a recovered thread, can

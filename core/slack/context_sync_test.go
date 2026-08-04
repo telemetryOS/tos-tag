@@ -354,6 +354,42 @@ func TestContextSyncStateHoldsLiveWatermarkUntilCatchUpCompletes(t *testing.T) {
 	}
 }
 
+func TestContextSyncStateExtendsInterruptedCatchUpForNewStartup(t *testing.T) {
+	state := NewMemoryContextSyncStateStore()
+	previous := time.Date(2026, 8, 4, 8, 0, 0, 0, time.UTC)
+	firstTarget := previous.Add(time.Hour)
+	checkpoint := firstTarget.Add(-time.Minute)
+	secondTarget := firstTarget.Add(time.Hour)
+	threadAt := checkpoint.Add(-time.Minute)
+	if err := state.CompleteBootstrap(context.Background(), "org", "team", "C-channel", previous); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.BeginCatchUp(context.Background(), "org", "team", "C-channel", firstTarget); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CheckpointCatchUp(context.Background(), "org", "team", "C-channel", firstTarget, checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CheckpointThreadCatchUp(context.Background(), "org", "team", "C-channel", firstTarget, "old-thread", threadAt); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := state.BeginCatchUp(context.Background(), "org", "team", "C-channel", secondTarget); err != nil {
+		t.Fatal(err)
+	}
+	states, err := state.List(context.Background(), "org", "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := states["C-channel"]
+	if !got.CatchUpThrough.Equal(secondTarget) || !got.CatchUpLatest.Equal(secondTarget) || len(got.CatchUpThreads) != 0 {
+		t.Fatalf("extended catch-up state = %#v", got)
+	}
+	if err := state.CompleteCatchUp(context.Background(), "org", "team", "C-channel", firstTarget); err == nil {
+		t.Fatal("stale pre-restart catch-up completed the extended recovery window")
+	}
+}
+
 func TestContextSyncCatchUpRecoversRepliesInExistingTagThreads(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	previous := now.Add(-2 * time.Hour)

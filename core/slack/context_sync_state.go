@@ -92,7 +92,11 @@ func (s *MongoContextSyncStateStore) BeginCatchUp(ctx context.Context, organizat
 		bson.M{
 			"organization_id": organizationID, "team_id": teamID, "channel_id": channelID,
 			"bootstrap_completed": true,
-			"$or":                 bson.A{bson.M{"catch_up_through": bson.M{"$exists": false}}, bson.M{"catch_up_through": time.Time{}}},
+			"$or": bson.A{
+				bson.M{"catch_up_through": bson.M{"$exists": false}},
+				bson.M{"catch_up_through": time.Time{}},
+				bson.M{"catch_up_through": bson.M{"$lt": through.UTC()}},
+			},
 		},
 		bson.M{"$set": bson.M{"catch_up_through": through.UTC(), "catch_up_latest": through.UTC(), "catch_up_threads": bson.A{}, "updated_at": s.now().UTC()}},
 	)
@@ -254,7 +258,7 @@ func (s *MemoryContextSyncStateStore) BeginCatchUp(_ context.Context, organizati
 	defer s.mu.Unlock()
 	key := contextSyncStateKey(organizationID, teamID, channelID)
 	state := s.states[key]
-	if !state.BootstrapCompleted || !state.CatchUpThrough.IsZero() {
+	if !state.BootstrapCompleted || (!state.CatchUpThrough.IsZero() && !through.After(state.CatchUpThrough)) {
 		return nil
 	}
 	state.OrganizationID, state.TeamID, state.ChannelID = organizationID, teamID, channelID
