@@ -169,7 +169,9 @@ query fix), plus `F12`, `F14`, `F17`, `F27`, `F29`, `F33`, `F37`, `F42`,
 - [x] Extend an interrupted catch-up to the latest startup boundary so restart loops cannot skip newer offline mentions.
 - [x] Limit actionable DM catch-up to bot-visible conversations and clear stale user-only DM cursors.
 - [x] Read bot-owned DM bootstrap and catch-up history with the bot token instead of the user token.
+- [x] Exclude Slack's synthetic `USLACKBOT` DM from actionable history recovery.
 - [x] Deterministically route multi-issue operational synthesis to a strong, evidence-grounded thread.
+- [x] Fall back from a removed channel model default to the valid deployment default.
 - [x] Pass focused worker, pipeline, server, and deployment tests.
-- [ ] Commit, push, deploy, and restart the corrected Arch build.
-- [ ] Pass the bounded full live regression matrix in `#tos-tag`.
+- [x] Commit, push, deploy, and restart the corrected Arch build.
+- [x] Pass the bounded full live regression matrix in `#tos-tag`.
