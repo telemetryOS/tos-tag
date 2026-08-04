@@ -128,6 +128,7 @@ type MemoryConfig struct {
 type JobsConfig struct {
 	Lease             time.Duration `config:"lease"`
 	Poll              time.Duration `config:"poll"`
+	ProgressDelay     time.Duration `config:"progressDelay"`
 	MaxAttempts       int           `config:"maxAttempts"`
 	WorkerConcurrency int           `config:"workerConcurrency"`
 }
@@ -268,6 +269,7 @@ var DefaultConfiguration = Config{
 	Jobs: JobsConfig{
 		Lease:             30 * time.Second,
 		Poll:              250 * time.Millisecond,
+		ProgressDelay:     8 * time.Second,
 		MaxAttempts:       3,
 		WorkerConcurrency: 8,
 	},
@@ -416,6 +418,13 @@ func applyClassifierEnvironment(cfg *ClassifierConfig) error {
 }
 
 func applyJobsEnvironment(cfg *JobsConfig) error {
+	if raw, ok := os.LookupEnv("TAG__JOBS__PROGRESS_DELAY"); ok {
+		value, err := time.ParseDuration(strings.TrimSpace(raw))
+		if err != nil {
+			return fmt.Errorf("TAG__JOBS__PROGRESS_DELAY must be a duration: %w", err)
+		}
+		cfg.ProgressDelay = value
+	}
 	if raw, ok := os.LookupEnv("TAG__JOBS__WORKER_CONCURRENCY"); ok {
 		value, err := strconv.Atoi(strings.TrimSpace(raw))
 		if err != nil {
@@ -531,8 +540,8 @@ func Validate(cfg *Config) error {
 	if cfg.Classifier.AssistThreshold < 0 || cfg.Classifier.AssistThreshold > 1 || cfg.Classifier.ChannelReplyThreshold < cfg.Classifier.AssistThreshold || cfg.Classifier.ChannelReplyThreshold > 1 {
 		return fmt.Errorf("invalid classifier thresholds")
 	}
-	if cfg.Classifier.MaxResponsesPerHour <= 0 || cfg.Classifier.MaxConcurrentJobs <= 0 || cfg.Jobs.Lease <= 0 || cfg.Jobs.Poll <= 0 || cfg.Jobs.MaxAttempts <= 0 || cfg.Jobs.WorkerConcurrency <= 0 || cfg.Jobs.WorkerConcurrency > 64 {
-		return fmt.Errorf("classifier and job bounds must be positive and worker concurrency must not exceed 64")
+	if cfg.Classifier.MaxResponsesPerHour <= 0 || cfg.Classifier.MaxConcurrentJobs <= 0 || cfg.Jobs.Lease <= 0 || cfg.Jobs.Poll <= 0 || cfg.Jobs.ProgressDelay <= 0 || cfg.Jobs.ProgressDelay > time.Minute || cfg.Jobs.MaxAttempts <= 0 || cfg.Jobs.WorkerConcurrency <= 0 || cfg.Jobs.WorkerConcurrency > 64 {
+		return fmt.Errorf("classifier and job bounds must be positive, progress delay must not exceed one minute, and worker concurrency must not exceed 64")
 	}
 	if cfg.Classifier.FloodProtectionEnabled && (cfg.Classifier.FloodMaxMessages <= 0 || cfg.Classifier.FloodWindow <= 0) {
 		return fmt.Errorf("enabled classifier flood protection requires a positive message limit and window")
@@ -668,6 +677,7 @@ func (c *Config) RedactedStatus() map[string]any {
 		"classifier_mode":                     c.Classifier.Mode,
 		"classifier_provider":                 c.Classifier.Provider,
 		"classifier_model":                    c.Classifier.Model,
+		"jobs_progress_delay":                 c.Jobs.ProgressDelay.String(),
 		"classifier_reasoning_effort":         c.Classifier.ReasoningEffort,
 		"classifier_max_responses_hour":       c.Classifier.MaxResponsesPerHour,
 		"classifier_max_concurrent_jobs":      c.Classifier.MaxConcurrentJobs,

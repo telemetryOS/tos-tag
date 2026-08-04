@@ -32,8 +32,11 @@ influence an answer sent elsewhere.
   delivery. Model-generated cards cannot carry actions.
   Native agent blocks use streamed block chunks; ordinary direct posts
   downgrade them to equivalent standard Sections/Tables for compatibility.
-- Shows Slack-native Thinking Steps for admitted full-agent thread work, then
-  finalizes that same streamed message with the validated answer. Every native
+- Uses the classifier reaction as the immediate acknowledgement and starts
+  Slack-native Thinking Steps only when admitted full-agent thread work remains
+  active after the configured grace period, then finalizes that same streamed
+  message with the validated answer. Quick answers skip the generic
+  `Thinking...` placeholder. Every native
   or reviewed tool and dynamically declared active skill updates one rotating
   current-action card, so completed work does not leave a stack of task cards. The
   timeline contains concise action summaries and sources, never hidden reasoning,
@@ -102,10 +105,11 @@ Reactions remain available for intentional reaction-only classifier outcomes
 and lightweight social acknowledgements. When the classifier admits answer
 work (a channel or thread reply), the control plane immediately applies the
 classifier-selected emoji to the source message as an acknowledgement that a
-response is coming. Progress itself is not conveyed by reactions: admitted
-thread work uses Slack's
+response is coming. If admitted thread work remains active after the configured
+progress grace period, it uses Slack's
 [Thinking Steps](https://slack.dev/slack-thinking-steps-ai-agents/) timeline;
-brief classifier-selected in-channel answers remain direct because Slack
+quick answers deliver directly after the reaction without opening a stream.
+Brief classifier-selected in-channel answers remain direct because Slack
 requires streamed agent responses to have a `thread_ts`. Background and
 approval outcomes stay reaction-free. A strong/high-effort full-agent
 recommendation is substantial by definition and is corrected to a thread
@@ -329,6 +333,7 @@ TAG__CLASSIFIER__FLOOD_PROTECTION_ENABLED=true
 TAG__CLASSIFIER__FLOOD_MAX_MESSAGES=1000
 TAG__CLASSIFIER__FLOOD_WINDOW=1h
 TAG__JOBS__WORKER_CONCURRENCY=8
+TAG__JOBS__PROGRESS_DELAY=8s
 ```
 
 This control-plane key is used by the direct classifier and, when no separate

@@ -98,8 +98,10 @@ for audit, suppress its effective action with
 before pipeline admission. Only `proactive` mode may treat an unaddressed
 declarative failure or incident as initiative by itself.
 
-Admitted full-agent thread jobs use a collapsed Slack Thinking Steps timeline. The Go
-control plane owns `chat.startStream`, safe task updates, and `chat.stopStream`;
+Admitted full-agent thread jobs that remain active after the configured progress
+grace period use a collapsed Slack Thinking Steps timeline. The immediate
+classifier-selected reaction is the only acknowledgement for jobs that finish
+inside that grace period. The Go control plane owns `chat.startStream`, safe task updates, and `chat.stopStream`;
 the model does not write progress text. Emit only allowlisted operational
 milestones and validated HTTPS sources through one rotating current-action card,
 rather than retaining a card for every completed step. Never stream model reasoning, deltas,

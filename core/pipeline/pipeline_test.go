@@ -382,10 +382,15 @@ type testSystem struct {
 }
 
 func newTestSystem(t *testing.T) testSystem {
+	return newTestSystemWithHarness(t, nil, config.DefaultConfiguration.Jobs.ProgressDelay)
+}
+
+func newTestSystemWithHarness(t *testing.T, workerHarness harness.Harness, progressDelay time.Duration) testSystem {
 	t.Helper()
 	cfg := config.DefaultConfiguration
 	cfg.Jobs.Poll = 2 * time.Millisecond
 	cfg.Jobs.Lease = time.Second
+	cfg.Jobs.ProgressDelay = progressDelay
 	builder, err := contextpacks.New(cfg.ContextPacks, contextpacks.WordTokenizer{})
 	if err != nil {
 		t.Fatal(err)
@@ -418,6 +423,7 @@ func newTestSystem(t *testing.T) testSystem {
 		Classifier:      classificationService,
 		FloodProtection: floodGate,
 		Renderer:        deliveries.NewRenderer(),
+		Harness:         workerHarness,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -466,8 +472,8 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 	if reactions := system.transport.ReactionRequests(); len(reactions) != 1 || reactions[0].Emoji == "" || reactions[0].ChannelID != message.ChannelID || reactions[0].MessageTS != message.MessageTS {
 		t.Fatalf("admitted answer work did not immediately acknowledge the source message with a classifier reaction: %#v", reactions)
 	}
-	if starts := system.transport.ProgressStarts(); len(starts) != 1 || starts[0].ChannelID != message.ChannelID || starts[0].ThreadTS != message.MessageTS || starts[0].Step.Status != types.SlackProgressInProgress {
-		t.Fatalf("Thinking Steps starts = %#v", starts)
+	if starts := system.transport.ProgressStarts(); len(starts) != 0 {
+		t.Fatalf("quick answer incorrectly started Thinking Steps: %#v", starts)
 	}
 	activityRecords := system.activity.Snapshot(message.OrganizationID, 10)
 	if len(activityRecords) != 1 || activityRecords[0].Category != "classifier" || activityRecords[0].Message != message.Text || activityRecords[0].Details["outcome"] != string(types.OutcomeReplyInThread) {
@@ -483,7 +489,7 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 		t.Fatalf("deliveries = %#v, err = %v", deliveryList, err)
 	}
 	request := system.transport.Requests()[0]
-	if request.Destination.ChannelID != message.ChannelID || request.Destination.ThreadTS != message.MessageTS || request.Destination.StreamTS == "" {
+	if request.Destination.ChannelID != message.ChannelID || request.Destination.ThreadTS != message.MessageTS || request.Destination.StreamTS != "" {
 		t.Fatalf("destination was not server-derived from the source: %#v", request.Destination)
 	}
 	if _, err := deliveries.NewRenderer().Render(request.Result); err != nil {
@@ -504,8 +510,40 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 	if got := len(system.transport.ReactionRequests()); got != 1 {
 		t.Fatalf("duplicate changed reaction count to %d", got)
 	}
-	if got := len(system.transport.ProgressStarts()); got != 1 {
+	if got := len(system.transport.ProgressStarts()); got != 0 {
 		t.Fatalf("duplicate caused %d progress streams", got)
+	}
+}
+
+func TestLongMentionStartsThinkingStepsAfterReactionGrace(t *testing.T) {
+	blocking := &blockingHarness{started: make(chan struct{}, 1), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(blocking.release) }) })
+	system := newTestSystemWithHarness(t, blocking, 5*time.Millisecond)
+	message := envelope("mention-progress-grace", "product", "100.0015", "<@tos-tag> investigate this in depth")
+	message.IsMention = true
+	message.OriginTag = "slack_app_mention"
+
+	if _, err := system.ingress.Inject(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-blocking.started:
+	case <-time.After(time.Second):
+		t.Fatal("agent harness did not start")
+	}
+	waitFor(t, func() bool { return len(system.transport.ProgressStarts()) == 1 })
+	if reactions := system.transport.ReactionRequests(); len(reactions) != 1 || reactions[0].MessageTS != message.MessageTS {
+		t.Fatalf("long work did not retain its immediate reaction: %#v", reactions)
+	}
+	starts := system.transport.ProgressStarts()
+	if starts[0].ChannelID != message.ChannelID || starts[0].ThreadTS != message.MessageTS || starts[0].Step.Status != types.SlackProgressInProgress {
+		t.Fatalf("delayed Thinking Steps start = %#v", starts[0])
+	}
+	releaseOnce.Do(func() { close(blocking.release) })
+	waitFor(t, func() bool { return len(system.transport.Requests()) == 1 })
+	if streamTS := system.transport.Requests()[0].Destination.StreamTS; streamTS == "" {
+		t.Fatal("long answer did not finalize its delayed progress stream")
 	}
 }
 
@@ -660,9 +698,12 @@ func TestProactiveBackgroundWorkImmediatelyAcknowledgesSourceMessage(t *testing.
 	if _, err := system.ingress.Inject(context.Background(), message); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, func() bool { return len(system.transport.ProgressStarts()) == 1 })
+	waitFor(t, func() bool { return len(system.transport.Requests()) == 1 })
 	if reactions := system.transport.ReactionRequests(); len(reactions) != 1 || reactions[0].Emoji != "rotating_light" || reactions[0].ChannelID != message.ChannelID || reactions[0].MessageTS != message.MessageTS {
 		t.Fatalf("proactive background work did not immediately acknowledge its source message: %#v", reactions)
+	}
+	if starts := system.transport.ProgressStarts(); len(starts) != 0 {
+		t.Fatalf("quick proactive work incorrectly started Thinking Steps: %#v", starts)
 	}
 }
 

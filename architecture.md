@@ -458,9 +458,13 @@ unsafe targets degrade to their visible label instead of failing the job.
 Delivery records are durable and leased. Multipart sends reconcile immutable
 metadata so restart cannot duplicate already accepted parts.
 
-Admitted full-agent thread work starts a Slack
+Admitted full-agent thread work immediately acknowledges the source with the
+classifier-selected reaction. If the job remains active after the configured
+progress grace period, the control plane starts a Slack
 [Thinking Steps](https://slack.dev/slack-thinking-steps-ai-agents/) stream in
-the classifier-selected thread. The returned message timestamp is
+the classifier-selected thread. Jobs that finish inside the grace period deliver
+their final threaded answer without creating Slack's generic `Thinking...`
+placeholder. The returned stream message timestamp is
 persisted on the leased job. Reviewed harness events become concise task-card
 updates from a fixed control-plane vocabulary. Every native or reviewed tool
 call and every validated active skill replaces one shared current-action card,

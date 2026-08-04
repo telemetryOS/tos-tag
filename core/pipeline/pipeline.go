@@ -1545,8 +1545,8 @@ func (p *Pipeline) processOneJob(ctx context.Context, workerID types.WorkerID) b
 		}
 		return true
 	}
-	job = p.startJobProgress(ctx, job, jobLogger)
-	result, runErr := p.runHarness(ctx, job)
+	result, progressedJob, runErr := p.runHarnessWithDelayedProgress(ctx, job, jobLogger)
+	job = progressedJob
 	if current, getErr := p.deps.Jobs.Get(ctx, job.ID); getErr == nil && current.State == jobs.StateWaitingApproval && current.ApprovalID != "" {
 		p.updateJobProgress(ctx, current, types.SlackProgressStep{ID: "approval", Title: "Waiting for approval", Status: types.SlackProgressPending})
 		// A suspended job no longer owns a worker lease and must not consume the
@@ -1698,7 +1698,48 @@ func (p *Pipeline) startJobProgress(ctx context.Context, job jobs.Job, logger *b
 	return updated
 }
 
+func (p *Pipeline) runHarnessWithDelayedProgress(ctx context.Context, job jobs.Job, logger *blackbox.Logger) (types.SlackResult, jobs.Job, error) {
+	// The classifier-selected reaction is the immediate acknowledgement. Avoid
+	// creating Slack's generic "Thinking..." stream for work that completes
+	// quickly; only jobs still running after the configured grace period need a
+	// separate progress surface. Existing streams from a prior attempt remain
+	// available immediately and are never replaced.
+	if job.ProgressMessageTS != "" || deliveryThreadTS(job) == "" || job.RequesterID == "" || p.deps.Transport == nil || !slackOutputChannelAllowed(p.deps.Config, job.ChannelID) {
+		result, err := p.runHarness(ctx, job)
+		return result, job, err
+	}
+
+	progressCtx, cancelProgress := context.WithCancel(ctx)
+	progressed := make(chan jobs.Job, 1)
+	go func() {
+		timer := time.NewTimer(p.deps.Config.Jobs.ProgressDelay)
+		defer timer.Stop()
+		select {
+		case <-progressCtx.Done():
+			progressed <- job
+		case <-timer.C:
+			progressed <- p.startJobProgress(progressCtx, job, logger)
+		}
+	}()
+
+	result, err := p.runHarness(ctx, job)
+	cancelProgress()
+	progressedJob := <-progressed
+	if progressedJob.ProgressMessageTS != "" {
+		job.ProgressMessageTS = progressedJob.ProgressMessageTS
+	}
+	return result, job, err
+}
+
 func (p *Pipeline) updateJobProgress(ctx context.Context, job jobs.Job, step types.SlackProgressStep) {
+	if job.ProgressMessageTS == "" && p.deps.Jobs != nil {
+		// runHarness may already be consuming events when the delayed progress
+		// stream is opened. Resolve the persisted timestamp so later milestones
+		// and terminal completion update the newly created stream.
+		if current, err := p.deps.Jobs.Get(ctx, job.ID); err == nil {
+			job.ProgressMessageTS = current.ProgressMessageTS
+		}
+	}
 	if job.ProgressMessageTS == "" || p.deps.Transport == nil {
 		return
 	}

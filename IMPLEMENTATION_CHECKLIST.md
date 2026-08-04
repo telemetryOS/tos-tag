@@ -197,8 +197,10 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Persist, lease, retry, reconcile, and deduplicate deliveries.
 - [x] Distinguish channel replies from thread replies according to classifier
   placement.
-- [x] Use Slack-native Thinking Steps for admitted full-agent thread work, persist and
-  reconcile the stream timestamp, expose only safe operational milestones, and
+- [x] Use immediate reactions for admitted answer acknowledgement, delay
+  Slack-native Thinking Steps until a full-agent thread job outlives the
+  configured grace period, persist and reconcile the stream timestamp, expose
+  only safe operational milestones, and
   finalize the same message with a durable validated result.
 
 ## 10. Persistence, audit, and operations

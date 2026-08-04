@@ -105,8 +105,11 @@ allowlisted summary of successfully used capabilities. The
 control plane owns this metadata; model output and classifier-only replies do
 not carry it.
 
-Admitted full-agent thread jobs use Slack Thinking Steps in collapsed timeline mode.
-The control plane starts and owns the stream, emits only allowlisted operational
+Admitted full-agent thread jobs use the classifier-selected reaction as their
+immediate acknowledgement. Jobs still active after the configured progress grace
+period use Slack Thinking Steps in collapsed timeline mode; quick jobs deliver
+their final answer without flashing a generic `Thinking...` placeholder. The
+control plane starts and owns the stream, emits only allowlisted operational
 milestones, gives every native/reviewed tool call one stable in-progress then
 complete/error update on one rotating current-action task card, and shows each
 dynamically declared validated skill through that same transient card. Examples include reading the Wiki, querying telemetry, or

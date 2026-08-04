@@ -42,8 +42,11 @@ Current initiative constraints:
   it discard a direct mention or a human continuation in an active Tag thread.
   Keep hourly response budgets, concurrency limits, and the organization flood
   gate intact.
-- Use Slack Thinking Steps for admitted full-agent thread jobs as the progress
-  surface. Reuse one transient current-action task card for every native or
+- Use the immediate classifier-selected reaction as the acknowledgement for
+  admitted answer work. Start Slack Thinking Steps only when a full-agent
+  thread job remains active after the configured progress grace period, so
+  quick answers do not flash Slack's generic `Thinking...` placeholder. Reuse
+  one transient current-action task card for every native or
   reviewed tool and dynamically declared validated skill, replacing it as work
   advances instead of accumulating completed cards. Keep titles to safe operational facts from reviewed control-plane
   events; never expose chain-of-thought, model deltas, raw tool arguments/output,
