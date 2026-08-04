@@ -226,6 +226,7 @@ func (c *OpenAIClassifier) Decide(ctx context.Context, target Target, pack types
 	decision = withSourceWritePolicyCorrections(decision, target)
 	decision = withImplementationPlanningPolicyCorrections(decision, target, profiles)
 	decision = withReadOnlyCodeAnalysisPolicyCorrections(decision, target, profiles)
+	decision = withOperationalSynthesisPolicyCorrections(decision, target, pack, profiles)
 	decision = withHighIntelligenceProfileCorrections(decision, target, profiles)
 	decision = withBriefMentionPolicyCorrections(decision, target, profiles)
 	decision = withAmbientPolicyCorrections(decision, target, pack, profiles)
@@ -901,6 +902,65 @@ func withHighIntelligenceProfileCorrections(decision types.ClassificationDecisio
 	decision.AgentReasoningEffort = "medium"
 	decision.ReasonCodes = appendUnique(decision.ReasonCodes, "policy.high_intelligence_profile")
 	return withCanonicalAgentProfile(decision, profiles)
+}
+
+func withOperationalSynthesisPolicyCorrections(decision types.ClassificationDecision, target Target, pack types.ContextPackRevision, profiles []advertisedAgentProfile) types.ClassificationDecision {
+	if !target.Envelope.IsMention || target.ActiveThread || !isBroadOperationalStatusQuestion(target.Envelope.Text) {
+		return decision
+	}
+	evidenceIDs := operationalSynthesisEvidenceIDs(pack)
+	if len(evidenceIDs) < 2 {
+		return decision
+	}
+	decision.Outcome = types.OutcomeReplyInThread
+	if requested, _, ok := requestedReplyPlacement(target.Envelope.Text); ok {
+		decision.Outcome = requested
+	}
+	decision.Confidence = max(decision.Confidence, 0.99)
+	decision.ReasonCodes = appendUnique(decision.ReasonCodes, "policy.multi_issue_operational_synthesis")
+	decision.ResponseIntent = "synthesize the multiple current destination-safe human operational reports in a focused response; attribute them as reports, distinguish separate issues, and do not present unverified status or root cause as confirmed"
+	decision.DirectReply = ""
+	decision.ProductRetrievalRequired = false
+	decision.RequiresFullAgent = true
+	decision.ReleasableEvidenceIDs = nil
+	for _, id := range evidenceIDs {
+		decision.ReleasableEvidenceIDs = appendUnique(decision.ReleasableEvidenceIDs, id)
+	}
+	if decision.Reaction != "warning" && decision.Reaction != "rotating_light" {
+		decision.Reaction = "thinking_face"
+	}
+	decision.AgentModelProfile = ""
+	decision.AgentModelStrength = "strong"
+	decision.AgentReasoningEffort = "medium"
+	return withCanonicalAgentProfile(decision, profiles)
+}
+
+func isBroadOperationalStatusQuestion(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if !strings.Contains(lower, "?") {
+		return false
+	}
+	return containsAny(lower,
+		"operational issues", "operational concerns", "any incidents", "current incidents", "open incidents",
+		"anything broken", "what is broken", "what's broken",
+	)
+}
+
+func operationalSynthesisEvidenceIDs(pack types.ContextPackRevision) []string {
+	channels := make(map[string]bool)
+	ids := make([]string, 0, len(pack.Sources))
+	for _, source := range pack.Sources {
+		if source.ID == "" || source.ChannelID == "" || channels[source.ChannelID] || source.Provenance != "human_message" || source.DisclosureClass != types.DisclosureDestinationSafe {
+			continue
+		}
+		lower := strings.ToLower(source.Text)
+		if !containsIncident(lower) && !containsAny(lower, " blocked", " blocking", "regression", "needs triage", "root cause", "unconfirmed") {
+			continue
+		}
+		channels[source.ChannelID] = true
+		ids = append(ids, source.ID)
+	}
+	return ids
 }
 
 func withImplementationPlanningPolicyCorrections(decision types.ClassificationDecision, target Target, profiles []advertisedAgentProfile) types.ClassificationDecision {

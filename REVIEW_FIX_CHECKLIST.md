@@ -167,6 +167,7 @@ query fix), plus `F12`, `F14`, `F17`, `F27`, `F29`, `F33`, `F37`, `F42`,
 - [x] Surface the safe worker diagnostic stage in Management job rows and details.
 - [x] Normalize safe model-emitted GitHub-style links instead of failing an otherwise valid Slack result.
 - [x] Extend an interrupted catch-up to the latest startup boundary so restart loops cannot skip newer offline mentions.
+- [x] Deterministically route multi-issue operational synthesis to a strong, evidence-grounded thread.
 - [x] Pass focused worker, pipeline, server, and deployment tests.
 - [ ] Commit, push, deploy, and restart the corrected Arch build.
 - [ ] Pass the bounded full live regression matrix in `#tos-tag`.

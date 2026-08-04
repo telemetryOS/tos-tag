@@ -330,6 +330,28 @@ func TestAmbientPolicyCorrectionsSurfaceAlignmentAndEnforceAdmittedPlacement(t *
 	if nonProductOperationalTopic.ProductRetrievalRequired || slices.Contains(nonProductOperationalTopic.ReasonCodes, "policy.authoritative_product_retrieval") {
 		t.Fatalf("context topic mislabeled operational status as product knowledge: %#v", nonProductOperationalTopic)
 	}
+	operationalSynthesis := withOperationalSynthesisPolicyCorrections(
+		types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, Confidence: .91, ReasonCodes: []string{"active_incident"}, RequiresFullAgent: true, Reaction: "rotating_light", AgentModelProfile: "standard", AgentModelStrength: "standard", AgentReasoningEffort: "medium"},
+		Target{Envelope: types.SlackEnvelope{Text: "<@tos-tag> any operational issues?", IsMention: true}},
+		types.ContextPackRevision{Sources: []types.ContextSource{
+			{ID: "alerts/checkout", ChannelID: "alerts", Provenance: "human_message", Text: "Checkout remains unavailable while incident TEST-428 is active.", DisclosureClass: types.DisclosureDestinationSafe},
+			{ID: "development/regression", ChannelID: "development", Provenance: "human_message", Text: "A deployed regression is blocking review and needs triage.", DisclosureClass: types.DisclosureDestinationSafe},
+			{ID: "tag/unverified", ChannelID: "other", Provenance: "agent_output_unverified", Text: "Another incident is active.", DisclosureClass: types.DisclosureDestinationSafe},
+		}},
+		profiles,
+	)
+	if operationalSynthesis.Outcome != types.OutcomeReplyInThread || operationalSynthesis.AgentModelProfile != "strong" || operationalSynthesis.AgentModelStrength != "strong" || operationalSynthesis.AgentReasoningEffort != "medium" || !operationalSynthesis.RequiresFullAgent || !slices.Contains(operationalSynthesis.ReasonCodes, "policy.multi_issue_operational_synthesis") || !slices.Equal(operationalSynthesis.ReleasableEvidenceIDs, []string{"alerts/checkout", "development/regression"}) {
+		t.Fatalf("multi-issue operational synthesis missed strong threaded routing: %#v", operationalSynthesis)
+	}
+	oneIssue := withOperationalSynthesisPolicyCorrections(
+		types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, Confidence: .91, ReasonCodes: []string{"incident"}, RequiresFullAgent: true, Reaction: "warning", AgentModelProfile: "standard", AgentModelStrength: "standard", AgentReasoningEffort: "medium"},
+		Target{Envelope: types.SlackEnvelope{Text: "<@tos-tag> any operational issues?", IsMention: true}},
+		types.ContextPackRevision{Sources: []types.ContextSource{{ID: "alerts/checkout", ChannelID: "alerts", Provenance: "human_message", Text: "Checkout is unavailable.", DisclosureClass: types.DisclosureDestinationSafe}}},
+		profiles,
+	)
+	if oneIssue.Outcome != types.OutcomeReplyInChannel || oneIssue.AgentModelStrength != "standard" {
+		t.Fatalf("single operational report was over-routed: %#v", oneIssue)
+	}
 	externalPricing := withProductKnowledgePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, Confidence: .99, ReasonCodes: []string{"public_source_retrieval_requested", "pricing_calculation", "named_model_pricing"}, TopicIDs: []string{"pricing"}, ResponseIntent: "retrieve the official OpenAI pricing page and calculate the requested amount", ProductRetrievalRequired: true, RequiresFullAgent: true, Reaction: "thinking_face", AgentModelProfile: "standard", AgentModelStrength: "standard", AgentReasoningEffort: "medium"}, Target{Envelope: types.SlackEnvelope{Text: "Take a look at the official OpenAI pricing page and tell me what 250,000 Luna input tokens would cost."}}, profiles)
 	if externalPricing.ProductRetrievalRequired || externalPricing.ResponseIntent != "retrieve the official OpenAI pricing page and calculate the requested amount" || externalPricing.Outcome != types.OutcomeReplyInChannel || !externalPricing.RequiresFullAgent || !slices.Contains(externalPricing.ReasonCodes, "policy.external_public_source") {
 		t.Fatalf("external OpenAI pricing request was misrouted as TelemetryOS product retrieval: %#v", externalPricing)
