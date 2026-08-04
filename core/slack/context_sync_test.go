@@ -309,6 +309,41 @@ func TestContextSyncCatchUpExcludesUserOnlyDirectMessagesAndClearsStaleCursor(t 
 	}
 }
 
+func TestContextSyncExcludesSyntheticSlackbotDMAndClearsStaleCursor(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	state := NewMemoryContextSyncStateStore()
+	if err := state.CompleteBootstrap(context.Background(), "org", "team", "D-slackbot", now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.BeginCatchUp(context.Background(), "org", "team", "D-slackbot", now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	direct := slackapi.Channel{GroupConversation: slackapi.GroupConversation{Conversation: slackapi.Conversation{ID: "D-slackbot", IsIM: true, User: "USLACKBOT"}}}
+	api := &fakeContextSyncAPI{channels: []slackapi.Channel{direct}, botChannels: []slackapi.Channel{direct}}
+	syncer, err := newContextSyncerWithAPIs(ContextSyncOptions{
+		OrganizationID: "org", TeamID: "team", BotUserID: "U-tag", Lookback: 24 * time.Hour, Timeout: time.Second,
+		MaxChannels: 10, MaxMessages: 10, MessagesPerChannel: 10, StateStore: state,
+	}, api, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncer.Discover(context.Background(), func(_ context.Context, channel types.SlackContextChannel) (bool, error) {
+		if channel.BotIsMember || !channel.BotMembershipKnown {
+			t.Fatalf("Slackbot DM membership = %#v", channel)
+		}
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	states, err := state.List(context.Background(), "org", "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !states[direct.ID].CatchUpThrough.IsZero() || len(api.historyCalls) != 0 {
+		t.Fatalf("Slackbot DM retained actionable catch-up: state=%#v calls=%v", states[direct.ID], api.historyCalls)
+	}
+}
+
 func TestContextSyncCatchUpCheckpointsBusyChannelAndContinues(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	previous := now.Add(-2 * time.Hour)
@@ -703,9 +738,11 @@ func TestContextSyncReconcilesBotMembershipSeparatelyFromUserVisibility(t *testi
 	visibleNotJoined := testSlackChannel("C-observe", "observe", false)
 	botJoined := visibleJoined
 	botJoined.IsMember = true
+	slackbotDM := testSlackChannel("D-slackbot", "", true)
+	slackbotDM.User = "USLACKBOT"
 	api := &fakeContextSyncAPI{
 		channels:    []slackapi.Channel{visibleJoined, visibleNotJoined},
-		botChannels: []slackapi.Channel{botJoined},
+		botChannels: []slackapi.Channel{botJoined, slackbotDM},
 	}
 	syncer, err := newContextSyncer(ContextSyncOptions{
 		OrganizationID: "org", TeamID: "team", Lookback: time.Hour, Timeout: time.Minute,
@@ -739,6 +776,11 @@ func TestContextSyncReconcilesBotMembershipSeparatelyFromUserVisibility(t *testi
 	}
 	if !foundIM {
 		t.Fatal("bot membership request omitted direct messages")
+	}
+	for _, channel := range got {
+		if channel.ChannelID == slackbotDM.ID {
+			t.Fatalf("synthetic Slackbot DM was registered for history recovery: %#v", channel)
+		}
 	}
 }
 

@@ -484,8 +484,17 @@ func (s *ContextSyncer) listBotMembership(ctx context.Context) (map[string]bool,
 			return nil, nil, fmt.Errorf("list bot conversations: %w", err)
 		}
 		count += len(result.channels)
-		channels = append(channels, result.channels...)
 		for _, channel := range result.channels {
+			// Slack may return the synthetic Slackbot IM in a bot token's
+			// users.conversations result even though conversations.history
+			// rejects that conversation with channel_not_found. Slackbot cannot
+			// originate a human request for Tag, so exclude it from membership
+			// and history recovery instead of reopening a doomed cursor on every
+			// reconciliation pass.
+			if channel.IsIM && channel.User == "USLACKBOT" {
+				continue
+			}
+			channels = append(channels, channel)
 			// users.conversations only returns conversations the token owner is
 			// a member of, so presence in this bounded result is authoritative.
 			membership[channel.ID] = true
