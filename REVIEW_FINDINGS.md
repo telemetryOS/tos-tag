@@ -22,7 +22,7 @@ Date: 2026-08-04. Scope: the entire non-test Go source tree (~26,350 lines) as i
 ### NEW-1 — Offline direct messages are never recovered as actionable work
 
 - **Severity:** high | **Category:** bug | **Location:** `core/slack/context_sync.go:181`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 Discovery includes IM conversations (`listChannels` requests types `public_channel, private_channel, im` at `core/slack/context_sync.go:383`), but the catch-up set only admits public/private channels where the bot is a member: `if (channel.IsChannel || channel.IsGroup) && botMembership[channel.ID]` at `core/slack/context_sync.go:181`. No other DM recovery path exists (`rg IsIM` finds only discovery/naming/privacy uses). Even if an IM reached recovery, a normal top-level DM is actionable only when it contains an explicit mention or belongs to an existing Tag thread (`core/pipeline/pipeline.go:398-411`). This contradicts the documented contract — CLAUDE.md promises "durable one-time context bootstrap and proactively paced post-watermark catch-up for direct messages missed while offline" — so DM requests sent while the process is down are silently lost across restarts.
 
@@ -43,7 +43,7 @@ if (channel.IsChannel || channel.IsGroup) && botMembership[channel.ID] {
 ### F2 — CatchUp permanently wedges on over-budget channels and aborts all later channels
 
 - **Severity:** high | **Category:** bug | **Location:** `core/slack/context_sync.go:247`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 When a channel's missed-message count exceeds its per-pass budget (min(MessagesPerChannel=100, fairShare)), backfillChannel returns complete=false and CatchUp returns an error immediately, skipping every remaining channel in run.catchUpChannels. The watermark is deliberately retained, but the budget is identical on every retry (startup and each 5-minute refresh recompute the same fairShare), so no progress is ever possible: the un-advanced watermark makes the gap window grow each tick, keeping the channel over budget forever for any channel averaging more than ~75 messages per lookback window. One overnight outage on a busy channel therefore permanently disables missed-event recovery for that channel and every channel after it in iteration order, silently dropping missed direct mentions once they age past the 7-day lookback.
 
@@ -63,7 +63,7 @@ if !complete {
 ### F3 — MongoQueue.Transition silently drops mutate updates to ResolvedModel/RouteTrace
 
 - **Severity:** high | **Category:** bug | **Location:** `core/jobs/mongo_queue.go:144`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 Transition applies the caller's mutate func to an in-memory Job but persists only a fixed field set (state, result, failure_reason, available_at, approval_id, approved_action_hash, progress_message_ts). MemoryQueue.Transition persists the entire mutated job, so tests pass. Production caller pipeline.go:1468 relies on this for routine/heartbeat jobs: `Transition(..., StateRunning, func(current *jobs.Job) { current.ResolvedModel, current.RouteTrace = resolved, trace })`. Under Mongo the resolved model is never stored, and the caller reassigns `job` from the returned document, zeroing job.ResolvedModel; the very next gate `ModelRouter.Allowed(job.ResolvedModel)` returns false for an empty ProfileID, so every Mongo-backed routine/heartbeat job hard-fails with model_hard_deny (or would run with an empty model if the gate were absent).
 
@@ -94,7 +94,7 @@ set := bson.M{
 #### F6 — Final delivery enqueue failure after job succeeds silently loses the response
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/pipeline/pipeline.go:1571`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 In processOneJob the job is transitioned to StateSucceeded first, and only then is the final Slack delivery enqueued. If Deliveries.Enqueue fails (transient Mongo error), the error is only logged and nothing ever retries: reconcileJobs handles only StateWaitingApproval, expired StateQueued, StateNeedsReconciliation, and StateRetryWait, and no other reconciler re-enqueues deliveries for succeeded jobs (verified: the only StateSucceeded consumer is MarkCompletedUndelivered). The user-visible answer is permanently lost in a system whose stated contract is durable delivery, even though job.Result is persisted and recovery would be possible.
 
@@ -114,7 +114,7 @@ _, _, err = p.deps.Deliveries.Enqueue(ctx, deliveries.Spec{ ... })
 #### F7 — Observation output guard is acquired after enqueue and losing it only warns
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/pipeline/pipeline.go:822`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 decideObservation enqueues the job (line 796) or direct-reply delivery (line 730) first and calls Observations.MarkOutput afterwards; when the compare-and-set guard is already held (won == false) the code merely logs a warning while the freshly enqueued job/delivery remains queued and will deliver. The jobs idempotency key is observation.PublicID + "/" + outcome, so any second decision for the same observation with a different outcome (revision-2 reconsiderLateQuestions, or a revision-1 retry after CompleteDecision fails where the non-deterministic classifier picks a different outcome) produces a second job and a duplicate Slack response. The guard therefore never actually prevents double output.
 
@@ -135,7 +135,7 @@ won, err := p.deps.Observations.MarkOutput(ctx, observation.PublicID, string(job
 #### F8 — Transient Jobs.Get error during harness heartbeat is misclassified as revocation
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/pipeline/pipeline.go:1932`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 On every heartbeat tick inside runHarness, any error from Jobs.Get (a momentary Mongo blip) is treated identically to a confirmed state change: the Codex session is aborted and errExecutionRevoked is returned. In processOneJob the errExecutionRevoked branch then Cancels the running job outright (no requeue, no failure notice), or if the follow-up Get also fails, leaves it to lease-expire into needs_reconciliation requiring operator intervention. A healthy long-running agent job is permanently killed by one transient read error, unlike the Heartbeat write error just below, which flows to the requeue path.
 
@@ -156,7 +156,7 @@ if getErr != nil || current.State != jobs.StateRunning {
 #### F9 — runHarness early returns after CreateJobSession leak a provisioned Codex worker
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/pipeline/pipeline.go:1792`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 CreateJobSession (line 1774) provisions a full disposable Codex app-server process and workspace. The approval-resume validation block (missing repository, stale action hash, consumed/unapproved, json.Marshal failure) and the Prompt error return at line 1803 then return without calling Harness.Abort. Worker termination otherwise happens only inside Events' goroutine (defer terminate) or Abort, so on these paths the process and workspace stay alive until wall-time expiry, and the session entry stays registered. These validations also need no worker at all, so provisioning before them is wasted work.
 
@@ -176,7 +176,7 @@ if approvalErr != nil || approval.ActionHash != job.ApprovedActionHash || approv
 #### F10 — containsIncident substring match on "down" fires on download/markdown/shutdown
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/pipeline/pipeline.go:2396`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 containsIncident uses bare strings.Contains, so any message containing "download", "markdown", "shutdown", "showdown", or "downstream" is treated as an incident signal. That both promotes such messages from other channels to PartitionEvidence priority 90 in every context pack (line 1109) and, worse, triggers reconsiderLateQuestions after each such message — a LateCandidates Mongo query plus up to 10 full revision-2 decideObservation passes, each rebuilding a 500-message context pack and potentially making flood-charged provider classifier calls. Everyday phrases like "convert it to markdown" incur real cross-channel classification cost.
 
@@ -195,7 +195,7 @@ return strings.Contains(lower, "incident") || strings.Contains(lower, "outage") 
 #### F30 — Job claim/recover/heartbeat queries cannot use any defined index
 
 - **Severity:** medium | **Category:** inefficiency | **Location:** `core/jobs/mongo_queue.go:78`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 The only claim-shaped index is job_claim {organization_id, state, available_at, lease.expires_at} (database.go:134), but RecoverExpired filters on {state, lease.expires_at} and Claim filters on {state, available_at, expires_at, $expr} — both without organization_id, so neither can use the index prefix and both are full collection scans. Get/Heartbeat/Cancel/ResumeFromApproval all filter on public_id, which has no index on the jobs collection at all. Claim also runs RecoverExpired's two UpdateMany scans on every call, and each worker (up to 64) polls Claim every 250ms (config Jobs.Poll default), multiplying the scans.
 
@@ -216,7 +216,7 @@ if _, err := collection.UpdateMany(ctx, bson.M{
 #### F32 — Unfiltered Queue.List decodes every job document 4x/second for reconciliation
 
 - **Severity:** medium | **Category:** inefficiency | **Location:** `core/jobs/mongo_queue.go:298`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 MongoQueue.List runs Find with an empty filter and no limit, decoding every job across all organizations and all states (including terminal succeeded/failed/cancelled docs that live until their TTL, typically 24h+). Its only production consumer is reconcileJobs (pipeline.go:1291), which runs on the Jobs.Poll ticker (250ms default) but only acts on waiting_approval, expired queued, retry_wait, and needs_reconciliation jobs. The interface offers no state-filtered listing, so the full collection is fetched and materialized four times per second.
 
@@ -236,7 +236,7 @@ func (q *MongoQueue) List(ctx context.Context) ([]Job, error) {
 #### F41 — Non-atomic mark-completed-then-decrement permanently leaks admission slots
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/admission/mongo.go:109`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 Both reconcileExpired and Complete first mark reservations completed and only then decrement the state's active counter in a separate write. If the process crashes or Mongo returns a transient error between the two writes, the reservations are already completed:true so reconcileExpired will never count them again, and the channel's active counter stays permanently inflated — eventually every Admit is denied with ErrConcurrency and the channel goes silent with no self-heal. In Complete the decrement error is fully swallowed (`_, _ =`), so this state corruption is invisible. The reconcile decrement also lacks the `active: {"$gt": 0}` clamp used elsewhere, so a bulk `-result.ModifiedCount` can drive `active` negative.
 
@@ -261,7 +261,7 @@ _, err = m.db.Collection(models.CollectionAdmissionStates).UpdateOne(ctx, bson.M
 #### F19 — Catch-up cannot recover thread replies to roots older than the watermark
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/slack/context_sync.go:448`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 backfillChannel fetches thread replies only for roots discovered in the post-watermark conversations.history window (`for _, root := range roots`). Slack channel history does not include non-broadcast thread replies, so a reply posted during downtime into a thread whose root predates the watermark is never seen — yet CatchUp still advances the watermark past it (line 249), permanently skipping it. This defeats the documented recovery case in pipeline.RecoverContextEnvelope ("a reply in an already active Tag thread is accepted into the normal durable decision queue"): an active Tag thread's root always predates the outage, so in-thread mentions/continuations missed while offline are silently lost.
 
@@ -282,7 +282,7 @@ for _, root := range roots {
 #### F24 — emit/complete send on events channel while holding session mutex — deadlock chain
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/harness/worker_codex.go:77`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 codexWorkerSession.emit performs a channel send on the 128-buffered s.events while holding s.mu (complete() does the same). If the Events forwarder stalls (pipeline event loop does Mongo appendReceipt writes inline) or exits on ctx.Done, the buffer can fill and emit blocks forever holding the lock. Every other path then wedges on s.mu: notification() (blocking the App Server readLoop), session.publish inside terminate() (so the workspace is never terminated), and Abort() at line 363 — which the pipeline calls synchronously on ctx.Done, permanently wedging that pipeline job goroutine and leaking the Codex worker process, tool capability, and goroutines.
 
@@ -307,7 +307,7 @@ func (s *codexWorkerSession) emit(event Event) {
 #### F25 — Token usage decodes only tokenUsage.last, under-reporting multi-request turns
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/harness/worker_codex.go:466`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 The thread/tokenUsage/updated handler decodes only the `last` bucket (the most recent model request), ignoring the `total` bucket the protocol also carries (visible in the test fixture at worker_codex_test.go:109, which sends both). The pipeline (pipeline.go:1912-1917) assigns rather than accumulates these values, so for any turn with tool calls — the normal full-agent path, where each tool round-trip is a separate model request — the Slack footer and usage metrics report only the final request's tokens instead of the turn total. Since threads are ephemeral single-turn, `total` is exactly the correct turn usage.
 
@@ -328,7 +328,7 @@ TokenUsage struct {
 #### F26 — Prompt early-validation errors leak the provisioned worker and session forever
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/harness/worker_codex.go:223`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 Prompt's early returns (non-openai provider at line 220, empty model/RequestID at line 223) return an error without calling w.terminate(sessionID), unlike all later stage failures (thread/start, turn/start) which do. The pipeline (pipeline.go:1802-1804) also returns on Prompt error without calling Abort, and runHarness has no deferred cleanup. Result: the already-provisioned `codex app-server` process keeps running until wall-time kill, the registered tool-bridge capability stays live until lease expiry, and the entry in w.sessions is never removed (terminate is the only remover), growing unboundedly across recurrences.
 
@@ -350,7 +350,7 @@ if strings.TrimSpace(model) == "" || strings.TrimSpace(prompt.RequestID) == "" {
 #### F1 — Blind fence trimming corrupts plain-text answers starting/ending with a code block
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/deliveries/model_output.go:21`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 ParseModelOutput unconditionally strips a leading and trailing "```" before checking whether the output is JSON. A plain-text fallback answer that legitimately ends with a fenced code block (e.g. "Run this:\n```go\ncode\n```") or begins with one loses one fence marker, leaving an odd fence count. The mrkdwn segment then fails validateMRKDWN's unbalanced-fence check at render time, pipeline.processOneDelivery retries with reason invalid_render and delay 0 until attempts are exhausted, and the job is marked completed-undelivered — a valid answer is silently destroyed.
 
@@ -368,7 +368,7 @@ raw = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix
 #### F16 — Rich-text cell tokenizer mangles underscores/asterisks in literal content
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/deliveries/renderer.go:1331`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 renderRichTextElements toggles a style whenever a marker character has any later occurrence in the cell, with no word-boundary or code-span awareness. A table cell like "user_id and channel_id" (two underscores) is routed into this path by hasInlineSlackFormatting even when typed raw_text, and renders as "user" + italic "id and channel" + "id" — both underscores are eaten. Backtick-quoted identifiers per the output prompt fare no better because the underscore still toggles italic inside the code span. Identifier-heavy table cells are a common real payload, so displayed content is corrupted.
 
@@ -388,7 +388,7 @@ if active[styleName] || strings.Contains(text[index+1:], string(text[index])) {
 #### F18 — Unlabeled Slack links bypass the unsafe-link scheme validation
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/deliveries/renderer.go:985`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 validateMRKDWN only iterates slackLinkPattern matches, which require the labeled `<url|label>` form. A bare angle-bracket link such as `<file:///etc/hosts>` or `<slack://...>` matches neither slackLinkPattern nor slackEntityPattern, so it passes validation and is delivered as mrkdwn where Slack renders angle-bracket URLs as links. The explicit "unsafe Slack link" rule (https/http with a host) is therefore trivially bypassed by omitting the label, undermining a renderer whose purpose is strict output validation.
 
@@ -409,7 +409,7 @@ for _, match := range slackLinkPattern.FindAllStringSubmatch(text, -1) {
 #### F13 — isClearlyExternalPublicSourceQuestion only recognizes OpenAI
 
 - **Severity:** medium | **Category:** ai-slop | **Location:** `core/classifier/openai_classifier.go:1011`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 The function name and its use in withProductKnowledgePolicyCorrections promise a general 'external public source' carve-out, but the implementation returns false unless the text literally contains 'openai'. A question about any other vendor's pricing page (AWS, Stripe, Slack) whose provider-assigned topic contains 'pricing'/'billing' passes isObviousProductKnowledgeQuestion and is force-rewritten into TelemetryOS Primer/product-doc retrieval, which is exactly the misrouting this carve-out was added to prevent. This looks like an eval-specific patch that silently under-generalizes.
 
@@ -429,7 +429,7 @@ if !containsAny(lower, "openai", "open ai") {
 #### F15 — MongoDecisionStore.list loads the entire decisions collection unbounded
 
 - **Severity:** medium | **Category:** inefficiency | **Location:** `core/classifier/store.go:136`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 list() runs Find with no limit or projection and cursor.All()s every decision document (each embedding two full ClassificationDecision structs) into memory. The /status endpoint (server.go:242-258) calls Jobs.List, Deliveries.List, and Decisions.List solely to report len() counts, so every status request decodes the whole ever-growing decisions collection. There is also no TTL index on decisions in database.go, so this cost grows without bound over the deployment's life.
 
@@ -449,7 +449,7 @@ cursor, err := s.db.Collection(models.CollectionDecisions).Find(ctx, filter, opt
 #### F21 — Learned-notes admin page can never list any notes
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/server/server.go:732`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 The listNotes handler forwards channel_id straight from the query string, and the management UI (generic loadScoped path) only ever sends organization_id. Both Repository implementations require an exact channel match: the production MongoStore.ListNotes builds the filter bson.M{"organization_id": org, "channel_id": ""} (unlike scopeFilter, which omits an empty channel_id, and unlike ListDirectives, which aggregates across channels when channel_id is empty), and the memory store looks up s.notes[scopeKey(org, "")]. So GET /admin/api/notes?organization_id=X always returns empty, and the 'Learned channel notes' page permanently shows 'No learned notes have been proposed yet' even when notes exist.
 
@@ -467,7 +467,7 @@ values, err := s.deps.ChannelConfig.ListNotes(r.Context(), r.URL.Query().Get("or
 #### F22 — Overview 'Recent agent work' shows the oldest jobs, and tenant lists are unbounded oldest-first
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/server/templates/index.html:1975`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 jobs/deliveries/decisions ListOrganization (Mongo) sort created_at ascending with no limit, so /admin/api/jobs returns the entire per-org collection oldest-first. The dashboard heading says 'The latest admitted jobs and their outcome' but jobValues.slice(0,6) takes the first six rows, i.e. the six OLDEST jobs ever created. The jobs/decisions/deliveries data pages have the same problem: page 1 of the table shows the oldest records, and summary cards labeled 'in this result window' actually count all-time data. As the org accrues decisions (one per considered message) every page load ships the whole collection to the browser.
 
@@ -485,7 +485,7 @@ for (const job of jobValues.slice(0,6)) {
 #### F23 — Unauthenticated /.status performs three unbounded full-collection scans per request
 
 - **Severity:** medium | **Category:** inefficiency | **Location:** `core/server/server.go:242`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 The status handler calls Jobs.List, Deliveries.List, and Decisions.List — each a Find(bson.M{}) that decodes every document in the collection — only to compute len(...) for the counts map. /.status is outside the /admin prefix, so it bypasses bearer auth; any monitoring poller (or any client) triggers three full scans and full-document decodes per hit, and cost grows without bound with the decisions collection (one record per considered message).
 
@@ -507,7 +507,7 @@ jobList, jobErr := s.deps.Jobs.List(r.Context())
 #### F4 — Curator permanently blocks relearning of forgotten memory scopes
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/memory/curator.go:112`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 Mongo Forget sets origin="operator" and status=forgotten while retaining scope_key/source_hash as the documented relearning tombstone (architecture.md:128: "materially changed source content may be learned again"). The curator's skip gate checks current.Origin == "operator" without checking Status, so after an operator forgets a channel- or thread-scope record, the curator skips that scope on every future run and durable memory generation for that channel/thread is silently disabled forever. Both PutGenerated implementations deliberately guard with `existing.Status == StatusActive && (existing.Pinned || existing.Origin == "operator")` (mongo.go:90, memory_store.go:82), confirming the curator gate diverged from the intended contract.
 
@@ -525,7 +525,7 @@ if err == nil && (current.SourceHash == batch.SourceHash || current.Pinned || cu
 #### F35 — PutGenerated check-then-write race can overwrite operator-corrected memory
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/memory/mongo.go:113`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 PutGenerated reads the existing record via FindScope (line 88) to detect pinned/operator records, then performs an unguarded upsert whose filter is only {organization_id, scope_key}. An operator Correct or SetPinned that lands between the read and the write (management API runs concurrently with the curator goroutine, and multiple control-plane replicas widen the window) is silently replaced by model-generated content, violating the rule that operator memory is authoritative reviewed data. The revision counter can also regress since the write blindly $sets record.Revision computed from the stale read.
 
@@ -543,7 +543,7 @@ err = s.db.Collection(models.CollectionSummaries).FindOneAndUpdate(ctx, bson.M{"
 #### F36 — Projector issues 5 Mongo round trips per message, including 3 always-empty deletes on new messages
 
 - **Severity:** medium | **Category:** inefficiency | **Location:** `core/intelligence/projector.go:92`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 Project runs for every observed Slack message (pipeline.go:660) and unconditionally executes DeleteMany on situation_facts, restricted_signals, and derivations, plus a CountDocuments session-only check and a message FindOne, before deciding anything. For ordinary new, non-incident messages (the overwhelming majority) the three deletes always match nothing, so every observed message pays 5 sequential Mongo round trips on the hot path. The delete-then-recreate step is only meaningful for mutation events (edit/delete) or replays of a previously projected observation.
 
@@ -561,7 +561,7 @@ if _, err := p.db.Collection(models.CollectionSituationFacts).DeleteMany(ctx, so
 #### F34 — MemoryStore projection/claim semantics silently diverged from MongoStore
 
 - **Severity:** medium | **Category:** ai-slop | **Location:** `core/observer/memory_store.go:172`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 The memory test double and the Mongo production store implement different projection rules for the same events: on a newer event the memory store overwrites AuthorID/BotID when non-empty and preserves Subtype when the envelope's is empty, while the Mongo pipeline freezes author_id/bot_id forever via $ifNull and unconditionally overwrites subtype (clearing it to "") via choose(). MemoryStore.ClaimPending also omits the Mongo store's expires_at filter and orders by cross-organization OrganizationReceivedSeq instead of received_at. Tests exercising the memory store therefore validate behavior the production store does not have.
 
@@ -587,7 +587,7 @@ if envelope.Subtype != "" {
 #### F5 — /tag-mode audit receipt is never persisted: missing RetentionEpoch, error swallowed
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/core.go:325`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 The participation-mode-change handler appends an audit receipt without a RetentionEpoch, but audit.MongoChain.Append (core/audit/mongo.go:41) rejects any request with an empty RetentionEpoch: 'organization, type, and retention epoch are required'. Every other Append call site in the repo passes time.Now().UTC().Format("2006-01"). Because the return is discarded with `_, _ =`, the append fails silently on every invocation, so operator mode changes via /tag-mode leave no audit trail at all — an unlogged security-relevant policy mutation. Additionally, the idempotency key embeds types.NewID("mode"), a fresh random ID per call, which makes the idempotency key pointless.
 
@@ -607,7 +607,7 @@ _, _ = auditChain.Append(ctx, audit.AppendRequest{
 #### F38 — Audit content-commitment HMAC key is random per process and never persisted
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/core.go:148`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 core.New generates a fresh random 32-byte key on every startup and feeds it to audit.NewMongoChain. That key is used only for Chain.commit(), which produces the ContentCommitment stored on durable Mongo receipts (e.g., the Wiki execution receipt that 'commits the complete body' per the repo contract). Because the key is never persisted or configurable, no commitment can ever be re-verified after a restart, and multiple instances sharing the database commit under different keys — the commitment provides no verifiable binding, defeating its purpose while the chain hash (unkeyed sha256) is the only property that survives restarts.
 
@@ -629,7 +629,7 @@ auditChain, err := audit.NewMongoChain(db, auditKey)
 #### F39 — Three copy-pasted inline scope authorizers have silently diverged
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/core.go:142`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 The routines authorizer (lines 140-146), approvals authorizer (196-207), and triggers authorizer (345-353) each re-implement Resolve + Enrolled + KillSwitch + a 24h membership-freshness window inline, and the copies have diverged: the routines authorizer omits the WorkspaceEnabled, participation-mode, bot-membership, and output-channel-allowlist checks that the triggers authorizer enforces for the same kind of background job admission; the approvals authorizer checks WorkspaceEnabled but triggers does not. The 24h freshness constant is duplicated three times. Even if downstream delivery-time rechecks compensate, routines and triggers currently apply different authorization for equivalent background work, and future edits to one copy will not propagate.
 
@@ -649,7 +649,7 @@ if err != nil || !policy.Enrolled || policy.KillSwitch || !policy.MembershipRefr
 #### F40 — socket_mode validation does not require slack.botUserId though live behavior silently degrades without it
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/config/config.go:466`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 Validate enforces OrganizationID, an 'A'-prefixed AppID, TeamID, xapp/xoxb token prefixes, and even the optional xoxp prefix for socket_mode, but never checks BotUserID. With BotUserID empty, live ingress silently disables mention detection (core/slack/live.go:857: `base.IsMention = botUserID != "" && strings.Contains(base.Text, "<@"+botUserID+">")`) and drops all bot-membership change events (live.go:517/529), so Tag never responds to mentions and never derives membership-based assist. runtime.env.example lists TAG__SLACK__BOT_USER_ID alongside the required live variables. Given this package's stated fail-closed startup-validation purpose, a missing BotUserID should fail startup rather than yield a silently inert live deployment.
 
@@ -669,7 +669,7 @@ if cfg.Slack.OrganizationID == "" || !strings.HasPrefix(cfg.Slack.AppID, "A") ||
 #### F31 — Observation hot-path queries (ClaimPending, CompleteDecision, MarkOutput) are unindexed
 
 - **Severity:** medium | **Category:** inefficiency | **Location:** `core/observer/mongo_store.go:118`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 ClaimPending filters on {expires_at, decision_state/decision_lease_expires_at} with a sort on {received_at, organization_received_seq}; the only decision index is decision_claim {organization_id, decision_state, decision_lease_expires_at} (database.go:120) whose organization_id prefix is absent from the filter, and neither received_at nor organization_received_seq is indexed, so each 250ms decision poll scans and sorts the whole observations collection (which retains every observed Slack message for the retention window). CompleteDecision (line 142), MarkOutput (line 293), and SetRestricted (line 218) filter on public_id, which also has no index on observations.
 
@@ -695,7 +695,7 @@ filter := bson.M{
 ### F20 — listBotMembership enumerates all workspace public channels and hard-fails startup past MaxChannels
 
 - **Severity:** medium | **Category:** bug | **Location:** `core/slack/context_sync.go:276`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 conversations.list with types public_channel returns every non-archived public channel in the workspace regardless of bot membership, and listBotMembership counts them all against ContextSyncMaxChannels (default 500). In a workspace with more than 500 public channels, Discover errors, which aborts Core.Start entirely (core.go:557-561) and fails every 5-minute refresh tick. The full-workspace enumeration buys nothing: contextChannel reads `botMembership[channel.ID]` where a missing key already means false, so only bot-member channels need listing. It also re-paginates the entire workspace channel list every 5 minutes.
 
@@ -715,7 +715,7 @@ page, next, callErr := s.botAPI.GetConversationsContext(ctx, &slackapi.GetConver
 ### F11 — reconcileJobs scans the entire jobs collection every 250ms poll tick
 
 - **Severity:** low | **Category:** inefficiency | **Location:** `core/pipeline/pipeline.go:1293`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 reconcileJobLoop ticks at Config.Jobs.Poll (default 250ms per config.go) and each tick calls Jobs.List(ctx), which is implemented in MongoQueue as an unfiltered Find(bson.M{}) that decodes every job document — including all terminal succeeded/failed/cancelled jobs retained for audit — into memory. Reconciliation only cares about four narrow states (waiting_approval, expired queued, needs_reconciliation, ripe retry_wait), so this is an ever-growing full-collection scan and decode roughly four times per second.
 
@@ -732,7 +732,7 @@ all, err := p.deps.Jobs.List(ctx)
 ### F12 — Policy corrections hardcode reactions that can violate the configured allowlist
 
 - **Severity:** low | **Category:** bug | **Location:** `core/classifier/openai_classifier.go:674`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 Many post-decode policy corrections hardcode reaction names (speech_balloon at line 394, thinking_face at 414/460/941, eyes at 738, warning at 1080/1251, white_check_mark at 1100/1111) that are never checked against the operator-configurable allowlist. validateRecommendation then rejects any non-allowlisted reaction, failing the whole classification. The config path (config.go:405 cfg.ReactionEmojis = splitNonEmpty(raw)) lets an operator narrow the list, and NewOpenAIClassifier only validates emoji-name shape, so a narrowed allowlist turns every policy-corrected decision into a classifier error: ambient traffic goes silent and mentions drop to the generic fallback.
 
@@ -750,7 +750,7 @@ if !slices.Contains(reactions, decision.Reaction) {
 ### F14 — Social-reply selection implemented three times with diverged behavior
 
 - **Severity:** low | **Category:** ai-slop | **Location:** `core/classifier/openai_classifier.go:1109`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 Social direct-reply text/reaction mapping exists in three places: directSocialFallback (service.go:545) with a full greeting/farewell/thanks mapping, the top-level branch of withAddressedSocialPolicyCorrections (lines 1129-1152) with a partial mapping, and the active-thread branch which hardcodes 'Happy to help!' with white_check_mark for every social message. That diverges behaviorally: a greeting like 'morning tag' in an active thread gets 'Happy to help!' plus white_check_mark, while the classifier instructions in this same file mandate speech_balloon for greetings and the other two implementations reply 'Morning!'.
 
@@ -768,7 +768,7 @@ Reaction:           "white_check_mark",
 ### F17 — MongoQueue never abandons attempts-exhausted deliveries, diverging from MemoryQueue
 
 - **Severity:** low | **Category:** bug | **Location:** `core/deliveries/mongo_queue.go:55`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 MongoQueue.Claim's filter excludes records with attempt >= max_attempts via $expr $lt, but nothing ever transitions such records to abandoned: the lease-expiry sweep on line 51 resets them to pending, and Retry only abandons while a lease is held. If a worker crashes after claiming a final attempt, the delivery is stranded as pending until expires_at, never delivered nor marked abandoned, and pipeline never calls MarkCompletedUndelivered for its job. MemoryQueue.Claim (queue.go:134-138) and the sibling jobs.MongoQueue.ReleaseRetryWait both explicitly set attempts_exhausted, so the two Queue implementations observably diverge.
 
@@ -784,7 +784,7 @@ MongoQueue.Claim's filter excludes records with attempt >= max_attempts via $exp
 ### F27 — Terminate cancels walltime context first, so the watchdog SIGKILLs before the graceful SIGTERM window
 
 - **Severity:** low | **Category:** bug | **Location:** `core/workers/local.go:263`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 Terminate calls process.cancel() before sending SIGTERM and waiting 500ms to escalate. But the watchdog goroutine started in provision() reacts to ctx.Done() by immediately sending SIGKILL to the whole process group. Cancelling the context therefore hard-kills the Codex App Server group right away, defeating the intended close-stdin -> SIGTERM -> 500ms grace -> SIGKILL sequence; the SIGTERM, the 500ms wait, and the escalation SIGKILL at line 274 are effectively dead logic that only wins a race in rare scheduling. The App Server process never gets a chance to exit cleanly.
 
@@ -805,7 +805,7 @@ case <-ctx.Done():
 ### F29 — marketplace readRootFile silently truncates oversize files — diverged copy of tools.readRootFile
 
 - **Severity:** low | **Category:** ai-slop | **Location:** `core/marketplace/marketplace.go:346`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 This readRootFile reads limit+1 bytes but never checks whether the limit was exceeded, so the vestigial +1 does nothing and oversize files are silently truncated instead of rejected. Its sibling copy in core/tools/tools.go:336 has the missing check ('if int64(len(data)) > limit { return nil, errors... }') — a classic silently-diverged copy-paste pair. Consequences: a catalog over 1MB surfaces as a confusing JSON syntax error rather than a size error, and a skill file that grows between the WalkDir size accounting and the hash read gets hashed over truncated content, producing a wrong snapshot hash that only fails much later at worker materialization.
 
@@ -821,7 +821,7 @@ return io.ReadAll(io.LimitReader(file, limit+1))
 ### F33 — jobs.Operations (Cancel/Interrupt/Restart/Branch) has no production callers
 
 - **Severity:** low | **Category:** dead-code | **Location:** `core/jobs/operations.go:11`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 The Operations wrapper is referenced only by operations_test.go — no server route or pipeline path constructs it (rg across the repo finds zero non-test uses), and Queue.Interrupt in both queue implementations is a pure alias of Cancel that only Operations calls. The dead Restart also carries latent bugs waiting for a future caller: it copies current.ExpiresAt into the new spec, so restarting a job whose expiry passed enqueues a job Claim can never pick up (Claim requires expires_at > now), and it silently drops RequesterID, losing the progress-recipient/notice addressing.
 
@@ -840,7 +840,7 @@ type Operations struct {
 ### F37 — conversationalsearch package has no production callers
 
 - **Severity:** low | **Category:** dead-code | **Location:** `core/conversationalsearch/search.go:50`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 A repo-wide search shows the only references to the conversationalsearch package outside its own directory are none; the sole consumer is its own search_test.go. The pipeline's cross-channel context path calls Observations.Recent directly (pipeline.go:1037) and does not use Searcher. This is a complete unused subsystem (~140 lines including audience-intersection and staleness policy logic) that must be kept correct and privacy-reviewed despite never executing.
 
@@ -856,7 +856,7 @@ func (s *Searcher) Search(ctx context.Context, request Request) ([]Result, error
 ### F42 — Memory store fails open on missing workspace where Mongo fails closed
 
 - **Severity:** low | **Category:** bug | **Location:** `core/orgconfig/store.go:118`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 Memory.Resolve and Memory.ListChannels default a missing workspace to WorkspaceEnabled=true (no kill switch), while the production Mongo.Resolve returns ErrNotFound and Mongo.ListChannels sets WorkspaceEnabled=false and forces KillSwitch=true for the same condition. Since the Memory store is the test double substituted for Mongo (per the repo's own rule that memory stores sit behind the same interfaces), tests exercising workspace-gating semantics validate fail-open behavior that production denies, which can mask fail-closed regressions.
 
@@ -877,7 +877,7 @@ if workspace, exists := s.workspaces[org+"/"+team]; exists {
 ### F43 — Memory ActivateDirective wipes the active directive on a failed activation
 
 - **Severity:** low | **Category:** bug | **Location:** `core/channelconfig/store.go:120`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 The in-memory ActivateDirective mutates every revision's Active flag before checking whether the requested revision exists. When revisionID does not match any revision it returns an error, but by then all Active flags have already been cleared, so a failed activation destroys the currently active directive. The Mongo implementation validates the revision first and leaves the projection untouched on failure, so the two Repository implementations diverge and the error path corrupts store state.
 
@@ -901,7 +901,7 @@ if found < 0 {
 ### F44 — Audit CAS retry can double-record key-less receipts under contention
 
 - **Severity:** low | **Category:** bug | **Location:** `core/audit/mongo.go:94`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 In MongoChain.Append, when writer A inserts receipt N+1 but loses the head CAS, the only success recovery is the exact state where A's receipt is the current head. If a concurrent writer B adopted A's receipt via recoverNext and then appended its own receipt (head now N+2, different hash), A's check fails, the loop continues, and A inserts a second receipt for the same AppendRequest at N+3. The idempotency-key unique index catches this for keyed appends, but server.auditMutation (core/server/server.go:772) appends management-mutation receipts with no IdempotencyKey, so those events can be durably recorded twice. The same happens when the post-CAS head re-read returns a transient error (headErr != nil falls through to continue).
 
@@ -920,7 +920,7 @@ if headErr == nil && current.Sequence == receipt.Sequence && current.Hash == rec
 ### F45 — routines and triggers packages are diverged near-duplicates
 
 - **Severity:** low | **Category:** ai-slop | **Location:** `core/routines/routines.go:161`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 routines.Scheduler/Store/MongoStore/Service are near-verbatim copies of the triggers equivalents and have silently diverged: on authorizer denial routines ignores the AdvanceContext error (`_ =`, so a persistent advance failure re-runs the denied routine every poll tick forever) while triggers returns it (triggers.go:239-241); routines.MongoStore.DueContext calls SetLimit unconditionally while triggers guards `limit > 0` (triggers/mongo.go:77); routines' due-sort has no ID tiebreaker while triggers' does (triggers.go:180-187); and the Service Start/Stop type is duplicated byte-for-byte (routines.go:198-241 vs triggers.go:270-315). Copy-paste divergence in scheduler semantics is exactly where subtle behavior drift originates.
 
@@ -939,7 +939,7 @@ if err := s.authorizer.AuthorizeRoutine(ctx, routine); err != nil {
 ### F46 — In-memory routines Store keys by ID only, allowing cross-organization overwrite
 
 - **Severity:** low | **Category:** bug | **Location:** `core/routines/routines.go:77`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 routines.Store keys its map by r.ID alone, so Put with the same public ID from a different organization silently replaces the other tenant's routine (inheriting its Version/CreatedAt). The sibling triggers.Store correctly namespaces with organizationID+"/"+id. The repo contract requires memory stores to sit behind the same interfaces as Mongo consumers with equivalent semantics; the Mongo store scopes every filter by organization_id, so this memory implementation breaks tenant-scoping parity.
 
@@ -958,7 +958,7 @@ if old, ok := s.routines[r.ID]; ok {
 ### F47 — Retention sweep issues one DeleteOne round-trip per expired derivation link
 
 - **Severity:** low | **Category:** inefficiency | **Location:** `core/retention/janitor.go:123`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 sweep loads every expired derivation link into memory with an unbounded cursor.All, then deletes each derived document with an individual DeleteOne inside the loop. After downtime or a bulk expiry there can be thousands of links, producing thousands of sequential Mongo round-trips per sweep and unbounded slice growth. The links are already grouped by a small allowlisted set of collections, so batch deletion is straightforward.
 
@@ -974,7 +974,7 @@ result, err := j.db.Collection(link.DerivedCollection).DeleteOne(ctx, bson.M{"pu
 ### F48 — WriterActive declared on Delivery but writer_active is a jobs-collection field
 
 - **Severity:** low | **Category:** bug | **Location:** `models/models.go:326`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 All writer_active reads/writes happen on the jobs collection: core/jobs/mongo_queue.go sets "writer_active" via raw bson.M updates (lines 81, 87, 115, 156, 194, 213) and core/database/database.go:135 builds the session_generation_writer_unique partial index on CollectionJobs filtered by {writer_active: true}. Yet the struct field sits on models.Delivery, and models.Job has no WriterActive at all. Consequences: models.Job misrepresents the real job schema (a decode silently drops the flag, so any future full-document Job write would strip it and break the single-writer unique-index semantics), and every inserted Delivery document persists a spurious writer_active:false that nothing ever reads.
 
@@ -994,7 +994,7 @@ type Delivery struct {
 ### F49 — evalProfiles is a silently diverged copy of core.defaultResponseProfiles
 
 - **Severity:** low | **Category:** ai-slop | **Location:** `evals/live.go:267`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 evalProfiles duplicates the profile-construction loop in core/core.go:377-403 (defaultResponseProfiles) but has already drifted: the production version sets RequiredCapabilities: []string{"structured"} and AllowedDataClasses: []string{"internal"} on every profile, while the eval copy omits both. The live eval therefore advertises agent profiles to the OpenAI classifier that do not match the deployed profile definitions, and any future change to the profile set must be made in two places, only one of which will get it.
 
@@ -1028,7 +1028,7 @@ if fixture.WantSourceWriteRedirect && (!result.Predicted.SourceWriteRequested ||
 ### F52 — boundedActivityText byte-slices UTF-8 and can emit an invalid rune
 
 - **Severity:** low | **Category:** bug | **Location:** `core/pipeline/pipeline.go:2360`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 boundedActivityText truncates with value[:maximum-1] on byte indices. Slack message text routinely contains multi-byte runes (emoji, accented names), so the slice can cut a rune in half, producing invalid UTF-8 that is then published to the tenant activity feed (JSON marshaling mangles it into a replacement character). The 600 "characters" bound is also actually a byte bound.
 
@@ -1807,7 +1807,7 @@ for !next.After(now) {
 ### F104 — bounded truncates on a byte boundary and can emit invalid UTF-8
 
 - **Severity:** low | **Category:** bug | **Location:** `core/activity/activity.go:272`
-- **Status:** open
+- **Status:** fixed (7456162)
 
 bounded slices the string by bytes (value[:maximum-1]) before appending the ellipsis. Records explicitly may carry bounded public Slack excerpts (Message field), which frequently contain multi-byte UTF-8 (emoji, non-ASCII names); truncation mid-rune produces an invalid UTF-8 string that JSON encoding for the SSE feed replaces with U+FFFD garbage before the ellipsis.
 
