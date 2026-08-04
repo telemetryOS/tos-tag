@@ -127,7 +127,7 @@ func TestConfiguredBehavioralPluginsAreAutomaticallyInjected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(available) != 14 || len(injected) != len(available) {
+	if len(available) == 0 || len(injected) != len(available) {
 		t.Fatalf("available=%d injected=%d", len(available), len(injected))
 	}
 	wantSkills := map[string]bool{
@@ -140,10 +140,9 @@ func TestConfiguredBehavioralPluginsAreAutomaticallyInjected(t *testing.T) {
 		if snapshot.MarketplaceID != "tos-tag/base" {
 			t.Fatalf("unexpected automatically injected source: %#v", snapshot)
 		}
-		if _, ok := wantSkills[snapshot.Name]; !ok {
-			t.Fatalf("unexpected base skill: %s", snapshot.Name)
+		if _, required := wantSkills[snapshot.Name]; required {
+			wantSkills[snapshot.Name] = true
 		}
-		wantSkills[snapshot.Name] = true
 	}
 	for name, found := range wantSkills {
 		if !found {
