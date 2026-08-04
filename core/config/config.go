@@ -15,9 +15,10 @@ import (
 )
 
 type HTTPConfig struct {
-	Addr              string        `config:"addr"`
-	ReadHeaderTimeout time.Duration `config:"readHeaderTimeout"`
-	ShutdownTimeout   time.Duration `config:"shutdownTimeout"`
+	Addr                 string        `config:"addr"`
+	AllowUnauthenticated bool          `config:"allowUnauthenticated"`
+	ReadHeaderTimeout    time.Duration `config:"readHeaderTimeout"`
+	ShutdownTimeout      time.Duration `config:"shutdownTimeout"`
 }
 
 type MongoConfig struct {
@@ -446,8 +447,8 @@ func Validate(cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("http.addr must be host:port: %w", err)
 	}
-	if !cfg.Auth.Enabled && !isLoopbackHost(host) {
-		return fmt.Errorf("auth must be enabled for a non-loopback HTTP listener")
+	if !cfg.Auth.Enabled && !isLoopbackHost(host) && !cfg.HTTP.AllowUnauthenticated {
+		return fmt.Errorf("auth must be enabled for a non-loopback HTTP listener unless http.allowUnauthenticated is explicitly true")
 	}
 	if cfg.Auth.Enabled && strings.TrimSpace(cfg.Auth.AdminToken) == "" {
 		return fmt.Errorf("auth.adminToken is required when auth is enabled")
@@ -652,6 +653,7 @@ func (c *Config) RedactedStatus() map[string]any {
 	return map[string]any{
 		"environment":                         c.Environment,
 		"http_addr":                           c.HTTP.Addr,
+		"http_allow_unauthenticated":          c.HTTP.AllowUnauthenticated,
 		"mongo_database":                      c.Mongo.Database,
 		"slack_mode":                          c.Slack.Mode,
 		"slack_live_enabled":                  c.Slack.LiveEnabled,

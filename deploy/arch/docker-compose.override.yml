@@ -1,0 +1,5 @@
+services:
+  mongo:
+    environment:
+      # Required by current MongoDB images on newer Arch Linux kernels.
+      GLIBC_TUNABLES: glibc.pthread.rseq=1

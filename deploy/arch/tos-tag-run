@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repository="${HOME}/Sources/TelemetryOS/tos-tag"
+binary="${HOME}/.local/lib/tos-tag/api"
+compose_override="${repository}/deploy/arch/docker-compose.override.yml"
+host_environment="${repository}/deploy/arch/tos-tag.env"
+
+cd "${repository}"
+
+docker_ready=false
+for _ in $(seq 1 30); do
+  if docker info >/dev/null 2>&1; then
+    docker_ready=true
+    break
+  fi
+  sleep 2
+done
+if [[ "${docker_ready}" != true ]]; then
+  echo "Docker did not become ready within 60 seconds" >&2
+  exit 1
+fi
+
+docker compose -f "${repository}/docker-compose.yml" -f "${compose_override}" up -d mongo
+mongo_container="$(docker compose -f "${repository}/docker-compose.yml" -f "${compose_override}" ps -q mongo)"
+mongo_ready=false
+for _ in $(seq 1 30); do
+  if [[ -n "${mongo_container}" ]] \
+    && [[ "$(docker inspect --format '{{.State.Health.Status}}' "${mongo_container}" 2>/dev/null || true)" == healthy ]]; then
+    mongo_ready=true
+    break
+  fi
+  sleep 2
+done
+if [[ "${mongo_ready}" != true ]]; then
+  echo "tos-tag MongoDB did not become healthy within 60 seconds" >&2
+  exit 1
+fi
+
+set -a
+source "${repository}/runtime.env"
+source "${host_environment}"
+set +a
+
+exec "${binary}"

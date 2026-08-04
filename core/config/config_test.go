@@ -146,10 +146,27 @@ func TestValidateRequiresAuthOffLoopback(t *testing.T) {
 	if err := Validate(&cfg); err == nil {
 		t.Fatal("expected non-loopback listener without auth to fail")
 	}
+	cfg.HTTP.AllowUnauthenticated = true
+	if err := Validate(&cfg); err != nil {
+		t.Fatalf("explicitly trusted non-loopback listener rejected: %v", err)
+	}
+	cfg.HTTP.AllowUnauthenticated = false
 	cfg.Auth.Enabled = true
 	cfg.Auth.AdminToken = "test-only-token"
 	if err := Validate(&cfg); err != nil {
 		t.Fatalf("authenticated non-loopback listener rejected: %v", err)
+	}
+}
+
+func TestLoadHTTPAllowUnauthenticatedEnvironment(t *testing.T) {
+	t.Setenv("TAG__HTTP__ADDR", "0.0.0.0:8090")
+	t.Setenv("TAG__HTTP__ALLOW_UNAUTHENTICATED", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTP.Addr != "0.0.0.0:8090" || !cfg.HTTP.AllowUnauthenticated {
+		t.Fatalf("HTTP listener environment did not map: %#v", cfg.HTTP)
 	}
 }
 
