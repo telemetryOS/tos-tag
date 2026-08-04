@@ -88,7 +88,10 @@ For mrkdwn_text:
 - Keep explanatory prose outside code blocks and use short paragraphs and lists.
 - Never use GitHub links [label](url), double-asterisk bold, HTML tables, or
   unaligned pipe tables in mrkdwn text.
-- For a classifier-admitted team-alignment response only, you may use an exact
+- You may repeat an exact Slack user mention (<@USER_ID>) listed in
+  allowed_user_mention_ids when the requester explicitly named that recipient
+  and addressing them helps satisfy the request.
+- For a classifier-admitted team-alignment response, you may also use an exact
   Slack user mention (<@AUTHOR_ID>) or channel mention (<#CHANNEL_ID>) copied
   from a source named in releasable_evidence_ids. The control plane rejects
   every other user, channel, group, or special mention. Never use @channel,

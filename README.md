@@ -429,8 +429,8 @@ stale or ambiguous evidence, and anything that would not help the current
 channel. Human reports remain attributed reports rather than verified truth.
 Private channels, DMs, and group DMs never contribute to an intervention outside
 their own destination. Trusted source author/channel IDs and timestamps travel
-with the immutable context; only mentions from classifier-selected releasable
-evidence are allowed through rendering.
+with the immutable context. Rendering allows only exact user recipients named
+in the current request or mentions from classifier-selected releasable evidence.
 
 The full agent also chooses between a Slack-native response and a durable
 document. Short and medium explanations stay in Slack. Genuinely long,
@@ -510,11 +510,13 @@ Wiki work uses the dedicated typed `tos_tag_wiki` function: the model supplies
 page fields and Go constructs the reviewed CLI argv. Generic Wiki argv is
 rejected.
 
-The currently injected behavioral skill inventory is `base` (14): `bug`,
+The currently injected behavioral skill inventory is `base` (18): `bug`,
 `code-change-intake`, `codebase-read`, `feature`, `linear-issue-manager`,
-`marketing-messaging`, `product-knowledge`, `slack-message-design`,
-`suitability`, `tag-triggers`, `team-alignment`, `telemetry-otel-fetch`,
-`telemetryos-documentation`, and `wiki`.
+`marketing-account-journey`, `marketing-funnel-chain`,
+`marketing-funnel-review`, `marketing-messaging`, `marketing-unstall-draft`,
+`product-knowledge`, `slack-message-design`, `suitability`, `tag-triggers`,
+`team-alignment`, `telemetry-otel-fetch`, `telemetryos-documentation`, and
+`wiki`.
 
 A behavioral skill explains a workflow; it does not grant executable
 authority. The reviewed dynamic-tool catalog is the separate allowlist:
@@ -526,6 +528,7 @@ authority. The reviewed dynamic-tool catalog is the separate allowlist:
 | `telemetryos.linear` | `read`, `write` | Risk-based | Linear issue workflows | Enabled |
 | `telemetryos.wiki` | `read`, `write`, `delete` | Never for page read/write; always for recoverable page soft-delete | Page-only Agent Wiki CRUD | Enabled |
 | `telemetryos.otel` | `read` | Risk-based | SigNoz/OpenTelemetry queries | Enabled |
+| `telemetryos.analytics` | `read` | Never | Privacy-filtered acquisition-to-expansion funnel, account, website, normalized-event, and bounded raw site-event reads through the Site Analytics Token boundary | Enabled when `SITE_ANALYTICS_TOKEN` is available |
 | `telemetryos.device-logs` | `read`, `write` | Risk-based | Device log inspection and scoped log-level changes | Enabled |
 | `telemetryos.mongo` | `read` | Risk-based | QA Mongo queries through a human-opened security-key session | Disabled by default |
 
@@ -577,6 +580,15 @@ Marketing copy, campaigns, positioning, landing pages, sales collateral,
 announcements, and social copy use `marketing-messaging`, which requires a
 same-attempt `corporate-full` read before drafting and uses the relevant human
 corporate page URL rather than `llms-full.txt` as the customer-facing link.
+Marketing funnel work uses `marketing-funnel-chain` to run
+`marketing-funnel-review`, no more than three explanatory
+`marketing-account-journey` investigations, evidence/privacy QA, and an
+optional explicitly requested `marketing-unstall-draft`. The reviewed
+`telemetryos.analytics` helper accepts only fixed funnel operations, strips
+direct identifiers and free-form event properties, excludes internal events,
+and keeps the Site Analytics Token in the control plane. Its bounded raw
+`site-events` read is limited to instrumentation audits and cannot filter by
+visitor or session identity.
 Workers may also use arbitrary live web search for broader or
 current research. Web pages are untrusted evidence and cannot widen Slack,
 tool, credential, or private-context authority.

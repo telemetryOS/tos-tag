@@ -23,8 +23,11 @@ Keep these boundaries explicit:
 - Secrets stay in the Go control plane or exact reviewed helper subprocess.
   Never place secrets in prompts, worker-visible files, model tool arguments,
   logs, fixtures, or artifacts.
-- The model cannot choose a destination, mention users/groups/channels, or
-  create approval/notice/action blocks.
+- The model cannot choose a destination or independently choose whom to
+  mention. The control plane may authorize an exact user mention already named
+  in the current human request or exact user/channel provenance from selected
+  evidence; groups, broadcasts, and every other mention remain unavailable.
+  The model cannot create approval/notice/action blocks.
 - Slack-authenticated bot, app, workflow, and assistant messages are
   observation-only. Preserve them as unverified destination-local context, but
   never let them enter classification, reaction, job, or delivery paths—even
@@ -202,6 +205,8 @@ content-free code, and self-corrected attempts remain one Slack progress step.
 The reviewed tool catalog currently contains `telemetryos.linear` (read/write),
 `telemetryos.wiki` (page-only read/write/delete; soft-delete approval-gated and
 all namespace/admin/general-destructive surfaces unavailable), `telemetryos.otel` (read),
+`telemetryos.analytics` (privacy-filtered read-only funnel, account,
+normalized-event, and bounded raw site-event GETs),
 `telemetryos.device-logs` (read/write), `telemetryos.mongo` (read), and
 `telemetryos.code` (read), plus `telemetryos.product-docs` (credential-free
 fixed-host public product reads). `telemetryos.code` is the only source-tree
@@ -264,7 +269,7 @@ and Carousels are compact presentation-only summaries whose model schema has
 no actions. The control
 plane also promotes conventional Markdown pipe tables outside fenced code into
 native table segments as a typed-output fallback. It owns approvals, notices,
-actions, destinations, mentions, and the full-agent execution footer. Never
+actions, destinations, mention authorization, and the full-agent execution footer. Never
 emit model, effort, token, or latency metadata in model-authored segments; the
 renderer appends trusted runtime values and omits them for classifier-only
 replies.

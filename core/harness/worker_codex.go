@@ -774,7 +774,8 @@ func completedToolOperation(tool string, arguments json.RawMessage) (string, str
 	if len(request.Arguments) > 0 {
 		switch request.ToolID + "/" + request.OperationID + "/" + request.Arguments[0] {
 		case "telemetryos.wiki/read/get", "telemetryos.wiki/read/search", "telemetryos.product-docs/read/docs-index", "telemetryos.product-docs/read/docs-page", "telemetryos.product-docs/read/corporate-full",
-			"telemetryos.code/read/repos", "telemetryos.code/read/files", "telemetryos.code/read/search", "telemetryos.code/read/read", "telemetryos.code/read/versions":
+			"telemetryos.code/read/repos", "telemetryos.code/read/files", "telemetryos.code/read/search", "telemetryos.code/read/read", "telemetryos.code/read/versions",
+			"telemetryos.analytics/read/pipeline", "telemetryos.analytics/read/insights", "telemetryos.analytics/read/website", "telemetryos.analytics/read/accounts", "telemetryos.analytics/read/account", "telemetryos.analytics/read/events":
 			resourceAction = request.Arguments[0]
 		}
 	}

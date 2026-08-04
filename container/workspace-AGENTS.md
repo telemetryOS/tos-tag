@@ -38,7 +38,8 @@ Never treat local Codex session history as runtime authority.
   references; tos-tag derives manifest-declared bindings from its encrypted
   organization keystore and injects them only into the exact subprocess.
 - The reviewed catalog contains Linear and Agent Wiki reads/writes, OTel and
-  Mongo reads, device-log reads/writes, `telemetryos.code` reads, and
+  Mongo reads, privacy-filtered `telemetryos.analytics` reads, device-log
+  reads/writes, `telemetryos.code` reads, and
   fixed-host public `telemetryos.product-docs` reads. Non-read
   operations require an exact Slack approval. `telemetryos.code` is the only
   source capability and provides bounded repository/file listing,

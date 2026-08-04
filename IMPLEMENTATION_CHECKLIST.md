@@ -41,8 +41,9 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Admit conservative public cross-channel factual-alignment interventions;
   suppress opinion, stale, ambiguous, recently represented, and restricted
   conflicts.
-- [x] Allow only evidence-derived user/channel mentions while rejecting model
-  self-authorization, broadcast mentions, and user-group mentions.
+- [x] Allow requester-named user mentions and evidence-derived user/channel
+  mentions while rejecting model self-authorization, broadcast mentions, and
+  user-group mentions.
 - [x] Run the original 24 natural classifier cases against the real configured
   OpenAI provider, with expectations held only by the scorer (`26/26`
   including the two infrastructure invariants).
@@ -136,6 +137,12 @@ Only mark an item complete when source and verification evidence exist.
   intake instead of an approval flow.
 - [x] Provide a credential-free `telemetryos.product-docs` read operation that
   permits only the public docs index/pages and corporate full-content source.
+- [x] Provide a read-only `telemetryos.analytics` operation with fixed Gateway
+  funnel endpoints, a server-side Site Analytics Token, bounded pagination,
+  and direct-identifier/free-form-content filtering.
+- [x] Inject the `marketing-funnel-chain`, `marketing-funnel-review`,
+  `marketing-account-journey`, and draft-only `marketing-unstall-draft`
+  behavioral skills.
 - [x] Inject `product-knowledge` so named product claims require retrieval and
   route by source authority and audience.
 - [x] Inject `telemetryos-documentation` so customer documentation questions

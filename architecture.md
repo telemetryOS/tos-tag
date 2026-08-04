@@ -351,6 +351,7 @@ The current reviewed catalog is:
 | `telemetryos.linear` | `read`, `write` | Risk-based | Typed Linear helper operations |
 | `telemetryos.wiki` | `read`, `write`, `delete` | Never for page read/write; always for recoverable page soft-delete | Page-only CRUD; namespace, asset, publish-file, cascading move, activity, undo, and admin operations are unavailable |
 | `telemetryos.otel` | `read` | Risk-based | Bounded SigNoz/OpenTelemetry queries |
+| `telemetryos.analytics` | `read` | Never | Fixed production/QA funnel, website, account, and event GETs; internal records, direct identifiers, free-form properties, arbitrary paths, and exports are unavailable |
 | `telemetryos.device-logs` | `read`, `write` | Risk-based | Device-log queries and reviewed log-level changes |
 | `telemetryos.mongo` | `read` | Risk-based | Bounded Mongo fetch operations |
 
@@ -374,6 +375,14 @@ pipeline accepts a final answer only after that same worker attempt completes a
 full Primer page, docs page, or corporate full-content read. Search/index/web
 results, Slack context, and model memory do not satisfy the delivery gate.
 
+`telemetryos.analytics` is a separate read-only marketing evidence boundary.
+It authenticates server-side with a Site Analytics Token, calls only reviewed
+Gateway funnel endpoints, and removes email, IP, visitor/session/event tokens,
+click IDs, raw user-agent data, event properties, and self-reported free text
+before returning JSON to a worker. Marketing behavior composes it through the
+funnel-review, account-journey, and optional draft-only unstall skills; it does
+not grant campaign, CRM, message, billing, or device writes.
+
 Because source reads return content rather than a shared filename, Wiki writes
 accept an explicit inline body. The complete body is committed in the Wiki tool
 execution audit receipt without being copied into broad audit listings.
@@ -396,8 +405,11 @@ image, and artifact. Captioned tables render as native sortable/paginated Data
 Tables; uncaptioned tables retain the compact native Table. Cards and Carousels
 are presentation-only and have no model-exposed action field. Approval buttons, notices, and
 destination selection are control-plane-owned. Generated Slack mentions are
-rejected unless the exact user/channel ID came from classifier-selected
-destination-safe evidence; broadcast and user-group mentions remain forbidden.
+rejected unless the exact user ID was already named by the requester in the
+current message or the exact user/channel ID came from classifier-selected
+destination-safe evidence. The control plane excludes Tag's own invocation
+mention from the request-derived allowlist; broadcast and user-group mentions
+remain forbidden.
 
 For a full-agent result, the harness captures the current turn's
 provider-reported token breakdown from Codex App Server and the pipeline binds

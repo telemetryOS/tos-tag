@@ -207,6 +207,10 @@ The reviewed catalog currently contains:
   always requires approval, and namespace/assets/publish-file/cascading-move/
   activity/undo/admin operations are unavailable;
 - `telemetryos.otel` (`read`);
+- `telemetryos.analytics` (`read` only, no approval): fixed funnel, website,
+  account, normalized-event, and bounded raw site-event GETs through the Site
+  Analytics Token boundary with direct-identifier and free-form-property
+  filtering and no visitor/session lookup;
 - `telemetryos.device-logs` (`read`, `write`); and
 - `telemetryos.mongo` (`read`, disabled by default pending the human-opened
   security-key session).
@@ -216,7 +220,7 @@ Wiki content obtained through `telemetryos.code` must use the typed Wiki
 workers have no shared source filename; never invent `/workspace/...` paths.
 The exact action is committed by the Wiki execution audit receipt.
 
-Behavioral skill presence is not tool authority. The current inventory is 14
+Behavioral skill presence is not tool authority. The current inventory is 18
 skills in `base`; use the checked-in plugin manifest as the source of truth and
 keep the exact list in `README.md`.
 
@@ -255,9 +259,10 @@ changed behavior. Use the `code-change-intake` skill only after explicit issue
 creation intent; normal reviewed Linear approval still applies.
 
 For local setup, run `make sync-tool-env`. The script copies only the known
-Linear, Wiki, SigNoz, and DLA variables from the current shell or
+Linear, Wiki, SigNoz, DLA, and optional Site Analytics variables from the current shell or
 `~/.config/telemetryos`, writes them to ignored mode-0600 `runtime.env`, and
-enables the corresponding reviewed tools. It reports variable names only.
+enables the corresponding reviewed tools. Analytics remains disabled when no
+Site Analytics Token is available. It reports variable names only.
 It also binds `TAG_AION_DEVELOPER_PATH` for the read-only `telemetryos.code`
 tool. Workers may list repositories/files, fixed-string search, and read a
 bounded source range through that capability; never mount the source tree into

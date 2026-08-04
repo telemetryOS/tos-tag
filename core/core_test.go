@@ -132,7 +132,9 @@ func TestConfiguredBehavioralPluginsAreAutomaticallyInjected(t *testing.T) {
 	}
 	wantSkills := map[string]bool{
 		"bug": false, "code-change-intake": false, "codebase-read": false,
-		"feature": false, "linear-issue-manager": false, "marketing-messaging": false, "product-knowledge": false, "telemetryos-documentation": false,
+		"feature": false, "linear-issue-manager": false,
+		"marketing-account-journey": false, "marketing-funnel-chain": false, "marketing-funnel-review": false,
+		"marketing-messaging": false, "marketing-unstall-draft": false, "product-knowledge": false, "telemetryos-documentation": false,
 		"slack-message-design": false, "suitability": false, "tag-triggers": false,
 		"team-alignment": false, "telemetry-otel-fetch": false, "wiki": false,
 	}

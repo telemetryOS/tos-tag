@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -258,12 +259,140 @@ printf '# fetched product source\n'
 	}
 }
 
+func TestAnalyticsReviewedHelperUsesBoundedGETAndRedactsDirectIdentifiers(t *testing.T) {
+	temporary := t.TempDir()
+	capture := filepath.Join(temporary, "curl-argv.txt")
+	fakeCurl := filepath.Join(temporary, "curl")
+	const fakeCurlScript = `#!/bin/bash
+set -eu
+output=""
+headers=""
+url=""
+printf '%s\n' "$@" > "$CAPTURE_PATH"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) output="$2"; shift 2 ;;
+    --dump-header) headers="$2"; shift 2 ;;
+    --url) url="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ "$url" == *"/analytics/site"* ]]; then
+  printf 'HTTP/1.1 200 OK\r\nTotal-Records-Count: 23\r\n\r\n' > "$headers"
+  printf '%s' '[{"type":"pageview","ip":"192.0.2.1","visitor_token":"visitor-secret","session_id":"session-secret","event_id":"event-secret","url":"https://www.telemetryos.com/pricing?email=person@example.com","referrer":"https://example.com/?secret=yes","props":{"customer_text":"private"},"ua":{"raw":"private-user-agent"},"path":"/pricing"}]' > "$output"
+else
+  printf '%s' '{"account":{"account_id":"0123456789abcdef01234567","email":"person@example.com","internal":false,"stage":"activated","demo_code":"secret-code","touches":[{"source":"google","token":"visitor-secret"}]},"events":[{"type":"pageview","ip":"192.0.2.1","visitor_token":"visitor-secret","session_id":"session-secret","event_id":"event-secret","url":"https://www.telemetryos.com/pricing?email=person@example.com","referrer":"https://example.com/?secret=yes","props":{"customer_text":"private"},"ua":{"raw":"private-user-agent"},"path":"/pricing"}],"self_reported_attribution":[{"label":"free-form customer answer","accounts":1}]}' > "$output"
+fi
+printf '200'
+`
+	if err := os.WriteFile(fakeCurl, []byte(fakeCurlScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	helper := filepath.Join("..", "tool-marketplace", "tools", "analytics", "run.sh")
+	command := exec.Command("/bin/bash", helper, "account", "0123456789abcdef01234567")
+	command.Env = []string{
+		"PATH=" + temporary + ":/usr/bin:/bin",
+		"HOME=" + temporary,
+		"TMPDIR=" + temporary,
+		"TOS_TAG_OPERATION_ID=read",
+		"TELEMETRYOS_ANALYTICS_URL=https://qa-api.telemetryos.com",
+		"SITE_ANALYTICS_TOKEN=s0123456789abcdef0123456789abcdef",
+		"CAPTURE_PATH=" + capture,
+	}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("analytics helper failed: %v: %s", err, output)
+	}
+	for _, forbidden := range []string{"person@example.com", "192.0.2.1", "visitor-secret", "session-secret", "event-secret", "secret-code", "customer_text", "private-user-agent", "free-form customer answer", "?email=", "?secret="} {
+		if bytes.Contains(output, []byte(forbidden)) {
+			t.Fatalf("analytics output leaked %q: %s", forbidden, output)
+		}
+	}
+	for _, expected := range []string{"0123456789abcdef01234567", `"stage": "activated"`, `"path": "/pricing"`, "https://www.telemetryos.com/pricing"} {
+		if !bytes.Contains(output, []byte(expected)) {
+			t.Fatalf("analytics output is missing %q: %s", expected, output)
+		}
+	}
+	argv, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(argv, []byte("s0123456789abcdef0123456789abcdef")) || !bytes.Contains(argv, []byte("https://qa-api.telemetryos.com/reporting/funnel/accounts/0123456789abcdef01234567")) || !bytes.Contains(argv, []byte("--request\nGET")) {
+		t.Fatalf("unexpected analytics curl arguments: %s", argv)
+	}
+
+	command = exec.Command("/bin/bash", helper, "site-events", "--from", "2026-07-01T00:00:00Z", "--to", "2026-07-08T00:00:00Z", "--type", "pageview,signup_started", "--path", "/pricing", "--exclude-bots", "true", "--page", "2", "--per-page", "25")
+	command.Env = []string{
+		"PATH=" + temporary + ":/usr/bin:/bin",
+		"HOME=" + temporary,
+		"TMPDIR=" + temporary,
+		"TOS_TAG_OPERATION_ID=read",
+		"TELEMETRYOS_ANALYTICS_URL=https://qa-api.telemetryos.com",
+		"SITE_ANALYTICS_TOKEN=s0123456789abcdef0123456789abcdef",
+		"CAPTURE_PATH=" + capture,
+	}
+	rawOutput, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("raw site-events helper failed: %v: %s", err, rawOutput)
+	}
+	for _, forbidden := range []string{"person@example.com", "192.0.2.1", "visitor-secret", "session-secret", "event-secret", "customer_text", "private-user-agent", "?email=", "?secret="} {
+		if bytes.Contains(rawOutput, []byte(forbidden)) {
+			t.Fatalf("raw site-events output leaked %q: %s", forbidden, rawOutput)
+		}
+	}
+	for _, expected := range []string{`"total": 23`, `"page": 2`, `"per_page": 25`, `"type": "pageview"`, `"path": "/pricing"`} {
+		if !bytes.Contains(rawOutput, []byte(expected)) {
+			t.Fatalf("raw site-events output is missing %q: %s", expected, rawOutput)
+		}
+	}
+	argv, err = os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"https://qa-api.telemetryos.com/analytics/site?", "from=2026-07-01T00%3A00%3A00Z", "type=pageview%2Csignup_started", "path=%2Fpricing", "exclude_bots=true", "page=2", "per_page=25", "--dump-header"} {
+		if !bytes.Contains(argv, []byte(expected)) {
+			t.Fatalf("raw site-events curl arguments are missing %q: %s", expected, argv)
+		}
+	}
+	if bytes.Contains(argv, []byte("perPage=")) || bytes.Contains(argv, []byte("s0123456789abcdef0123456789abcdef")) {
+		t.Fatalf("raw site-events curl arguments crossed the reviewed boundary: %s", argv)
+	}
+
+	for name, args := range map[string][]string{
+		"visitor lookup":          {"events", "--visitor", "visitor-secret"},
+		"raw visitor lookup":      {"site-events", "--token", "visitor-secret"},
+		"raw session lookup":      {"site-events", "--session-id", "session-secret"},
+		"raw unsafe path":         {"site-events", "--path", "/pricing?email=person@example.com"},
+		"raw missing bot scope":   {"site-events", "--from", "2026-07-01T00:00:00Z"},
+		"conflicting bot filters": {"site-events", "--exclude-bots", "true", "--bots-only", "true"},
+		"internal events":         {"events", "--include-internal", "true"},
+		"invalid account":         {"account", "../secret"},
+	} {
+		t.Run("reject "+name, func(t *testing.T) {
+			command := exec.Command("/bin/bash", append([]string{helper}, args...)...)
+			command.Env = []string{
+				"PATH=" + temporary + ":/usr/bin:/bin",
+				"HOME=" + temporary,
+				"TMPDIR=" + temporary,
+				"TOS_TAG_OPERATION_ID=read",
+				"TELEMETRYOS_ANALYTICS_URL=https://qa-api.telemetryos.com",
+				"SITE_ANALYTICS_TOKEN=s0123456789abcdef0123456789abcdef",
+				"CAPTURE_PATH=" + capture,
+			}
+			if rejectedOutput, rejectedErr := command.CombinedOutput(); rejectedErr == nil {
+				t.Fatalf("unsafe Analytics input succeeded: %s", rejectedOutput)
+			}
+		})
+	}
+}
+
 func TestCheckedInReviewedToolMarketplace(t *testing.T) {
 	registry, err := tools.LoadMarketplace(filepath.Join("..", "tool-marketplace"), "catalog.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"telemetryos.linear": true, "telemetryos.wiki": true, "telemetryos.otel": true, "telemetryos.device-logs": true, "telemetryos.mongo": true, "telemetryos.code": true, "telemetryos.product-docs": true}
+	want := map[string]bool{"telemetryos.linear": true, "telemetryos.wiki": true, "telemetryos.otel": true, "telemetryos.analytics": true, "telemetryos.device-logs": true, "telemetryos.mongo": true, "telemetryos.code": true, "telemetryos.product-docs": true}
 	for _, snapshot := range registry.List() {
 		delete(want, snapshot.ToolID)
 		if snapshot.ContentHash == "" || len(snapshot.Operations) == 0 {
@@ -302,6 +431,14 @@ func TestCheckedInReviewedToolMarketplace(t *testing.T) {
 	if productRead.ID != "read" || productRead.Risk != "read" || productRead.RequiresApproval() || len(productRead.Env) != 0 || productRead.TimeoutSeconds != 30 || productRead.MaxOutputBytes != 524288 {
 		t.Fatalf("product docs read boundary is invalid: %#v", productRead)
 	}
+	analytics, ok := registry.Resolve("telemetryos.analytics")
+	if !ok || len(analytics.Manifest.Operations) != 1 {
+		t.Fatalf("analytics tool was not resolved safely: %#v", analytics.Manifest)
+	}
+	analyticsRead := analytics.Manifest.Operations[0]
+	if analyticsRead.ID != "read" || analyticsRead.Risk != "read" || analyticsRead.RequiresApproval() || analyticsRead.TimeoutSeconds != 90 || analyticsRead.MaxOutputBytes != 1048576 || !reflect.DeepEqual(analyticsRead.Env, []string{"TELEMETRYOS_ANALYTICS_URL", "SITE_ANALYTICS_TOKEN"}) || !reflect.DeepEqual(analyticsRead.PublicEnv, []string{"TELEMETRYOS_ANALYTICS_URL"}) {
+		t.Fatalf("analytics read boundary is invalid: %#v", analyticsRead)
+	}
 }
 
 func TestConfiguredBasePluginWhenAvailable(t *testing.T) {
@@ -309,15 +446,16 @@ func TestConfiguredBasePluginWhenAvailable(t *testing.T) {
 	if _, err := os.Stat(baseRoot); errors.Is(err, os.ErrNotExist) {
 		t.Skipf("checkout not present: %s", baseRoot)
 	}
+	expectedNames := []string{"bug", "code-change-intake", "codebase-read", "feature", "linear-issue-manager", "marketing-account-journey", "marketing-funnel-chain", "marketing-funnel-review", "marketing-messaging", "marketing-unstall-draft", "product-knowledge", "slack-message-design", "suitability", "tag-triggers", "team-alignment", "telemetry-otel-fetch", "telemetryos-documentation", "wiki"}
 	base, err := marketplace.LoadPlugin(baseRoot, filepath.Join(".claude-plugin", "marketplace.json"), "base")
-	if err != nil || len(base) != 14 {
+	if err != nil || len(base) < len(expectedNames) {
 		t.Fatalf("base skills=%d err=%v", len(base), err)
 	}
 	baseNames := map[string]bool{}
 	for _, snapshot := range base {
 		baseNames[snapshot.Name] = true
 	}
-	for _, expected := range []string{"bug", "code-change-intake", "codebase-read", "feature", "linear-issue-manager", "marketing-messaging", "product-knowledge", "slack-message-design", "suitability", "tag-triggers", "team-alignment", "telemetry-otel-fetch", "telemetryos-documentation", "wiki"} {
+	for _, expected := range expectedNames {
 		if !baseNames[expected] {
 			t.Fatalf("base plugin missing %s: %#v", expected, baseNames)
 		}

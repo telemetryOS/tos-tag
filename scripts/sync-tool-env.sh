@@ -116,6 +116,19 @@ import_one DLA_API_BASE_URL "${telemetry_config}/dla.conf"
 import_one DLA_API_KEY "${telemetry_config}/dla.conf"
 import_one DLA_ENV "${telemetry_config}/dla.conf"
 
+injected_tools="telemetryos.linear,telemetryos.wiki,telemetryos.otel,telemetryos.device-logs,telemetryos.code,telemetryos.product-docs"
+analytics_token="$(resolve_value SITE_ANALYTICS_TOKEN 2>/dev/null || true)"
+if [[ -n "${analytics_token}" ]]; then
+  analytics_url="$(resolve_value TELEMETRYOS_ANALYTICS_URL 2>/dev/null || true)"
+  analytics_url="${analytics_url:-https://api.telemetryos.com}"
+  upsert SITE_ANALYTICS_TOKEN "${analytics_token}"
+  upsert TELEMETRYOS_ANALYTICS_URL "${analytics_url}"
+  imported_names+=(SITE_ANALYTICS_TOKEN TELEMETRYOS_ANALYTICS_URL)
+  injected_tools+=",telemetryos.analytics"
+else
+  echo "SITE_ANALYTICS_TOKEN not found; telemetryos.analytics remains disabled" >&2
+fi
+
 [[ -d "${code_root}" ]] || { echo "missing Aion developer path" >&2; exit 1; }
 code_root="$(cd "${code_root}" && pwd -P)"
 
@@ -127,7 +140,7 @@ fi
 tool_path="${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 upsert TAG__MARKETPLACES__TOOL_ROOT "${repo_root}/tool-marketplace"
 upsert TAG__MARKETPLACES__TOOL_CATALOG_PATH catalog.json
-upsert TAG__MARKETPLACES__INJECTED_TOOLS telemetryos.linear,telemetryos.wiki,telemetryos.otel,telemetryos.device-logs,telemetryos.code,telemetryos.product-docs
+upsert TAG__MARKETPLACES__INJECTED_TOOLS "${injected_tools}"
 upsert TAG__MARKETPLACES__TOOL_PATH "${tool_path}"
 upsert TAG__MARKETPLACES__TOOLS_ENABLED true
 upsert TAG__KEYSTORE__ENABLED true

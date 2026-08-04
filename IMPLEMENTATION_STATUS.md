@@ -1,6 +1,6 @@
 # tos-tag implementation status
 
-Date: 2026-08-02
+Date: 2026-08-04
 Version: `0.1.0-dev`
 Scope: development Slack control plane, membership-managed assist with live
 regression traffic constrained to `#tos-tag`
@@ -106,9 +106,11 @@ commands, tests, and active documentation have been removed.
   subscriptions with explicit IANA timezones, legacy interval compatibility,
   and a combined management Automation view/editor.
 - Complete behavioral `base` plugin from `tag-agent-skills`, including
-  read-only code, Linear, Wiki, OTel, and `team-alignment` worker behavior.
-- Reviewed Linear, Wiki, OTel, DLA, optional Mongo, and bounded source-code
-  helper bundles with encrypted environment bindings where required.
+  read-only code, Linear, Wiki, OTel, the marketing funnel chain and leaf
+  skills, and `team-alignment` worker behavior.
+- Reviewed Linear, Wiki, OTel, privacy-filtered Analytics, DLA, optional Mongo,
+  and bounded source-code helper bundles with encrypted environment bindings
+  where required.
 - Wiki inline-body publication for source-derived documents, with the complete
   body committed in the audit receipt. Wiki capability is page CRUD only:
   read/write authoring is trusted without per-action approval, recoverable page

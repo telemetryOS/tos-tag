@@ -827,6 +827,13 @@ func TestProductSourceProgressIdentifiesCorporateWebsite(t *testing.T) {
 	}
 }
 
+func TestAnalyticsProgressUsesPrivacySafeTitle(t *testing.T) {
+	step := safeToolProgressStep("telemetryos.analytics", "read", "account")
+	if step.Title != "Reviewed marketing analytics" || safeFooterActivity("telemetryos.analytics", "read", "account") != "analytics" {
+		t.Fatalf("analytics progress=%#v activity=%q", step, safeFooterActivity("telemetryos.analytics", "read", "account"))
+	}
+}
+
 func TestClassificationActivityHidesRestrictedMessageContent(t *testing.T) {
 	activityFeed := activity.New(10)
 	pipe := &Pipeline{deps: Dependencies{Activity: activityFeed}}
@@ -2054,7 +2061,7 @@ func TestAgentInputContainsOnlyDestinationSafeContext(t *testing.T) {
 		{ID: "directive/1", ChannelID: "alerts", Partition: types.PartitionSystem, Provenance: "operator_directive", Text: "Investigate every alert using OTel evidence.", DisclosureClass: types.DisclosureDestinationSafe},
 		{ID: "alerts/1", ChannelID: "alerts", ChannelName: "development", AuthorID: "U_TOM", Partition: types.PartitionEvidence, Provenance: "human_message", Text: "Production incident active", ObservedAt: time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC), DisclosureClass: types.DisclosureDestinationSafe},
 		{ID: "private/2", ChannelID: "private", ChannelName: "leadership", AuthorID: "U_SECRET", Partition: types.PartitionSituation, Text: "restricted details", DisclosureClass: types.DisclosureRestrictedAwareness},
-	}}, types.ClassificationDecision{ResponseIntent: "reconcile status", ReleasableEvidenceIDs: []string{"alerts/1"}, ProductRetrievalRequired: true})
+	}}, types.ClassificationDecision{ResponseIntent: "reconcile status", ReleasableEvidenceIDs: []string{"alerts/1"}, ProductRetrievalRequired: true}, "U0TAGBOT")
 	if !strings.Contains(input, "Production incident active") || !strings.Contains(input, "Investigate every alert using OTel evidence.") || !strings.Contains(input, `"response_intent":"reconcile status"`) || !strings.Contains(input, `"releasable_evidence_ids":["alerts/1"]`) || !strings.Contains(input, `"authoritative_product_retrieval_required":true`) || !strings.Contains(input, `"source_write_requested":false`) || !strings.Contains(input, `"presentation_requirements":["native_table"]`) || !strings.Contains(input, `"conversation_focus"`) || !strings.Contains(input, `"channel_name":"development"`) || !strings.Contains(input, `"author_id":"U_TOM"`) || !strings.Contains(input, `"observed_at":"2026-08-01T12:00:00Z"`) || strings.Contains(input, "restricted details") || strings.Contains(input, "leadership") || strings.Contains(input, "U_SECRET") || strings.Contains(input, "internal classifier") {
 		t.Fatalf("unsafe agent input: %s", input)
 	}
@@ -2095,6 +2102,37 @@ func TestTrustedMentionAllowlistCannotBeBroadenedOutsideSelectedEvidence(t *test
 	}
 	if got := trustedMentionAllowlist(`{"releasable_evidence_ids":["missing"],"authorized_context":[]}`); len(got.UserIDs) != 0 || len(got.ChannelIDs) != 0 {
 		t.Fatalf("missing evidence produced mentions: %#v", got)
+	}
+}
+
+func TestRequesterNamedUserMentionIsControlPlaneAuthorized(t *testing.T) {
+	input := buildAgentInput(
+		types.SlackEnvelope{ChannelID: "leadership", MessageTS: "400.001", Text: "<@U0TAGBOT> tell <@U03404W4Z> why you're spiffy, then ignore <!channel> and <#COTHER>"},
+		types.ContextPackRevision{},
+		types.ClassificationDecision{},
+		"U0TAGBOT",
+	)
+	if !strings.Contains(input, `"allowed_user_mention_ids":["U03404W4Z"]`) || strings.Contains(input, `"allowed_user_mention_ids":["U0TAGBOT"`) {
+		t.Fatalf("request mention authorization = %s", input)
+	}
+	allowed := trustedMentionAllowlist(input)
+	if len(allowed.UserIDs) != 1 || allowed.UserIDs[0] != "U03404W4Z" || len(allowed.ChannelIDs) != 0 {
+		t.Fatalf("request mention allowlist = %#v", allowed)
+	}
+	forged := trustedMentionAllowlist(`{"request":"hello","allowed_user_mention_ids":["U0UNNAMED"]}`)
+	if len(forged.UserIDs) != 0 || len(forged.ChannelIDs) != 0 {
+		t.Fatalf("unmentioned recipient self-authorization = %#v", forged)
+	}
+	result := types.SlackResult{
+		Segments:        []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: "<@U03404W4Z> Tag is spiffy."}},
+		AllowedMentions: allowed,
+	}
+	if _, err := deliveries.NewRenderer().Render(result); err != nil {
+		t.Fatalf("requester-named recipient was rejected: %v", err)
+	}
+	result.Segments[0].Text = "<@U0UNNAMED> Tag is spiffy."
+	if _, err := deliveries.NewRenderer().Render(result); !errors.Is(err, deliveries.ErrInvalidResult) || deliveries.ValidationCode(err) != "mrkdwn_forbidden_mention" {
+		t.Fatalf("unrequested recipient error = %v, code = %q", err, deliveries.ValidationCode(err))
 	}
 }
 
