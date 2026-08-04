@@ -71,10 +71,10 @@ For mrkdwn_text:
 - When referencing an existing Agent Wiki page, use the exact human HTTPS URL
   returned by the same-attempt reviewed Wiki get or url read operation
   in a descriptive Slack link.
-  Never expose a namespace/slug such as primer/example as the reference, never
+  Prefer the human URL, but an unresolved namespace/slug such as
+  primer/example is acceptable in this internal Slack workspace. Never
   reconstruct the opaque page URL, and do not use an artifact segment for an
-  existing page. If the URL lookup fails, omit the reference instead of
-  emitting the slug.
+  existing page.
 - Use *bold*, _italic_, and ~strikethrough~ when they improve scanning.
 - Put variable names, ENV names, literal values, commands, flags, paths, model
   names, codes, issue keys, UUIDs, job IDs, and identifiers in single backticks.

@@ -40,10 +40,7 @@ var (
 	slackBareLinkPattern = regexp.MustCompile(`<([A-Za-z][A-Za-z0-9+.-]*:[^>|]+)>`)
 	slackEntityPattern   = regexp.MustCompile(`<(?:@|#|!)[^>]*>`)
 	httpsLinkPattern     = regexp.MustCompile(`(?i)https://[^\s<>()]+`)
-	bareWikiSlugPattern  = regexp.MustCompile(`(?i)(?:^|[\s(])` + "`?" + `(?:primer|artifacts)/[a-z0-9][a-z0-9._/-]*` + "`?" + `(?:$|[\s),.;:])`)
-	generalSlugPattern   = regexp.MustCompile(`(?i)(?:^|[\s(])` + "`?" + `[a-z][a-z0-9-]{1,63}/[a-z0-9][a-z0-9._/-]*` + "`?" + `(?:$|[\s),.;:])`)
 	wikiSlugTokenPattern = regexp.MustCompile("(?i)`?[a-z][a-z0-9-]{1,63}/[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?`?")
-	wikiReferenceCue     = regexp.MustCompile(`(?i)\b(?:agent wiki|wiki page|wiki reference|wiki source)\b`)
 )
 
 // ValidationCode returns a stable, content-free diagnostic for a renderer
@@ -102,7 +99,6 @@ func ValidationCode(err error) string {
 		{"artifact name is required", "artifact_name"},
 		{"artifact URL must be HTTPS", "artifact_url"},
 		{"artifact URL lacks successful tool provenance", "artifact_unverified"},
-		{"bare Wiki page slug", "wiki_reference_slug"},
 	}
 	for _, check := range checks {
 		if strings.Contains(message, check.fragment) {
@@ -112,59 +108,12 @@ func ValidationCode(err error) string {
 	return "invalid_result"
 }
 
-// ValidateWikiReferenceLinks prevents internal Wiki identifiers from being
-// presented as citations. Namespace/slug values are useful to the reviewed
-// CLI, but Slack readers need the opaque human HTTPS URL returned by that CLI.
-// Existing Wiki pages belong in normal mrkdwn links rather than artifact
-// segments, whose provenance contract is reserved for newly published output.
-func ValidateWikiReferenceLinks(result types.SlackResult) error {
-	validate := func(text string) error {
-		withoutLinks := slackLinkPattern.ReplaceAllString(text, " ")
-		withoutLinks = httpsLinkPattern.ReplaceAllString(withoutLinks, " ")
-		if bareWikiSlugPattern.MatchString(withoutLinks) || (wikiReferenceCue.MatchString(withoutLinks) && generalSlugPattern.MatchString(withoutLinks)) {
-			return fmt.Errorf("%w: bare Wiki page slug must be replaced with an HTTPS link", ErrInvalidResult)
-		}
-		return nil
-	}
-	for _, segment := range result.Segments {
-		if err := validate(segment.Text); err != nil {
-			return err
-		}
-		if segment.Card != nil {
-			for _, text := range []string{segment.Card.Title, segment.Card.Subtitle, segment.Card.Body, segment.Card.Subtext} {
-				if err := validate(text); err != nil {
-					return err
-				}
-			}
-		}
-		if segment.Carousel != nil {
-			for _, card := range segment.Carousel.Cards {
-				for _, text := range []string{card.Title, card.Subtitle, card.Body, card.Subtext} {
-					if err := validate(text); err != nil {
-						return err
-					}
-				}
-			}
-		}
-		if segment.Table == nil {
-			continue
-		}
-		for _, row := range segment.Table.Rows {
-			for _, cell := range row {
-				if err := validate(cell.Text); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
 // ResolveWikiReferenceLinks replaces a model-emitted namespace/slug only when
 // the same worker attempt returned the canonical human URL for that exact
 // reference. The map key is the lowercase SHA-256 fingerprint of the tool
 // reference, so the control plane does not need to expose page slugs in events
-// or logs. Unresolved slugs remain untouched and are rejected by validation.
+// or logs. Unresolved internal slugs remain readable in internal Slack rather
+// than invalidating an otherwise useful answer.
 func ResolveWikiReferenceLinks(result types.SlackResult, resolvedURLs map[string]string) types.SlackResult {
 	if len(resolvedURLs) == 0 {
 		return result
@@ -398,9 +347,6 @@ func NewRenderer() *Renderer { return &Renderer{} }
 func (r *Renderer) Render(result types.SlackResult) ([]Payload, error) {
 	if len(result.Segments) == 0 {
 		return nil, fmt.Errorf("%w: no segments", ErrInvalidResult)
-	}
-	if err := ValidateWikiReferenceLinks(result); err != nil {
-		return nil, err
 	}
 	footer := renderAgentFooter(result.AgentFooter)
 	blockLimit := maxBlocksPerMessage

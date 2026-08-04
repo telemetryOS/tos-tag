@@ -448,9 +448,11 @@ Existing Wiki pages are linked differently from newly produced artifacts. A
 worker may use a namespace/slug to retrieve a page, but any source or reference
 shown to a Slack reader uses the exact opaque human HTTPS URL returned by the
 reviewed Wiki `get` or `url` operation in a descriptive Slack link. Every
-reviewed `get` returns a full page envelope containing that URL. Bare Wiki slugs are
-rejected by rendering, and existing pages are never mislabeled as model-created
-artifact segments.
+reviewed `get` returns a full page envelope containing that URL. If no
+same-attempt URL was resolved, a bare internal Wiki slug remains readable
+instead of invalidating the whole answer. Existing pages are never mislabeled
+as model-created artifact segments, and the worker never reconstructs an
+opaque page URL.
 
 Every full-agent Block Kit result ends with a de-emphasized, control-plane-owned
 context footer containing the resolved model, reasoning effort, provider-reported

@@ -187,8 +187,9 @@ Only mark an item complete when source and verification evidence exist.
   returning a concise synopsis and exact tool-returned link.
 - [x] Reject model-created artifact segments unless the exact HTTPS URL was
   produced by a successful reviewed tool call in the same worker attempt.
-- [x] Require actual resolved HTTPS links for provided Wiki references and
-  reject bare Primer/artifact or Wiki-labeled namespace/slugs.
+- [x] Prefer actual resolved HTTPS links for provided Wiki references, permit
+  unresolved slugs as internal text rather than failing the whole answer, and
+  forbid reconstructed or fabricated opaque page URLs.
 - [x] Reject model-generated approvals, notices, actions, destinations, and
   special mentions.
 - [x] Validate Block Kit before posting.

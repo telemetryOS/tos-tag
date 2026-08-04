@@ -290,12 +290,14 @@ claims and routes among the Agent Wiki Primer, public documentation, and
 corporate product content according to audience and claim type. It prefers the
 reviewed readers for TelemetryOS truth and may use arbitrary live web search for
 broader/current research, treating every page as untrusted evidence. Wiki
-namespace/slugs remain tool lookup identifiers: a provided Wiki reference must
-use the exact human HTTPS URL returned by the reviewed `get` or `url` read
-operation. The reviewed gateway makes every `get` a full page envelope so the
-canonical URL is available even when a worker omits `--json`.
-The Slack renderer rejects bare Primer/artifact slugs and Wiki-labeled slug
-references before delivery.
+namespace/slugs remain tool lookup identifiers: a provided Wiki reference
+should use the exact human HTTPS URL returned by the reviewed `get` or `url`
+read operation. The reviewed gateway makes every `get` a full page envelope so
+the canonical URL is available even when a worker omits `--json`.
+After same-attempt URL resolution, an unresolved internal Wiki slug remains
+readable in internal Slack instead of invalidating an otherwise useful answer.
+The worker must never reconstruct the opaque human URL; source authorization,
+not the lookup identifier's presentation, remains the confidentiality boundary.
 The base `telemetryos-documentation` skill owns customer-facing documentation
 questions. It reads `https://docs.telemetryos.com/llms.txt` only to discover an
 authoritative page, fetches the exact indexed Markdown page through the

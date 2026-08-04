@@ -14,7 +14,7 @@ import (
 )
 
 func TestSlackOutputPromptContainsRequiredContract(t *testing.T) {
-	required := []string{"header, mrkdwn_text", "context, divider, table, card, carousel, image, or artifact", "every explicit part of the request", "Never leave a heading, label, or trailing colon", "Never add model, reasoning effort, token usage, or latency metadata", "trusted runtime measurements", "sortable, paginated Data Table", "Never put actions", "published durable document or download", "Keep short and medium answers in Slack", "Agent Wiki artifacts namespace", "20,000 visible characters", "soft planning signal, not a hard cutoff", "exact HTTPS URL returned by the tool", "Never fabricate, predict, or reconstruct a Wiki URL", "no Wiki artifact was created", "at most one optional header", "no more than two short sentences", "Omit tool narration", "<https://example.com|descriptive label>", "Wiki get or url", "Never expose a namespace/slug", "*bold*", "_italic_", "single backticks", "literal identifier containing an underscore", "byte-for-byte", "reply_in_channel to replyinchannel", "triple-backtick", "complete table", "Do not preface or follow", "Never emit actions", "Do not choose or alter"}
+	required := []string{"header, mrkdwn_text", "context, divider, table, card, carousel, image, or artifact", "every explicit part of the request", "Never leave a heading, label, or trailing colon", "Never add model, reasoning effort, token usage, or latency metadata", "trusted runtime measurements", "sortable, paginated Data Table", "Never put actions", "published durable document or download", "Keep short and medium answers in Slack", "Agent Wiki artifacts namespace", "20,000 visible characters", "soft planning signal, not a hard cutoff", "exact HTTPS URL returned by the tool", "Never fabricate, predict, or reconstruct a Wiki URL", "no Wiki artifact was created", "at most one optional header", "no more than two short sentences", "Omit tool narration", "<https://example.com|descriptive label>", "Wiki get or url", "an unresolved namespace/slug", "acceptable in this internal Slack workspace", "*bold*", "_italic_", "single backticks", "literal identifier containing an underscore", "byte-for-byte", "reply_in_channel to replyinchannel", "triple-backtick", "complete table", "Do not preface or follow", "Never emit actions", "Do not choose or alter"}
 	for _, value := range required {
 		if !strings.Contains(SlackOutputPrompt, value) {
 			t.Errorf("prompt missing %q", value)
@@ -355,22 +355,21 @@ func TestRendererRejectsNonSlackFormattingAndBroadcasts(t *testing.T) {
 	}
 }
 
-func TestRendererRequiresLinksForWikiReferences(t *testing.T) {
+func TestRendererAllowsInternalWikiSlugs(t *testing.T) {
 	for name, text := range map[string]string{
 		"primer slug":       "Source: Agent Wiki Primer, `primer/02-hardware/node-mini/io-capabilities`.",
 		"artifact slug":     "See `artifacts/tos-tag-architecture` for the full report.",
 		"named Wiki source": "Agent Wiki source: `finance/premium-trial`.",
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := NewRenderer().Render(types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: text}}})
-			if !errors.Is(err, ErrInvalidResult) || ValidationCode(err) != "wiki_reference_slug" {
-				t.Fatalf("error = %v, code = %q", err, ValidationCode(err))
+			if _, err := NewRenderer().Render(types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: text}}}); err != nil {
+				t.Fatalf("internal Wiki slug rejected: %v", err)
 			}
 		})
 	}
 	cardResult := types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentCard, Card: &types.SlackCard{Title: "Node Mini", Body: "Agent Wiki source: `primer/node-mini`."}}}}
-	if _, err := NewRenderer().Render(cardResult); !errors.Is(err, ErrInvalidResult) || ValidationCode(err) != "wiki_reference_slug" {
-		t.Fatalf("card Wiki slug error=%v code=%q", err, ValidationCode(err))
+	if _, err := NewRenderer().Render(cardResult); err != nil {
+		t.Fatalf("card Wiki slug rejected: %v", err)
 	}
 
 	for name, text := range map[string]string{
@@ -403,8 +402,8 @@ func TestResolveWikiReferenceLinksUsesOnlySameAttemptResolvedURL(t *testing.T) {
 	}
 
 	unresolved := ResolveWikiReferenceLinks(result, map[string]string{"different": "https://wiki.example/pages/other"})
-	if _, err := NewRenderer().Render(unresolved); !errors.Is(err, ErrInvalidResult) || ValidationCode(err) != "wiki_reference_slug" {
-		t.Fatalf("unresolved reference error = %v, code = %q", err, ValidationCode(err))
+	if _, err := NewRenderer().Render(unresolved); err != nil {
+		t.Fatalf("unresolved internal reference rejected: %v", err)
 	}
 
 	alreadyLinked := types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: "<https://wiki.example/pages/opaque-id|" + reference + ">"}}}

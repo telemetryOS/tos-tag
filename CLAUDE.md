@@ -239,10 +239,10 @@ linking to `llms-full.txt`.
 Every product answer automatically includes concise clickable links to the
 authoritative sources materially used; test this with natural user questions,
 not prompts that request links or citations. When a Wiki page is referenced,
-its namespace/slug is used only for tool lookup. The worker uses the exact URL
-returned by `telemetryos.wiki/read get` or `url` and emits the exact returned
-human HTTPS URL in a descriptive Slack link. The renderer
-rejects bare Primer/artifact slugs and Wiki-labeled slug citations.
+the worker prefers the exact URL returned by `telemetryos.wiki/read get` or
+`url` and emits that human HTTPS URL in a descriptive Slack link. An unresolved
+namespace/slug may remain as internal text rather than invalidating the whole
+answer; the worker never reconstructs an opaque page URL.
 
 TelemetryOS source is permanently read-only at reviewed bundle load and tool
 execution. Source-write requests do not enter a worker or an approval flow;

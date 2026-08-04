@@ -140,8 +140,9 @@ commands, tests, and active documentation have been removed.
   link. Artifact segments are rejected unless the URL has successful
   same-attempt reviewed-tool provenance. References to existing Wiki pages use
   exact human HTTPS URLs returned by the reviewed `get` or `url` read operation;
-  every reviewed `get` includes that URL in its full page envelope, and bare
-  Wiki slugs are rejected before rendering.
+  every reviewed `get` includes that URL in its full page envelope. Unresolved
+  internal slugs remain readable instead of failing the entire answer, while
+  reconstructed or fabricated opaque page URLs remain forbidden.
 
 ## Verification evidence
 
