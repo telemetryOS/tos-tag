@@ -162,6 +162,7 @@ query fix), plus `F12`, `F14`, `F17`, `F27`, `F29`, `F33`, `F37`, `F42`,
 ## Arch runtime recovery and live regression — 2026-08-04
 
 - [x] Make the committed Arch launcher expose the per-user Codex binary path.
+- [x] Put disposable Arch workers on the host state filesystem instead of the quota-limited shared `/tmp` tmpfs.
 - [x] Fail deterministic worker provisioning/configuration errors once without retry noise.
 - [x] Surface the safe worker diagnostic stage in Management job rows and details.
 - [x] Pass focused worker, pipeline, server, and deployment tests.
