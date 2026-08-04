@@ -33,7 +33,7 @@ func TestOneWriterPerSessionGenerationAndJobOperations(t *testing.T) {
 	if _, err := queue.Claim(context.Background(), "other", time.Minute); !errors.Is(err, ErrNoRunnableJob) {
 		t.Fatalf("second writer claimed: %v", err)
 	}
-	if _, err := queue.Interrupt(context.Background(), claimed.ID, "operator"); err != nil {
+	if _, err := queue.Cancel(context.Background(), claimed.ID, "operator"); err != nil {
 		t.Fatal(err)
 	}
 	cancelled, err := queue.Transition(context.Background(), claimed.ID, claimed.Lease.Token, StateCancelled, nil)
@@ -151,5 +151,29 @@ func TestApprovalResumeRestoresFinalAttemptClaimability(t *testing.T) {
 	claimed, err := queue.Claim(ctx, "worker-2", time.Minute)
 	if err != nil || claimed.Attempt != 1 {
 		t.Fatalf("fresh worker could not claim approved final attempt: %#v err=%v", claimed, err)
+	}
+}
+
+func TestReconciliationListExcludesOrdinaryAndCheckpointedJobs(t *testing.T) {
+	now := time.Now().UTC()
+	queue := NewMemoryQueue(func() time.Time { return now })
+	job, _, err := queue.Enqueue(context.Background(), Spec{OrganizationID: "org", WorkspaceID: "team", ChannelID: "channel", RootThreadTS: "1", SessionID: "session", Generation: 1, IdempotencyKey: "reconcile-filter", Kind: "agent", MaxAttempts: 2, ExpiresAt: now.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidates, _ := queue.ListReconciliation(context.Background(), now); len(candidates) != 0 {
+		t.Fatalf("ordinary queued job entered reconciliation: %#v", candidates)
+	}
+	job, _ = queue.Claim(context.Background(), "worker", time.Minute)
+	job, _ = queue.Transition(context.Background(), job.ID, job.Lease.Token, StateRunning, nil)
+	job, _ = queue.Transition(context.Background(), job.ID, job.Lease.Token, StateSucceeded, nil)
+	if candidates, _ := queue.ListReconciliation(context.Background(), now); len(candidates) != 1 || candidates[0].ID != job.ID {
+		t.Fatalf("uncheckpointed succeeded job missing: %#v", candidates)
+	}
+	if err := queue.MarkFinalDeliveryEnqueued(context.Background(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if candidates, _ := queue.ListReconciliation(context.Background(), now); len(candidates) != 0 {
+		t.Fatalf("checkpointed succeeded job remained in reconciliation: %#v", candidates)
 	}
 }

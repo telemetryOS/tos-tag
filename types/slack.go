@@ -27,6 +27,11 @@ const (
 // excluded from discovery, live persistence, and channel coverage.
 const SlackChannelKindGroupDM = "mpim"
 
+// SlackChannelKindDirectMessage identifies one-to-one direct messages (Slack
+// channel_type "im"). Unlike group DMs, explicitly enrolled DMs are valid
+// destinations and a human message is inherently addressed to Tag.
+const SlackChannelKindDirectMessage = "im"
+
 type SlackEnvelope struct {
 	OrganizationID string         `json:"organization_id"`
 	EnvelopeID     string         `json:"envelope_id"`

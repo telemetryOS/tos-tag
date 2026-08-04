@@ -109,7 +109,7 @@ func (c *Curator) RunOnce(ctx context.Context) (int, error) {
 			return updated, ctx.Err()
 		}
 		current, err := c.repository.FindScope(ctx, batch.OrganizationID, batch.ScopeKey)
-		if err == nil && (current.SourceHash == batch.SourceHash || current.Pinned || current.Origin == "operator") {
+		if err == nil && skipGeneratedUpdate(current, batch.SourceHash) {
 			continue
 		}
 		if err != nil && !errors.Is(err, ErrNotFound) {
@@ -178,6 +178,10 @@ func (c *Curator) RunOnce(ctx context.Context) (int, error) {
 		}
 	}
 	return updated, nil
+}
+
+func skipGeneratedUpdate(current Record, sourceHash string) bool {
+	return current.SourceHash == sourceHash || (current.Status == StatusActive && (current.Pinned || current.Origin == "operator"))
 }
 
 func (c *Curator) candidates(ctx context.Context) ([]Batch, error) {

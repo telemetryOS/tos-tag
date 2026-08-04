@@ -2,9 +2,17 @@ package activity
 
 import (
 	"testing"
+	"unicode/utf8"
 
 	"github.com/RobertWHurst/blackbox"
 )
+
+func TestBoundedPreservesUTF8(t *testing.T) {
+	got := bounded("ab🙂cd", 4)
+	if !utf8.ValidString(got) || got != "ab🙂…" {
+		t.Fatalf("bounded UTF-8 = %q", got)
+	}
+}
 
 func TestHubScopesSnapshotsAndSubscribers(t *testing.T) {
 	hub := New(3)

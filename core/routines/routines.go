@@ -74,7 +74,8 @@ func (s *Store) Put(r Routine) (Routine, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
-	if old, ok := s.routines[r.ID]; ok {
+	key := r.OrganizationID + "/" + r.ID
+	if old, ok := s.routines[key]; ok {
 		r.Version = old.Version + 1
 		r.CreatedAt = old.CreatedAt
 	} else {
@@ -82,7 +83,7 @@ func (s *Store) Put(r Routine) (Routine, error) {
 		r.CreatedAt = now
 	}
 	r.UpdatedAt = now
-	s.routines[r.ID] = r
+	s.routines[key] = r
 	return r, nil
 }
 func (s *Store) PutContext(_ context.Context, r Routine) (Routine, error) { return s.Put(r) }
@@ -95,7 +96,12 @@ func (s *Store) Due(now time.Time) []Routine {
 			due = append(due, r)
 		}
 	}
-	sort.Slice(due, func(i, j int) bool { return due[i].NextRun.Before(due[j].NextRun) })
+	sort.Slice(due, func(i, j int) bool {
+		if due[i].NextRun.Equal(due[j].NextRun) {
+			return due[i].ID < due[j].ID
+		}
+		return due[i].NextRun.Before(due[j].NextRun)
+	})
 	return due
 }
 func (s *Store) DueContext(_ context.Context, now time.Time, limit int) ([]Routine, error) {
@@ -108,8 +114,9 @@ func (s *Store) DueContext(_ context.Context, now time.Time, limit int) ([]Routi
 func (s *Store) Advance(organizationID, id string, from time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, ok := s.routines[id]
-	if !ok || r.OrganizationID != organizationID {
+	key := organizationID + "/" + id
+	r, ok := s.routines[key]
+	if !ok {
 		return fmt.Errorf("routine not found")
 	}
 	spec, err := schedule.Parse(r.Cron, r.Timezone, r.Interval)
@@ -118,7 +125,7 @@ func (s *Store) Advance(organizationID, id string, from time.Time) error {
 	}
 	r.NextRun = spec.Advance(r.NextRun, from)
 	r.Version++
-	s.routines[id] = r
+	s.routines[key] = r
 	return nil
 }
 func (s *Store) AdvanceContext(_ context.Context, organizationID, id string, from time.Time) error {
@@ -158,7 +165,9 @@ func (s *Scheduler) RunDue(ctx context.Context) error {
 	}
 	for _, routine := range due {
 		if err := s.authorizer.AuthorizeRoutine(ctx, routine); err != nil {
-			_ = s.store.AdvanceContext(ctx, routine.OrganizationID, routine.ID, now)
+			if advanceErr := s.store.AdvanceContext(ctx, routine.OrganizationID, routine.ID, now); advanceErr != nil {
+				return advanceErr
+			}
 			continue
 		}
 		window := routine.NextRun.UTC().Format(time.RFC3339Nano)
@@ -195,49 +204,10 @@ func normalize(r Routine, now time.Time) (Routine, error) {
 	return r, nil
 }
 
-type Service struct {
-	scheduler *Scheduler
-	poll      time.Duration
-	cancel    context.CancelFunc
-	done      chan struct{}
-}
+type Service = schedule.Service
 
 func NewService(scheduler *Scheduler, poll time.Duration) *Service {
-	return &Service{scheduler: scheduler, poll: poll}
-}
-func (s *Service) Start(parent context.Context) {
-	if s == nil || s.scheduler == nil || s.poll <= 0 || s.cancel != nil {
-		return
-	}
-	ctx, cancel := context.WithCancel(parent)
-	s.cancel = cancel
-	s.done = make(chan struct{})
-	go func() {
-		defer close(s.done)
-		ticker := time.NewTicker(s.poll)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				_ = s.scheduler.RunDue(ctx)
-			}
-		}
-	}()
-}
-func (s *Service) Stop(ctx context.Context) error {
-	if s == nil || s.cancel == nil {
-		return nil
-	}
-	s.cancel()
-	select {
-	case <-s.done:
-		s.cancel = nil
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return schedule.NewService(scheduler, poll)
 }
 
 var _ Repository = (*Store)(nil)

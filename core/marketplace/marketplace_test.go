@@ -36,6 +36,16 @@ func TestLoadBehavioralMarketplaceAndResolveTools(t *testing.T) {
 	}
 }
 
+func TestReadRootFileRejectsOversizeContent(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "large.txt"), []byte("12345"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readRootFile(root, "large.txt", 4); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversize read error = %v", err)
+	}
+}
+
 func TestPluginMarketplaceLoadsBehaviorWithoutInjectingScripts(t *testing.T) {
 	root := t.TempDir()
 	skillRoot := filepath.Join(root, "plugins", "demo", "skills", "linear")

@@ -343,7 +343,14 @@ func readRootFile(root, relative string, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	defer file.Close()
-	return io.ReadAll(io.LimitReader(file, limit+1))
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("file %q exceeds %d-byte limit", relative, limit)
+	}
+	return data, nil
 }
 
 func Resolve(snapshots []SkillSnapshot, availableTools map[string]bool) (map[string]SkillSnapshot, error) {

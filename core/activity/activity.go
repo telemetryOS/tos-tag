@@ -266,8 +266,9 @@ func singleLine(value string) string {
 
 func bounded(value string, maximum int) string {
 	value = strings.TrimSpace(value)
-	if len(value) <= maximum {
+	runes := []rune(value)
+	if len(runes) <= maximum {
 		return value
 	}
-	return strings.TrimSpace(value[:maximum-1]) + "…"
+	return strings.TrimSpace(string(runes[:maximum-1])) + "…"
 }

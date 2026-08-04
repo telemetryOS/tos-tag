@@ -57,6 +57,42 @@ func TestWorkerCodexReportsProvisionStageWithoutExposingCause(t *testing.T) {
 	}
 }
 
+func TestCodexWorkerSessionStopUnblocksFullEventBuffer(t *testing.T) {
+	session := &codexWorkerSession{events: make(chan Event, 1), errs: make(chan error, 1), done: make(chan struct{})}
+	session.events <- Event{ID: "already-buffered"}
+	finished := make(chan struct{})
+	go func() {
+		session.emit(Event{ID: "blocked-producer"})
+		close(finished)
+	}()
+	select {
+	case <-finished:
+		t.Fatal("producer did not block on the full event buffer")
+	case <-time.After(20 * time.Millisecond):
+	}
+	session.stop()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("closing the session did not unblock the event producer")
+	}
+}
+
+func TestCodexWorkerSessionCompleteDoesNotBlockOnFullEventBuffer(t *testing.T) {
+	session := &codexWorkerSession{events: make(chan Event, 1), errs: make(chan error, 1), done: make(chan struct{})}
+	session.events <- Event{ID: "already-buffered"}
+	finished := make(chan struct{})
+	go func() {
+		session.complete()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("session completion blocked on the full event buffer")
+	}
+}
+
 type scriptedCodexManager struct {
 	mu         sync.Mutex
 	spec       workers.Spec
@@ -106,7 +142,7 @@ func (m *scriptedCodexManager) serve(input io.Reader, output io.Writer) {
 			_ = encoder.Encode(map[string]any{"id": id, "result": map[string]any{"turn": map[string]any{"id": "turn-1", "status": "inProgress", "items": []any{}}}})
 			_ = encoder.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": "thread-1", "turnId": "turn-1", "completedAtMs": 1, "item": map[string]any{"id": "web-1", "type": "webSearch", "query": "current documentation", "action": map[string]any{"type": "search", "query": "current documentation"}}}})
 			_ = encoder.Encode(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": "thread-1", "turnId": "turn-1", "completedAtMs": 1, "item": map[string]any{"id": "item-1", "type": "agentMessage", "phase": "final_answer", "text": `{"segments":[{"kind":"mrkdwn_text","text":"hello"}]}`}}})
-			_ = encoder.Encode(map[string]any{"method": "thread/tokenUsage/updated", "params": map[string]any{"threadId": "thread-1", "turnId": "turn-1", "tokenUsage": map[string]any{"last": map[string]any{"inputTokens": 21_000, "outputTokens": 1_200, "cachedInputTokens": 8_000, "reasoningOutputTokens": 600, "totalTokens": 22_200}, "total": map[string]any{"inputTokens": 21_000, "outputTokens": 1_200, "cachedInputTokens": 8_000, "reasoningOutputTokens": 600, "totalTokens": 22_200}}}})
+			_ = encoder.Encode(map[string]any{"method": "thread/tokenUsage/updated", "params": map[string]any{"threadId": "thread-1", "turnId": "turn-1", "tokenUsage": map[string]any{"last": map[string]any{"inputTokens": 2_000, "outputTokens": 200, "cachedInputTokens": 800, "reasoningOutputTokens": 60, "totalTokens": 2_200}, "total": map[string]any{"inputTokens": 21_000, "outputTokens": 1_200, "cachedInputTokens": 8_000, "reasoningOutputTokens": 600, "totalTokens": 22_200}}}})
 			_ = encoder.Encode(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "thread-1", "turn": map[string]any{"id": "turn-1", "status": "completed", "items": []any{}}}})
 		case "turn/interrupt":
 			_ = encoder.Encode(map[string]any{"id": id, "result": map[string]any{}})
@@ -211,6 +247,41 @@ func TestWorkerCodexUsesEphemeralReadOnlyAppServerTurnWithLiveWebSearch(t *testi
 	}
 	if manager.turn["outputSchema"] == nil {
 		t.Fatal("turn did not constrain the final Slack output schema")
+	}
+}
+
+func TestWorkerCodexTerminatesProvisionedSessionOnPromptValidationFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		prompt Prompt
+	}{
+		{name: "unsupported provider", prompt: Prompt{Model: "anthropic/claude", RequestID: "request-1"}},
+		{name: "missing request id", prompt: Prompt{Model: "openai/gpt-5.6-luna"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := &scriptedCodexManager{}
+			worker, err := NewWorkerCodex(WorkerCodexOptions{Manager: manager, Command: "codex", CodexHome: "/safe/codex", Timeout: time.Minute})
+			if err != nil {
+				t.Fatal(err)
+			}
+			session, err := worker.CreateSession(context.Background(), "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := worker.Prompt(context.Background(), session.ID, test.prompt); err == nil {
+				t.Fatal("expected prompt validation error")
+			}
+			if _, err := worker.lookup(session.ID); !errors.Is(err, ErrSessionNotFound) {
+				t.Fatalf("invalid prompt left session registered: %v", err)
+			}
+			manager.mu.Lock()
+			terminated := manager.terminated
+			manager.mu.Unlock()
+			if !terminated {
+				t.Fatal("invalid prompt left worker running")
+			}
+		})
 	}
 }
 

@@ -5,13 +5,65 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/RobertWHurst/blackbox"
 
+	"github.com/telemetryos/tos-tag/core/audit"
 	"github.com/telemetryos/tos-tag/core/classifier"
 	"github.com/telemetryos/tos-tag/core/config"
+	"github.com/telemetryos/tos-tag/core/orgconfig"
+	"github.com/telemetryos/tos-tag/core/slack"
 	"github.com/telemetryos/tos-tag/types"
 )
+
+func TestModeChangeAuditHasRetentionAndDeterministicIdempotency(t *testing.T) {
+	appender, err := audit.NewMemoryAppender([]byte("01234567890123456789012345678901"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := slack.ModeChangeRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "channel", UserID: "operator", Mode: "proactive"}
+	saved := orgconfig.ChannelPolicy{Version: 7, ParticipationMode: types.ModeProactive}
+	if err := appendModeChangeAudit(context.Background(), appender, request, saved, "assist"); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendModeChangeAudit(context.Background(), appender, request, saved, "assist"); err != nil {
+		t.Fatal(err)
+	}
+	receipts := appender.List("org")
+	if len(receipts) != 1 || receipts[0].RetentionEpoch == "" || receipts[0].IdempotencyKey != "channel-mode/channel/7" || receipts[0].Type != "channel_policy.mode_command" {
+		t.Fatalf("mode-change receipts = %#v", receipts)
+	}
+}
+
+func TestBackgroundScopeAuthorizationUsesSharedParticipationMembershipAndOutputPolicy(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	policy := orgconfig.ChannelPolicy{
+		Enrolled: true, ParticipationMode: types.ModeAssist,
+		ParticipationManagedByMembership: true, BotMembershipKnown: true, BotIsMember: true,
+		MembershipRefreshedAt: now,
+	}
+	if !authorizedBackgroundScope(policy, now, true) {
+		t.Fatal("valid background scope was denied")
+	}
+	policy.ParticipationMode = types.ModeObserve
+	if authorizedBackgroundScope(policy, now, true) {
+		t.Fatal("observe-only scope admitted background work")
+	}
+	policy.ParticipationMode = types.ModeAssist
+	policy.BotIsMember = false
+	if authorizedBackgroundScope(policy, now, true) {
+		t.Fatal("membership-managed non-member scope admitted background work")
+	}
+	policy.BotIsMember = true
+	if authorizedBackgroundScope(policy, now, false) {
+		t.Fatal("output-disallowed scope admitted background work")
+	}
+	policy.MembershipRefreshedAt = now.Add(-membershipPolicyFreshness)
+	if authorizedFreshScope(policy, now) {
+		t.Fatal("stale membership scope was authorized")
+	}
+}
 
 type failingClassifier struct{}
 
@@ -31,7 +83,7 @@ func TestLoggedClassifierUsesConservativeDeterministicFallback(t *testing.T) {
 }
 
 func TestDefaultResponseProfilesExposeLunaLowMediumAndSolMedium(t *testing.T) {
-	profiles := defaultResponseProfiles(config.DefaultConfiguration.Models)
+	profiles := DefaultResponseProfiles(config.DefaultConfiguration.Models)
 	if len(profiles) != 3 {
 		t.Fatalf("profile count = %d", len(profiles))
 	}
@@ -113,6 +165,7 @@ func TestLiveSlackObjectGraphConstructionDoesNotConnect(t *testing.T) {
 	cfg.Slack.TeamID = "team"
 	cfg.Slack.AppLevelToken = "xapp-test"
 	cfg.Slack.BotUserOAuthToken = "xoxb-test"
+	cfg.Slack.BotUserID = "U-tag"
 	if _, err := New(&cfg, nil); err != nil {
 		t.Fatal(err)
 	}

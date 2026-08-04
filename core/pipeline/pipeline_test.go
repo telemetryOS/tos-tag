@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/RobertWHurst/blackbox"
 
@@ -205,6 +206,40 @@ func (*contextFailureHarness) Permission(context.Context, string, harness.Permis
 }
 func (*contextFailureHarness) Abort(context.Context, string) error { return nil }
 
+type lifecycleHarness struct {
+	createCalls int
+	abortCalls  int
+	promptErr   error
+}
+
+func (*lifecycleHarness) Health(context.Context) error { return nil }
+func (h *lifecycleHarness) CreateSession(context.Context, string) (harness.Session, error) {
+	h.createCalls++
+	return harness.Session{ID: "lifecycle-session", CreatedAt: time.Now().UTC()}, nil
+}
+func (h *lifecycleHarness) Prompt(context.Context, string, harness.Prompt) error {
+	return h.promptErr
+}
+func (*lifecycleHarness) Events(context.Context, string) (<-chan harness.Event, <-chan error) {
+	return make(chan harness.Event), make(chan error)
+}
+func (*lifecycleHarness) Permission(context.Context, string, harness.PermissionDecision) error {
+	return nil
+}
+func (h *lifecycleHarness) Abort(context.Context, string) error {
+	h.abortCalls++
+	return nil
+}
+
+type failingGetQueue struct {
+	jobs.Queue
+	err error
+}
+
+func (q failingGetQueue) Get(context.Context, types.JobID) (jobs.Job, error) {
+	return jobs.Job{}, q.err
+}
+
 type recordingRequeueQueue struct {
 	jobs.Queue
 	contextErr error
@@ -213,6 +248,53 @@ type recordingRequeueQueue struct {
 func (q *recordingRequeueQueue) Requeue(ctx context.Context, id types.JobID, token, reason string, delay time.Duration) (jobs.Job, error) {
 	q.contextErr = ctx.Err()
 	return q.Queue.Requeue(ctx, id, token, reason, delay)
+}
+
+func TestRunHarnessTreatsTransientJobReadAsRetryable(t *testing.T) {
+	cfg := config.DefaultConfiguration
+	cfg.Jobs.Lease = 30 * time.Millisecond
+	h := &lifecycleHarness{}
+	transient := errors.New("temporary Mongo read failure")
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Harness: h, Jobs: failingGetQueue{err: transient}}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := p.runHarness(ctx, jobs.Job{ID: "job-transient-read", Input: "test", ExpiresAt: time.Now().Add(time.Minute)})
+	if err == nil || !errors.Is(err, transient) {
+		t.Fatalf("expected retryable read error, got %v", err)
+	}
+	if errors.Is(err, errExecutionRevoked) {
+		t.Fatalf("transient read was misclassified as revocation: %v", err)
+	}
+	if h.abortCalls == 0 {
+		t.Fatal("harness session was not aborted after heartbeat read failure")
+	}
+}
+
+func TestRunHarnessValidatesApprovalBeforeProvisioning(t *testing.T) {
+	cfg := config.DefaultConfiguration
+	h := &lifecycleHarness{}
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Harness: h}}
+	_, err := p.runHarness(context.Background(), jobs.Job{ID: "job-invalid-approval", ApprovedActionHash: "hash", ExpiresAt: time.Now().Add(time.Minute)})
+	if err == nil {
+		t.Fatal("expected invalid approval error")
+	}
+	if h.createCalls != 0 || h.abortCalls != 0 {
+		t.Fatalf("worker provisioned before approval validation: creates=%d aborts=%d", h.createCalls, h.abortCalls)
+	}
+}
+
+func TestRunHarnessAbortsSessionWhenPromptFails(t *testing.T) {
+	cfg := config.DefaultConfiguration
+	promptErr := errors.New("prompt failed")
+	h := &lifecycleHarness{promptErr: promptErr}
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Harness: h}}
+	_, err := p.runHarness(context.Background(), jobs.Job{ID: "job-prompt-failure", Input: "test", ExpiresAt: time.Now().Add(time.Minute)})
+	if !errors.Is(err, promptErr) {
+		t.Fatalf("expected prompt error, got %v", err)
+	}
+	if h.createCalls != 1 || h.abortCalls != 1 {
+		t.Fatalf("unexpected lifecycle calls: creates=%d aborts=%d", h.createCalls, h.abortCalls)
+	}
 }
 
 func (f classifierFunc) Decide(ctx context.Context, target classifier.Target, pack types.ContextPackRevision) (types.ClassificationDecision, error) {
@@ -424,6 +506,26 @@ func TestClassifierFloodProtectionDropsBeforeProviderOrAgent(t *testing.T) {
 	}
 	if len(system.transport.Requests()) != 0 || len(system.transport.ReactionRequests()) != 0 {
 		t.Fatalf("flooded messages produced Slack output: requests=%#v reactions=%#v", system.transport.Requests(), system.transport.ReactionRequests())
+	}
+}
+
+func TestContainsIncidentUsesTokenBoundaries(t *testing.T) {
+	for _, text := range []string{"production incident", "API outage", "the API is down", "DOWN: database"} {
+		if !containsIncident(text) {
+			t.Fatalf("incident signal %q was not recognized", text)
+		}
+	}
+	for _, text := range []string{"download the file", "render markdown", "planned shutdown", "downstream service", "showdown"} {
+		if containsIncident(text) {
+			t.Fatalf("ordinary substring %q was treated as an incident", text)
+		}
+	}
+}
+
+func TestBoundedActivityTextPreservesUTF8(t *testing.T) {
+	got := boundedActivityText("ab🙂cd", 4)
+	if !utf8.ValidString(got) || got != "ab🙂…" {
+		t.Fatalf("bounded activity text = %q", got)
 	}
 }
 
@@ -842,6 +944,49 @@ func TestReconcileJobsReleasesExpiredWorkerAdmission(t *testing.T) {
 	pipe.reconcileJobs(context.Background())
 	if len(admissions.completed) != 1 || admissions.completed[0] != "admit-test" {
 		t.Fatalf("completed admissions = %v", admissions.completed)
+	}
+}
+
+func TestReconcileJobsRestoresMissingFinalDelivery(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := config.DefaultConfiguration
+	cfg.Jobs.MaxAttempts = 3
+	queue := jobs.NewMemoryQueue(func() time.Time { return now })
+	deliveryQueue := deliveries.NewMemoryQueue(func() time.Time { return now })
+	job, _, err := queue.Enqueue(context.Background(), jobs.Spec{
+		OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "channel-test", RootThreadTS: "100.1",
+		SessionID: "session-test", Generation: 1, IdempotencyKey: "message/final-reconcile", Kind: "agent_response",
+		Input: "test", MaxAttempts: 1, ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = queue.Claim(context.Background(), "worker-test", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = queue.Transition(context.Background(), job.ID, job.Lease.Token, jobs.StateRunning, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: "durable result"}}}
+	if _, err = queue.Transition(context.Background(), job.ID, job.Lease.Token, jobs.StateSucceeded, func(current *jobs.Job) { current.Result = result }); err != nil {
+		t.Fatal(err)
+	}
+
+	pipe := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Jobs: queue, Deliveries: deliveryQueue}}
+	pipe.reconcileJobs(context.Background())
+	pipe.reconcileJobs(context.Background())
+	records, err := deliveryQueue.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].JobID != job.ID || records[0].IdempotencyKey != string(job.ID)+"/final" || records[0].Result.Segments[0].Text != "durable result" {
+		t.Fatalf("reconciled final delivery = %#v", records)
+	}
+	checkpointed, err := queue.Get(context.Background(), job.ID)
+	if err != nil || !checkpointed.FinalDeliveryEnqueued {
+		t.Fatalf("final delivery checkpoint = %#v err=%v", checkpointed, err)
 	}
 }
 
@@ -1507,6 +1652,39 @@ func TestOfflineCatchUpQueuesReplyOnlyForExistingTagThread(t *testing.T) {
 	}
 	if claimed.MessageTS != reply.MessageTS || claimed.RootThreadTS != "root.001" {
 		t.Fatalf("recovered active-thread reply = %#v", claimed)
+	}
+}
+
+func TestOfflineCatchUpQueuesTopLevelDirectMessageWithoutMention(t *testing.T) {
+	cfg := contextSyncConfig()
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
+	_, err := scopes.PutChannel(context.Background(), orgconfig.ChannelPolicy{
+		OrganizationID: "org-test", TeamID: "team-test", ChannelID: "D-direct", Enrolled: true,
+		ParticipationMode: types.ModeAssist, Restricted: true, MaxResponsesPerHour: 6, MaxConcurrentJobs: 2,
+		MembershipRevision: "direct/v1", MembershipRefreshedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	p := &Pipeline{deps: Dependencies{
+		Config: &cfg, Logger: blackbox.New(), Scopes: scopes, Observations: observations,
+		Sessions: sessions.NewMemoryStore(nil),
+	}}
+	direct := envelope("message/team-test/D-direct/500.004", "D-direct", "500.004", "can you check the overnight run?")
+	direct.ChannelKind = types.SlackChannelKindDirectMessage
+	direct.Restricted = true
+	if err := p.RecoverContextEnvelope(context.Background(), direct); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := observations.ClaimPending(context.Background(), "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.MessageTS != direct.MessageTS || claimed.IsMention || !claimed.Restricted {
+		t.Fatalf("recovered top-level direct message = %#v", claimed)
 	}
 }
 

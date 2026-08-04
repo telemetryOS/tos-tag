@@ -85,36 +85,54 @@ func (s *MongoStore) PutGenerated(ctx context.Context, record Record) (Record, b
 		return Record{}, false, err
 	}
 	record.Text = text
-	existing, err := s.FindScope(ctx, record.OrganizationID, record.ScopeKey)
-	if err == nil {
-		if existing.SourceHash == record.SourceHash || (existing.Status == StatusActive && (existing.Pinned || existing.Origin == "operator")) {
+	for attempt := 0; attempt < 8; attempt++ {
+		existing, findErr := s.FindScope(ctx, record.OrganizationID, record.ScopeKey)
+		if findErr != nil && !errors.Is(findErr, ErrNotFound) {
+			return Record{}, false, findErr
+		}
+		if findErr == nil && (existing.SourceHash == record.SourceHash || (existing.Status == StatusActive && (existing.Pinned || existing.Origin == "operator"))) {
 			return existing, false, nil
 		}
-	} else if !errors.Is(err, ErrNotFound) {
-		return Record{}, false, err
+
+		now := s.now().UTC()
+		candidate := record
+		candidate.UpdatedAt = now
+		candidate.Origin = "model"
+		if errors.Is(findErr, ErrNotFound) {
+			if candidate.ID == "" {
+				candidate.ID = types.NewID("mem")
+			}
+			if candidate.CreatedAt.IsZero() {
+				candidate.CreatedAt = now
+			}
+			candidate.Revision = 1
+			if _, insertErr := s.db.Collection(models.CollectionSummaries).InsertOne(ctx, candidate); insertErr == nil {
+				return candidate, true, nil
+			} else if mongo.IsDuplicateKeyError(insertErr) {
+				continue
+			} else {
+				return Record{}, false, insertErr
+			}
+		}
+
+		candidate.ID = existing.ID
+		candidate.CreatedAt = existing.CreatedAt
+		candidate.Revision = existing.Revision + 1
+		var saved Record
+		updateErr := s.db.Collection(models.CollectionSummaries).FindOneAndUpdate(ctx,
+			bson.M{"organization_id": record.OrganizationID, "scope_key": record.ScopeKey, "revision": existing.Revision},
+			bson.M{"$set": candidate},
+			options.FindOneAndUpdate().SetReturnDocument(options.After),
+		).Decode(&saved)
+		if errors.Is(updateErr, mongo.ErrNoDocuments) {
+			continue
+		}
+		if updateErr != nil {
+			return Record{}, false, updateErr
+		}
+		return saved, true, nil
 	}
-	now := s.now().UTC()
-	if record.ID == "" {
-		record.ID = types.NewID("mem")
-	}
-	if record.CreatedAt.IsZero() {
-		record.CreatedAt = now
-	}
-	record.UpdatedAt = now
-	record.Origin = "model"
-	record.Revision = 1
-	if !existing.CreatedAt.IsZero() {
-		record.ID = existing.ID
-		record.CreatedAt = existing.CreatedAt
-		record.Revision = existing.Revision + 1
-	}
-	update := bson.M{"$set": record}
-	var saved Record
-	err = s.db.Collection(models.CollectionSummaries).FindOneAndUpdate(ctx, bson.M{"organization_id": record.OrganizationID, "scope_key": record.ScopeKey}, update, options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)).Decode(&saved)
-	if err != nil {
-		return Record{}, false, err
-	}
-	return saved, true, nil
+	return Record{}, false, errors.New("generated memory update conflicted repeatedly")
 }
 
 func (s *MongoStore) Correct(ctx context.Context, organizationID, recordID, text, actorID string) (Record, error) {

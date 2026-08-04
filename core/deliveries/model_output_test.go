@@ -28,6 +28,26 @@ func TestParseModelOutputSupportsCanonicalLegacyAndPlainText(t *testing.T) {
 	}
 }
 
+func TestParseModelOutputPreservesPlainTextCodeFences(t *testing.T) {
+	input := "Run this:\n```go\nfmt.Println(\"ready\")\n```"
+	result, err := ParseModelOutput(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Segments) != 1 || result.Segments[0].Text != input {
+		t.Fatalf("plain-text fences changed: %#v", result.Segments)
+	}
+	if _, err := NewRenderer().Render(result); err != nil {
+		t.Fatalf("preserved fenced response did not render: %v", err)
+	}
+
+	fencedJSON := "```json\n{\"segments\":[{\"kind\":\"mrkdwn_text\",\"text\":\"READY\"}]}\n```"
+	result, err = ParseModelOutput(fencedJSON)
+	if err != nil || len(result.Segments) != 1 || result.Segments[0].Text != "READY" {
+		t.Fatalf("fenced JSON was not decoded: result=%#v err=%v", result, err)
+	}
+}
+
 func TestParseModelOutputNormalizesGitHubBoldWithoutChangingCode(t *testing.T) {
 	result, err := ParseModelOutput("{\"segments\":[{\"kind\":\"mrkdwn_text\",\"text\":\"**Healthy** with `value ** 2`\\n\\n```python\\nvalue ** 3\\n```\"}]}")
 	if err != nil {

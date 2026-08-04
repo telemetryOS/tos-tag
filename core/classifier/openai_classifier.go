@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/telemetryos/tos-tag/core/modelrouter"
 	"github.com/telemetryos/tos-tag/types"
@@ -208,6 +209,7 @@ func (c *OpenAIClassifier) Decide(ctx context.Context, target Target, pack types
 	if err := decoder.Decode(&decision); err != nil {
 		return types.ClassificationDecision{}, classifierError(decodeErrorStage(raw, err), "invalid_structured_output", err)
 	}
+	providerReaction := decision.Reaction
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
@@ -229,6 +231,7 @@ func (c *OpenAIClassifier) Decide(ctx context.Context, target Target, pack types
 	decision = withAmbientPolicyCorrections(decision, target, pack, profiles)
 	decision = withCanonicalAgentProfile(decision, profiles)
 	decision = withBackgroundProfileFloor(decision, target, profiles)
+	decision = withPolicyReactionAllowlist(decision, providerReaction, c.reactionEmojis)
 	decision = withDefaultReaction(decision, c.reactionEmojis)
 	decision = withConsistentAuditReasonCodes(decision, target)
 	if err := validateRecommendation(decision, profiles, c.reactionEmojis); err != nil {
@@ -724,6 +727,15 @@ func withDefaultReaction(decision types.ClassificationDecision, reactions []stri
 	return decision
 }
 
+func withPolicyReactionAllowlist(decision types.ClassificationDecision, providerReaction string, reactions []string) types.ClassificationDecision {
+	if decision.Outcome == types.OutcomeSilent || decision.Reaction == "" || decision.Reaction == providerReaction || slices.Contains(reactions, decision.Reaction) {
+		return decision
+	}
+	decision.Reaction = ""
+	decision.ReasonCodes = append(decision.ReasonCodes, "policy.reaction_allowlist_fallback")
+	return decision
+}
+
 const sourceWriteRedirectReply = "TelemetryOS source is read-only here. Please file broken existing behavior as a Linear bug and new or changed behavior as a Linear feature, or ask me to create the issue for you."
 
 func withSourceWritePolicyCorrections(decision types.ClassificationDecision, target Target) types.ClassificationDecision {
@@ -1008,16 +1020,36 @@ func withProductKnowledgePolicyCorrections(decision types.ClassificationDecision
 
 func isClearlyExternalPublicSourceQuestion(text string) bool {
 	lower := strings.ToLower(strings.TrimSpace(text))
-	if !containsAny(lower, "openai", "open ai") {
-		return false
-	}
 	if containsAny(lower,
 		"telemetryos", "telemetry os", "premium trial", "premium plan", "enterprise plan", "billing plan",
 		"subscription plan", "subscription tier", "node pro", "node mini", "tos node", "device tier", "product tier",
 	) {
 		return false
 	}
-	return containsAny(lower, "pricing", "price", "cost", "token rate", "per million", "official", "website", "web page", "page")
+	tokens := strings.FieldsFunc(lower, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '.' && r != '-'
+	})
+	commercial := map[string]bool{"pricing": true, "price": true, "prices": true, "cost": true, "costs": true, "billing": true, "rate": true, "rates": true}
+	generic := map[string]bool{
+		"a": true, "about": true, "an": true, "and": true, "are": true, "at": true, "can": true, "current": true, "do": true, "does": true,
+		"for": true, "from": true, "how": true, "i": true, "in": true, "is": true, "latest": true, "look": true, "me": true, "of": true,
+		"official": true, "on": true, "our": true, "page": true, "pages": true, "plan": true, "plans": true, "pricing": true, "price": true,
+		"prices": true, "cost": true, "costs": true, "billing": true, "rate": true, "rates": true, "option": true, "options": true, "product": true, "provider": true,
+		"public": true, "site": true, "subscription": true, "the": true, "their": true, "this": true, "token": true, "tokens": true,
+		"vendor": true, "web": true, "website": true, "what": true, "where": true, "which": true, "with": true, "your": true,
+	}
+	for index, token := range tokens {
+		if !commercial[token] {
+			continue
+		}
+		start, end := max(0, index-4), min(len(tokens), index+5)
+		for _, candidate := range tokens[start:end] {
+			if !generic[candidate] && len(candidate) > 1 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isBriefProductDefinitionQuestion(text string) bool {
@@ -1091,65 +1123,18 @@ func requestsCrossDestinationPrivateDisclosure(text string) bool {
 
 func withAddressedSocialPolicyCorrections(decision types.ClassificationDecision, target Target) types.ClassificationDecision {
 	if target.ActiveThread && isDirectSocialCandidate(target.Envelope.Text) {
-		if decision.DirectReply != "" && (decision.Outcome == types.OutcomeReplyInChannel || decision.Outcome == types.OutcomeReplyInThread) {
-			decision.Outcome = types.OutcomeReplyInThread
-			decision.RequiresFullAgent = false
-			decision.AgentModelProfile = ""
-			decision.AgentModelStrength = "none"
-			decision.AgentReasoningEffort = ""
-			decision.Reaction = "white_check_mark"
-			decision.ReasonCodes = append(decision.ReasonCodes, "policy.thread_social_reply")
-			return decision
-		}
-		return types.ClassificationDecision{
-			Outcome:            types.OutcomeReplyInThread,
-			Confidence:         max(decision.Confidence, 0.99),
-			ReasonCodes:        append(decision.ReasonCodes, "policy.thread_social_reply"),
-			ResponseIntent:     "brief social acknowledgement in the active thread",
-			DirectReply:        "Happy to help!",
-			DisclosureClass:    types.DisclosureDestinationSafe,
-			Reaction:           "white_check_mark",
-			AgentModelStrength: "none",
-		}
+		fallback := directSocialFallback(target.Envelope.Text, true)
+		fallback.Confidence = max(decision.Confidence, 0.99)
+		fallback.ReasonCodes = append(decision.ReasonCodes, "policy.thread_social_reply", "policy.social_direct_reply_fallback")
+		return fallback
 	}
 	if target.ActiveThread || target.Envelope.IsMention || !explicitlyAddressesTag(target.Envelope.Text) || !isDirectSocialCandidate(target.Envelope.Text) {
 		return decision
 	}
-	if decision.DirectReply != "" && (decision.Outcome == types.OutcomeReplyInChannel || decision.Outcome == types.OutcomeReplyInThread) {
-		wantReaction := "white_check_mark"
-		if containsAny(strings.ToLower(target.Envelope.Text), "morning", "afternoon", "evening", "hello", "hi ", "hey ") {
-			wantReaction = "speech_balloon"
-		}
-		if decision.Reaction != wantReaction {
-			decision.Reaction = wantReaction
-			decision.ReasonCodes = append(decision.ReasonCodes, "policy.addressed_social_reaction")
-		}
-		return decision
-	}
-	reply := "Hey!"
-	lower := strings.ToLower(target.Envelope.Text)
-	reaction := "speech_balloon"
-	switch {
-	case containsAny(lower, "thanks", "thank you", "nice work", "great work", "good work", "well done"):
-		reply = "Thanks!"
-		reaction = "white_check_mark"
-	case strings.Contains(lower, "morning"):
-		reply = "Morning!"
-	case strings.Contains(lower, "afternoon"):
-		reply = "Good afternoon!"
-	case strings.Contains(lower, "evening"):
-		reply = "Good evening!"
-	}
-	return types.ClassificationDecision{
-		Outcome:            types.OutcomeReplyInChannel,
-		Confidence:         max(decision.Confidence, 0.99),
-		ReasonCodes:        append(decision.ReasonCodes, "policy.addressed_social_reply"),
-		ResponseIntent:     "brief social acknowledgement",
-		DirectReply:        reply,
-		DisclosureClass:    types.DisclosureDestinationSafe,
-		Reaction:           reaction,
-		AgentModelStrength: "none",
-	}
+	fallback := directSocialFallback(target.Envelope.Text, false)
+	fallback.Confidence = max(decision.Confidence, 0.99)
+	fallback.ReasonCodes = append(decision.ReasonCodes, "policy.addressed_social_reply", "policy.social_direct_reply_fallback")
+	return fallback
 }
 
 func explicitlyAddressesTag(text string) bool {

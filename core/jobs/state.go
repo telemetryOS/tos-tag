@@ -88,6 +88,7 @@ type Job struct {
 	ApprovalID             string              `json:"approval_id,omitempty"`
 	ApprovedActionHash     string              `json:"approved_action_hash,omitempty"`
 	ProgressMessageTS      string              `json:"progress_message_ts,omitempty"`
+	FinalDeliveryEnqueued  bool                `json:"final_delivery_enqueued,omitempty"`
 	AvailableAt            time.Time           `json:"available_at"`
 	CreatedAt              time.Time           `json:"created_at"`
 	UpdatedAt              time.Time           `json:"updated_at"`
@@ -103,14 +104,18 @@ type Queue interface {
 	Requeue(context.Context, types.JobID, string, string, time.Duration) (Job, error)
 	ReleaseRetryWait(context.Context, types.JobID) (Job, error)
 	Get(context.Context, types.JobID) (Job, error)
+	Count(context.Context) (int, error)
 	List(context.Context) ([]Job, error)
+	ListReconciliation(context.Context, time.Time) ([]Job, error)
 	ListOrganization(context.Context, string) ([]Job, error)
+	MarkFinalDeliveryEnqueued(context.Context, types.JobID) error
 	Cancel(context.Context, types.JobID, string) (Job, error)
-	Interrupt(context.Context, types.JobID, string) (Job, error)
 	MarkCompletedUndelivered(context.Context, types.JobID, string) (Job, error)
 	SuspendForApproval(context.Context, types.JobID, string, string) (Job, error)
 	ResumeFromApproval(context.Context, types.JobID, string, string) (Job, error)
 }
+
+const organizationListLimit = 500
 
 func CanTransition(from, to State) bool {
 	allowed := map[State]map[State]bool{

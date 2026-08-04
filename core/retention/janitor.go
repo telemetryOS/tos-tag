@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/telemetryos/tos-tag/core/database"
 	"github.com/telemetryos/tos-tag/models"
@@ -105,7 +106,7 @@ func (j *Janitor) Sweep(ctx context.Context) (Status, error) {
 }
 
 func (j *Janitor) sweep(ctx context.Context, now time.Time) (int64, int64, error) {
-	cursor, err := j.db.Collection(models.CollectionDerivations).Find(ctx, bson.M{"expires_at": bson.M{"$lte": now}})
+	cursor, err := j.db.Collection(models.CollectionDerivations).Find(ctx, bson.M{"expires_at": bson.M{"$lte": now}}, options.Find().SetSort(bson.D{{Key: "expires_at", Value: 1}}).SetLimit(1000))
 	if err != nil {
 		return 0, 0, err
 	}
@@ -115,19 +116,27 @@ func (j *Janitor) sweep(ctx context.Context, now time.Time) (int64, int64, error
 	if err := cursor.All(ctx, &links); err != nil {
 		return 0, 0, err
 	}
-	var derived int64
+	derivedIDs := make(map[string][]string)
+	linkIDs := make([]bson.ObjectID, 0, len(links))
 	for _, link := range links {
+		linkIDs = append(linkIDs, link.ID)
 		if !allowed[link.DerivedCollection] {
 			continue
 		}
-		result, err := j.db.Collection(link.DerivedCollection).DeleteOne(ctx, bson.M{"public_id": link.DerivedID})
+		derivedIDs[link.DerivedCollection] = append(derivedIDs[link.DerivedCollection], link.DerivedID)
+	}
+	var derived int64
+	for collection, ids := range derivedIDs {
+		result, err := j.db.Collection(collection).DeleteMany(ctx, bson.M{"public_id": bson.M{"$in": ids}})
 		if err != nil {
 			return derived, 0, err
 		}
 		derived += result.DeletedCount
 	}
-	if _, err := j.db.Collection(models.CollectionDerivations).DeleteMany(ctx, bson.M{"expires_at": bson.M{"$lte": now}}); err != nil {
-		return derived, 0, err
+	if len(linkIDs) > 0 {
+		if _, err := j.db.Collection(models.CollectionDerivations).DeleteMany(ctx, bson.M{"_id": bson.M{"$in": linkIDs}}); err != nil {
+			return derived, 0, err
+		}
 	}
 	collections := []string{models.CollectionObservations, models.CollectionMessages, models.CollectionContextPacks, models.CollectionSituationFacts, models.CollectionRestrictedSignals, models.CollectionSummaries, models.CollectionJobs, models.CollectionDeliveries}
 	var sources int64

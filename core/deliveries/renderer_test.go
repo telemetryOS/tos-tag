@@ -294,6 +294,34 @@ func TestRendererPromotesFormattedTableCellsToRichText(t *testing.T) {
 	}
 }
 
+func TestRendererPreservesLiteralIdentifierPunctuationInTableCells(t *testing.T) {
+	result := types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentTable, Table: &types.SlackTable{
+		Columns: []types.SlackTableColumn{{Header: "Literal"}, {Header: "Code"}},
+		Rows: [][]types.SlackTableCell{{
+			{Type: "raw_text", Text: "user_id and channel_id"},
+			{Type: "raw_text", Text: "`user_id` and channel_id"},
+		}},
+	}}}}
+	payloads, err := NewRenderer().Render(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := payloads[0].Blocks[0]["rows"].([]any)[1].([]any)
+	literal := row[0].(map[string]any)
+	if literal["type"] != "raw_text" || literal["text"] != "user_id and channel_id" {
+		t.Fatalf("literal identifier cell was reinterpreted: %#v", literal)
+	}
+	encoded, err := json.Marshal(row[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"code":true`, `"text":"user_id"`, `channel_id`} {
+		if !strings.Contains(string(encoded), expected) {
+			t.Fatalf("code cell lost literal identifier content %s: %s", expected, encoded)
+		}
+	}
+}
+
 func TestRendererRejectsMentionsInsideRawTableCells(t *testing.T) {
 	_, err := NewRenderer().Render(types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentTable, Table: &types.SlackTable{
 		Columns: []types.SlackTableColumn{{Header: "Unsafe"}},
@@ -314,6 +342,8 @@ func TestRendererRejectsNonSlackFormattingAndBroadcasts(t *testing.T) {
 		"<!subteam^S12345> hello",
 		"```unterminated",
 		"<javascript:alert(1)|bad>",
+		"<file:///etc/hosts>",
+		"<slack://channel?id=C123>",
 	}
 	for _, input := range cases {
 		t.Run(input, func(t *testing.T) {

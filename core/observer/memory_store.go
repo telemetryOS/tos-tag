@@ -108,7 +108,10 @@ func (s *MemoryStore) ClaimPending(_ context.Context, owner string, lease time.D
 	var selected models.Observation
 	for key, observation := range s.observations {
 		eligible := observation.DecisionState == "pending" || (observation.DecisionState == "processing" && !observation.DecisionLeaseExpiresAt.After(now))
-		if !eligible || (!selected.CreatedAt.IsZero() && observation.OrganizationReceivedSeq >= selected.OrganizationReceivedSeq) {
+		if !eligible || !observation.ExpiresAt.After(now) {
+			continue
+		}
+		if !selected.CreatedAt.IsZero() && (observation.ReceivedAt.After(selected.ReceivedAt) || (observation.ReceivedAt.Equal(selected.ReceivedAt) && observation.OrganizationReceivedSeq >= selected.OrganizationReceivedSeq)) {
 			continue
 		}
 		selectedKey, selected = key, observation
@@ -169,15 +172,7 @@ func (s *MemoryStore) applyProjection(envelope types.SlackEnvelope, observation 
 			current.Deleted = false
 			current.Text = envelope.Text
 		}
-		if envelope.UserID != "" {
-			current.AuthorID = envelope.UserID
-		}
-		if envelope.BotID != "" {
-			current.BotID = envelope.BotID
-		}
-		if envelope.Subtype != "" {
-			current.Subtype = envelope.Subtype
-		}
+		current.Subtype = envelope.Subtype
 		current.Restricted = envelope.Restricted
 		s.messages[key] = current
 		return
@@ -294,7 +289,10 @@ func (s *MemoryStore) Channels(_ context.Context, organizationID string) ([]stri
 	return result, nil
 }
 
-func (s *MemoryStore) MarkOutput(_ context.Context, observationID, jobID, deliveryID string) (bool, error) {
+func (s *MemoryStore) ReserveOutput(_ context.Context, observationID, reservationID string) (bool, error) {
+	if observationID == "" || reservationID == "" {
+		return false, ErrInvalidEnvelope
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key, ok := s.byPublic[observationID]
@@ -302,15 +300,36 @@ func (s *MemoryStore) MarkOutput(_ context.Context, observationID, jobID, delive
 		return false, ErrMessageNotFound
 	}
 	observation := s.observations[key]
-	if observation.OutputProduced {
+	if observation.OutputProduced && observation.OutputReservationID != reservationID {
 		return false, nil
 	}
 	observation.OutputProduced = true
+	observation.OutputReservationID = reservationID
+	observation.Version++
+	s.observations[key] = observation
+	return true, nil
+}
+
+func (s *MemoryStore) FinalizeOutput(_ context.Context, observationID, reservationID, jobID, deliveryID string) error {
+	if observationID == "" || reservationID == "" || (jobID == "") == (deliveryID == "") {
+		return ErrInvalidEnvelope
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key, ok := s.byPublic[observationID]
+	if !ok {
+		return ErrMessageNotFound
+	}
+	observation := s.observations[key]
+	if !observation.OutputProduced || observation.OutputReservationID != reservationID {
+		return ErrNoPendingObservation
+	}
+	observation.OutputReservationID = ""
 	observation.OutputJobID = jobID
 	observation.OutputDeliveryID = deliveryID
 	observation.Version++
 	s.observations[key] = observation
-	return true, nil
+	return nil
 }
 
 func (s *MemoryStore) LateCandidates(_ context.Context, organizationID string, since, before time.Time, limit int) ([]models.Observation, error) {

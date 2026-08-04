@@ -224,8 +224,17 @@ func TestAmbientPolicyCorrectionsSurfaceAlignmentAndEnforceAdmittedPlacement(t *
 		t.Fatalf("addressed praise provider overreach was not collapsed to a direct reply: %#v", addressedPraiseOverreach)
 	}
 	threadPraise := withAddressedSocialPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeSilent, Confidence: .9, ReasonCodes: []string{"social"}, AgentModelStrength: "none"}, Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "Appreciate the clear matrix, Tag!"}})
-	if threadPraise.Outcome != types.OutcomeReplyInThread || threadPraise.DirectReply != "Happy to help!" || threadPraise.RequiresFullAgent || threadPraise.Reaction != "white_check_mark" {
+	if threadPraise.Outcome != types.OutcomeReplyInThread || threadPraise.DirectReply != "You're welcome!" || threadPraise.RequiresFullAgent || threadPraise.Reaction != "white_check_mark" {
 		t.Fatalf("active-thread praise remained silent: %#v", threadPraise)
+	}
+	threadGreeting := withAddressedSocialPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeSilent, Confidence: .8, AgentModelStrength: "none"}, Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "morning tag"}})
+	if threadGreeting.Outcome != types.OutcomeReplyInThread || threadGreeting.DirectReply != "Morning!" || threadGreeting.Reaction != "speech_balloon" {
+		t.Fatalf("active-thread greeting diverged from canonical social behavior: %#v", threadGreeting)
+	}
+	narrowReaction := withPolicyReactionAllowlist(types.ClassificationDecision{Outcome: types.OutcomeReplyInThread, Reaction: "warning", RequiresFullAgent: true}, "", []string{"eyes"})
+	narrowReaction = withDefaultReaction(narrowReaction, []string{"eyes"})
+	if narrowReaction.Reaction != "eyes" || !slices.Contains(narrowReaction.ReasonCodes, "policy.reaction_allowlist_fallback") {
+		t.Fatalf("non-allowlisted policy reaction was retained: %#v", narrowReaction)
 	}
 	staging := withAddressedSocialPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeSilent}, Target{Envelope: types.SlackEnvelope{Text: "Staging is stable."}})
 	if staging.Outcome != types.OutcomeSilent {
@@ -324,6 +333,21 @@ func TestAmbientPolicyCorrectionsSurfaceAlignmentAndEnforceAdmittedPlacement(t *
 	externalPricing := withProductKnowledgePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, Confidence: .99, ReasonCodes: []string{"public_source_retrieval_requested", "pricing_calculation", "named_model_pricing"}, TopicIDs: []string{"pricing"}, ResponseIntent: "retrieve the official OpenAI pricing page and calculate the requested amount", ProductRetrievalRequired: true, RequiresFullAgent: true, Reaction: "thinking_face", AgentModelProfile: "standard", AgentModelStrength: "standard", AgentReasoningEffort: "medium"}, Target{Envelope: types.SlackEnvelope{Text: "Take a look at the official OpenAI pricing page and tell me what 250,000 Luna input tokens would cost."}}, profiles)
 	if externalPricing.ProductRetrievalRequired || externalPricing.ResponseIntent != "retrieve the official OpenAI pricing page and calculate the requested amount" || externalPricing.Outcome != types.OutcomeReplyInChannel || !externalPricing.RequiresFullAgent || !slices.Contains(externalPricing.ReasonCodes, "policy.external_public_source") {
 		t.Fatalf("external OpenAI pricing request was misrouted as TelemetryOS product retrieval: %#v", externalPricing)
+	}
+	for _, message := range []string{
+		"Check the AWS pricing page for the current Lambda cost.",
+		"What does Stripe pricing say about billing rates?",
+		"Use Slack's official pricing page to compare the plans.",
+	} {
+		decision := withProductKnowledgePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, TopicIDs: []string{"pricing"}, ProductRetrievalRequired: true, RequiresFullAgent: true}, Target{Envelope: types.SlackEnvelope{Text: message}}, profiles)
+		if decision.ProductRetrievalRequired || !slices.Contains(decision.ReasonCodes, "policy.external_public_source") {
+			t.Fatalf("external vendor request %q was misrouted: %#v", message, decision)
+		}
+	}
+	for _, message := range []string{"What are our pricing options?", "How do TelemetryOS Premium and Enterprise pricing plans compare?"} {
+		if isClearlyExternalPublicSourceQuestion(message) {
+			t.Fatalf("TelemetryOS or unnamed pricing request was treated as external: %q", message)
+		}
 	}
 	unrelatedQuestion := withAmbientPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeSilent, Confidence: .95, ReasonCodes: []string{"ambient"}}, Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Text: "Does anyone know what changed in the API deploy?"}}, types.ContextPackRevision{}, profiles)
 	if unrelatedQuestion.Outcome != types.OutcomeSilent {

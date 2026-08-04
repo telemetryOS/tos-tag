@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	tagcore "github.com/telemetryos/tos-tag/core"
 	"github.com/telemetryos/tos-tag/core/classifier"
 	"github.com/telemetryos/tos-tag/core/config"
 	"github.com/telemetryos/tos-tag/core/modelrouter"
@@ -28,7 +29,7 @@ func RunLive(ctx context.Context, cfg config.Config) (Score, error) {
 		Timeout:         cfg.Classifier.Timeout,
 		MaxOutputTokens: cfg.Classifier.MaxOutputTokens,
 		ReactionEmojis:  cfg.Classifier.ReactionEmojis,
-		AgentProfiles:   evalProfileSource{snapshot: modelrouter.Snapshot{PolicyRevision: "live-eval/v1", DeploymentDefault: cfg.Models.DefaultProfile, Profiles: evalProfiles(cfg.Models)}},
+		AgentProfiles:   evalProfileSource{snapshot: modelrouter.Snapshot{PolicyRevision: "live-eval/v1", DeploymentDefault: cfg.Models.DefaultProfile, Profiles: tagcore.DefaultResponseProfiles(cfg.Models)}},
 	})
 	if err != nil {
 		return Score{}, err
@@ -263,18 +264,6 @@ func (r *recordingClassifier) observation() (types.ClassificationDecision, bool,
 type evalProfileSource struct{ snapshot modelrouter.Snapshot }
 
 func (s evalProfileSource) Snapshot() modelrouter.Snapshot { return s.snapshot }
-
-func evalProfiles(cfg config.ModelConfig) []types.ModelProfile {
-	profiles := make([]types.ModelProfile, 0, 3)
-	for _, candidate := range []struct{ id, model, variant, strength string }{
-		{cfg.FastProfileBase + "-low", cfg.FastModel, "low", "light"},
-		{cfg.FastProfileBase + "-medium", cfg.FastModel, "medium", "standard"},
-		{cfg.DefaultProfile, cfg.DefaultModel, cfg.DefaultVariant, "strong"},
-	} {
-		profiles = append(profiles, types.ModelProfile{ID: candidate.id, ProviderID: cfg.DefaultProvider, ModelID: candidate.model, Variant: candidate.variant, ProviderOptions: map[string]any{"strength": candidate.strength}, MaxInputTokens: 200000, MaxOutputTokens: 16000, Enabled: true})
-	}
-	return profiles
-}
 
 func containsOutcome(values []types.ClassificationOutcome, value types.ClassificationOutcome) bool {
 	for _, candidate := range values {

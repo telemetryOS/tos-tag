@@ -65,42 +65,62 @@ type codexWorkerSession struct {
 	turnID   string
 	events   chan Event
 	errs     chan error
+	done     chan struct{}
 	closed   bool
 }
 
 func (s *codexWorkerSession) emit(event Event) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return
 	}
-	s.events <- event
+	events, done := s.events, s.done
+	s.mu.Unlock()
+	select {
+	case events <- event:
+	case <-done:
+	}
 }
 
 func (s *codexWorkerSession) fail(err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return
-	}
-	if err != nil {
-		s.errs <- err
-	}
-	s.closed = true
-	close(s.events)
-	close(s.errs)
+	s.finish(nil, err)
 }
 
 func (s *codexWorkerSession) complete() {
+	idle := Event{ID: types.NewID("event"), Type: "session.idle", CreatedAt: time.Now().UTC()}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	idle.SessionID = s.threadID
+	s.mu.Unlock()
+	s.finish(&idle, nil)
+}
+
+func (s *codexWorkerSession) stop() {
+	s.finish(nil, nil)
+}
+
+func (s *codexWorkerSession) finish(terminalEvent *Event, terminalErr error) {
+	s.mu.Lock()
 	if s.closed {
+		s.mu.Unlock()
 		return
 	}
-	s.events <- Event{ID: types.NewID("event"), SessionID: s.threadID, Type: "session.idle", CreatedAt: time.Now().UTC()}
 	s.closed = true
-	close(s.events)
-	close(s.errs)
+	events, errs, done := s.events, s.errs, s.done
+	s.mu.Unlock()
+	if terminalEvent != nil {
+		select {
+		case events <- *terminalEvent:
+		default:
+		}
+	}
+	if terminalErr != nil {
+		select {
+		case errs <- terminalErr:
+		default:
+		}
+	}
+	close(done)
 }
 
 type WorkerCodex struct {
@@ -174,7 +194,7 @@ func (w *WorkerCodex) createSession(ctx context.Context, spec JobSessionSpec) (S
 	for _, skill := range w.skills {
 		allowedSkills[skill.Name] = struct{}{}
 	}
-	session := &codexWorkerSession{workspace: connection.Workspace, allowedSkills: allowedSkills, events: make(chan Event, 128), errs: make(chan error, 4), activity: w.activity, organizationID: spec.OrganizationID, jobID: jobID, attemptID: attemptID}
+	session := &codexWorkerSession{workspace: connection.Workspace, allowedSkills: allowedSkills, events: make(chan Event, 128), errs: make(chan error, 4), done: make(chan struct{}), activity: w.activity, organizationID: spec.OrganizationID, jobID: jobID, attemptID: attemptID}
 	client, err := newCodexAppServer(connection.Stdin, connection.Stdout, session.notification, func(callCtx context.Context, method string, params json.RawMessage) (any, error) {
 		return w.serverRequest(callCtx, session, method, params)
 	}, session.fail)
@@ -217,9 +237,11 @@ func (w *WorkerCodex) Prompt(ctx context.Context, sessionID string, prompt Promp
 	if !found {
 		model = prompt.Model
 	} else if provider != "openai" {
+		w.terminate(sessionID)
 		return errors.New("Codex App Server requires an OpenAI model profile")
 	}
 	if strings.TrimSpace(model) == "" || strings.TrimSpace(prompt.RequestID) == "" {
+		w.terminate(sessionID)
 		return errors.New("Codex prompt model and request ID are required")
 	}
 	dynamicTools := []map[string]any{}
@@ -316,7 +338,7 @@ func (w *WorkerCodex) Events(ctx context.Context, sessionID string) (<-chan Even
 		defer close(events)
 		defer close(errs)
 		defer w.terminate(sessionID)
-		sourceEvents, sourceErrs := session.events, session.errs
+		sourceEvents, sourceErrs, done := session.events, session.errs, session.done
 		for sourceEvents != nil || sourceErrs != nil {
 			select {
 			case event, ok := <-sourceEvents:
@@ -342,6 +364,23 @@ func (w *WorkerCodex) Events(ctx context.Context, sessionID string) (<-chan Even
 			case <-ctx.Done():
 				errs <- ctx.Err()
 				return
+			case <-done:
+				for {
+					select {
+					case event := <-sourceEvents:
+						select {
+						case events <- event:
+						case <-ctx.Done():
+							return
+						}
+					case eventErr := <-sourceErrs:
+						if eventErr != nil {
+							errs <- eventErr
+						}
+					default:
+						return
+					}
+				}
 			}
 		}
 	}()
@@ -363,6 +402,10 @@ func (w *WorkerCodex) Abort(ctx context.Context, sessionID string) error {
 	session.mu.Lock()
 	threadID, turnID := session.threadID, session.turnID
 	session.mu.Unlock()
+	// Unblock any App Server notification currently waiting for downstream
+	// event capacity before waiting for an interrupt response from that same
+	// read loop.
+	session.stop()
 	if threadID != "" && turnID != "" {
 		session.publish("turn/interrupt", "outbound", "started", "Sent turn/interrupt to Codex App Server")
 		var ignored map[string]any
@@ -403,6 +446,7 @@ func (w *WorkerCodex) terminate(id string) {
 	if !ok {
 		return
 	}
+	session.stop()
 	session.publish("worker.terminate", "outbound", "started", "Terminating disposable Codex worker")
 	session.client.close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -458,29 +502,35 @@ func (s *codexWorkerSession) notification(method string, raw json.RawMessage) {
 			s.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: nativeToolCompletionEventType(params.Item), Data: data, CreatedAt: time.Now().UTC()})
 		}
 	case "thread/tokenUsage/updated":
+		type tokenUsage struct {
+			InputTokens           int64 `json:"inputTokens"`
+			OutputTokens          int64 `json:"outputTokens"`
+			CachedInputTokens     int64 `json:"cachedInputTokens"`
+			ReasoningOutputTokens int64 `json:"reasoningOutputTokens"`
+			TotalTokens           int64 `json:"totalTokens"`
+		}
 		var params struct {
 			ThreadID   string `json:"threadId"`
 			TurnID     string `json:"turnId"`
 			TokenUsage struct {
-				Last struct {
-					InputTokens           int64 `json:"inputTokens"`
-					OutputTokens          int64 `json:"outputTokens"`
-					CachedInputTokens     int64 `json:"cachedInputTokens"`
-					ReasoningOutputTokens int64 `json:"reasoningOutputTokens"`
-					TotalTokens           int64 `json:"totalTokens"`
-				} `json:"last"`
+				Last  tokenUsage `json:"last"`
+				Total tokenUsage `json:"total"`
 			} `json:"tokenUsage"`
 		}
 		if json.Unmarshal(raw, &params) != nil || params.ThreadID != threadID {
 			return
 		}
+		usage := params.TokenUsage.Total
+		if usage == (tokenUsage{}) {
+			usage = params.TokenUsage.Last
+		}
 		s.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "usage.updated", Data: map[string]any{
 			"turn_id":                 params.TurnID,
-			"input_tokens":            params.TokenUsage.Last.InputTokens,
-			"output_tokens":           params.TokenUsage.Last.OutputTokens,
-			"cached_input_tokens":     params.TokenUsage.Last.CachedInputTokens,
-			"reasoning_output_tokens": params.TokenUsage.Last.ReasoningOutputTokens,
-			"total_tokens":            params.TokenUsage.Last.TotalTokens,
+			"input_tokens":            usage.InputTokens,
+			"output_tokens":           usage.OutputTokens,
+			"cached_input_tokens":     usage.CachedInputTokens,
+			"reasoning_output_tokens": usage.ReasoningOutputTokens,
+			"total_tokens":            usage.TotalTokens,
 		}, CreatedAt: time.Now().UTC()})
 	case "turn/completed":
 		var params struct {

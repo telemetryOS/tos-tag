@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"reflect"
 	"strings"
@@ -30,6 +31,41 @@ func TestDefaultConfigurationValid(t *testing.T) {
 	}
 	if cfg.Memory.Enabled || cfg.Memory.Model != "gpt-5.6-luna" || cfg.Memory.ReasoningEffort != "medium" {
 		t.Fatalf("unexpected default memory configuration: %#v", cfg.Memory)
+	}
+}
+
+func TestAuditCommitmentKeyIsDurableAndProductionSpecific(t *testing.T) {
+	cfg := DefaultConfiguration
+	first, err := cfg.AuditCommitmentKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := cfg.AuditCommitmentKey()
+	if err != nil || !reflect.DeepEqual(first, second) {
+		t.Fatalf("audit commitment key changed between loads: err=%v", err)
+	}
+	cfg.Environment = "production"
+	if err := Validate(&cfg); err == nil {
+		t.Fatal("production accepted the shared development audit key")
+	}
+	cfg.Audit.CommitmentKey = base64.StdEncoding.EncodeToString([]byte("01234567890123456789012345678901"))
+	if err := Validate(&cfg); err != nil {
+		t.Fatalf("production-specific audit key rejected: %v", err)
+	}
+}
+
+func TestLoadAuditCommitmentKeyEnvironment(t *testing.T) {
+	want := base64.StdEncoding.EncodeToString([]byte("abcdefghijklmnopqrstuvwxyzABCDEF"))
+	t.Setenv("TAG__AUDIT__COMMITMENT_KEY", want)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Audit.CommitmentKey != want {
+		t.Fatal("audit commitment key environment did not map")
+	}
+	if strings.Contains(fmt.Sprint(cfg.RedactedStatus()), want) {
+		t.Fatal("redacted status leaked audit commitment key")
 	}
 }
 
@@ -160,6 +196,10 @@ func TestValidateLiveSlackAndClassifierModes(t *testing.T) {
 	cfg.Slack.TeamID = "team"
 	cfg.Slack.AppLevelToken = "xapp-test"
 	cfg.Slack.BotUserOAuthToken = "xoxb-test"
+	if err := Validate(&cfg); err == nil || !strings.Contains(err.Error(), "botUserId") {
+		t.Fatalf("missing bot user ID error = %v", err)
+	}
+	cfg.Slack.BotUserID = "U-tag"
 	if err := Validate(&cfg); err != nil {
 		t.Fatalf("compiled socket mode configuration rejected: %v", err)
 	}
@@ -186,6 +226,7 @@ func TestValidateSlackContextSyncRequiresExplicitLiveUserAuthorization(t *testin
 	cfg.Slack.TeamID = "team"
 	cfg.Slack.AppLevelToken = "xapp-test"
 	cfg.Slack.BotUserOAuthToken = "xoxb-test"
+	cfg.Slack.BotUserID = "U-tag"
 	if err := Validate(&cfg); err == nil || !strings.Contains(err.Error(), "User OAuth") {
 		t.Fatalf("missing user authorization error = %v", err)
 	}
@@ -214,6 +255,7 @@ func TestLoadSlackContextSyncEnvironment(t *testing.T) {
 	t.Setenv("TAG__SLACK__APP_LEVEL_TOKEN", "xapp-test")
 	t.Setenv("TAG__SLACK__USER_OAUTH_TOKEN", "xoxp-test")
 	t.Setenv("TAG__SLACK__BOT_USER_OAUTH_TOKEN", "xoxb-test")
+	t.Setenv("TAG__SLACK__BOT_USER_ID", "U-tag")
 
 	cfg, err := Load()
 	if err != nil {

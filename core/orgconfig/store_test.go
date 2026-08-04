@@ -12,6 +12,7 @@ import (
 
 func TestMemoryChannelPolicy(t *testing.T) {
 	store := NewMemory()
+	_, _ = store.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org", TeamID: "team", Enabled: true})
 	policy := ChannelPolicy{OrganizationID: "org", TeamID: "team", ChannelID: "alerts", Enrolled: true, ParticipationMode: types.ModeAssist, Cooldown: time.Minute, MaxResponsesPerHour: 6, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: time.Now().UTC()}
 	saved, err := store.PutChannel(context.Background(), policy)
 	if err != nil {
@@ -29,6 +30,21 @@ func TestMemoryChannelPolicy(t *testing.T) {
 	}
 	if _, err := store.Resolve(context.Background(), "org", "team", "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatal(err)
+	}
+}
+
+func TestMemoryMissingWorkspaceFailsClosed(t *testing.T) {
+	store := NewMemory()
+	_, err := store.PutChannel(context.Background(), ChannelPolicy{OrganizationID: "org", TeamID: "team", ChannelID: "alerts", Enrolled: true, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 1, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Resolve(context.Background(), "org", "team", "alerts"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing workspace resolve error = %v", err)
+	}
+	channels, err := store.ListChannels(context.Background(), "org")
+	if err != nil || len(channels) != 1 || channels[0].WorkspaceEnabled || !channels[0].KillSwitch {
+		t.Fatalf("missing workspace channels=%#v err=%v", channels, err)
 	}
 }
 

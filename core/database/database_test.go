@@ -6,6 +6,8 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+
+	"github.com/telemetryos/tos-tag/models"
 )
 
 func resolvedIndexOptions(t *testing.T, builder *options.IndexOptionsBuilder) options.IndexOptions {
@@ -65,5 +67,53 @@ func TestRequiredTTLIndexesAreAbsolute(t *testing.T) {
 	}
 	if ttlCount < 3 {
 		t.Fatalf("expected observation, message, and context TTL indexes, got %d", ttlCount)
+	}
+}
+
+func TestJobIndexesCoverGlobalClaimRecoveryAndPublicID(t *testing.T) {
+	want := map[string]bool{
+		"job_public_unique":  false,
+		"job_global_claim":   false,
+		"job_lease_recovery": false,
+		"job_reconciliation": false,
+	}
+	for _, spec := range RequiredIndexes() {
+		if spec.Collection != "jobs" || spec.Model.Options == nil {
+			continue
+		}
+		resolved := resolvedIndexOptions(t, spec.Model.Options)
+		if resolved.Name != nil {
+			if _, ok := want[*resolved.Name]; ok {
+				want[*resolved.Name] = true
+			}
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Fatalf("required job index %s is missing", name)
+		}
+	}
+}
+
+func TestObservationIndexesCoverGlobalClaimAndPublicID(t *testing.T) {
+	want := map[string]bool{
+		"observation_public_unique": false,
+		"decision_global_claim":     false,
+	}
+	for _, spec := range RequiredIndexes() {
+		if spec.Collection != models.CollectionObservations || spec.Model.Options == nil {
+			continue
+		}
+		resolved := resolvedIndexOptions(t, spec.Model.Options)
+		if resolved.Name != nil {
+			if _, ok := want[*resolved.Name]; ok {
+				want[*resolved.Name] = true
+			}
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Fatalf("required observation index %s is missing", name)
+		}
 	}
 }

@@ -239,9 +239,9 @@ func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	jobList, jobErr := s.deps.Jobs.List(r.Context())
-	deliveryList, deliveryErr := s.deps.Deliveries.List(r.Context())
-	decisionList, decisionErr := s.deps.Decisions.List(r.Context())
+	jobCount, jobErr := s.deps.Jobs.Count(r.Context())
+	deliveryCount, deliveryErr := s.deps.Deliveries.Count(r.Context())
+	decisionCount, decisionErr := s.deps.Decisions.Count(r.Context())
 	if jobErr != nil || deliveryErr != nil || decisionErr != nil {
 		writeError(w, http.StatusInternalServerError, "status_unavailable")
 		return
@@ -255,7 +255,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"service": "tos-tag", "version": s.deps.Version, "configuration": s.deps.Config.RedactedStatus(),
-		"counts":             map[string]int{"jobs": len(jobList), "deliveries": len(deliveryList), "decisions": len(decisionList), "acks": acks, "stub_sends": sends},
+		"counts":             map[string]int{"jobs": jobCount, "deliveries": deliveryCount, "decisions": decisionCount, "acks": acks, "stub_sends": sends},
 		"live_slack_enabled": s.deps.Config.Slack.LiveEnabled, "model_provider_enabled": s.deps.Config.Codex.Enabled,
 	})
 }

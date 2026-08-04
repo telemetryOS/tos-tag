@@ -4,6 +4,7 @@ package sessions
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -25,6 +26,7 @@ type Store interface {
 	Resolve(context.Context, string, string, string, string) (Session, bool, error)
 	Restart(context.Context, string, string, string, string) (Session, error)
 	Find(context.Context, string, string, string, string) (Session, error)
+	ListRoots(context.Context, string, string, string, time.Time) ([]string, error)
 }
 
 type MemoryStore struct {
@@ -48,6 +50,8 @@ func (s *MemoryStore) Resolve(_ context.Context, organizationID, teamID, channel
 	defer s.mu.Unlock()
 	key := Key(organizationID, teamID, channelID, rootThreadTS)
 	if current, ok := s.byKey[key]; ok {
+		current.UpdatedAt = s.now().UTC()
+		s.byKey[key] = current
 		return current, false, nil
 	}
 	now := s.now().UTC()
@@ -78,6 +82,23 @@ func (s *MemoryStore) Find(_ context.Context, organizationID, teamID, channelID,
 		return Session{}, fmt.Errorf("session not found")
 	}
 	return current, nil
+}
+
+func (s *MemoryStore) ListRoots(_ context.Context, organizationID, teamID, channelID string, updatedSince time.Time) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var matches []Session
+	for _, session := range s.byKey {
+		if session.OrganizationID == organizationID && session.TeamID == teamID && session.ChannelID == channelID && (updatedSince.IsZero() || !session.UpdatedAt.Before(updatedSince)) {
+			matches = append(matches, session)
+		}
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].RootThreadTS < matches[j].RootThreadTS })
+	roots := make([]string, 0, len(matches))
+	for _, session := range matches {
+		roots = append(roots, session.RootThreadTS)
+	}
+	return roots, nil
 }
 
 func Key(organizationID, teamID, channelID, rootThreadTS string) string {

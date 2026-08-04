@@ -25,6 +25,13 @@ func TestCanonicalHashChainAndHMACCommitment(t *testing.T) {
 	if strings.Contains(first.ContentCommitment, "sensitive") {
 		t.Fatal("content commitment leaked plaintext")
 	}
+	restarted, err := New([]byte("01234567890123456789012345678901"))
+	if err != nil || !restarted.VerifyContentCommitment("2026-07", []byte("sensitive message"), first.ContentCommitment) {
+		t.Fatalf("commitment could not be verified after restart: %v", err)
+	}
+	if restarted.VerifyContentCommitment("2026-07", []byte("different message"), first.ContentCommitment) {
+		t.Fatal("commitment verified different content")
+	}
 	if err := chain.Verify("org"); err != nil {
 		t.Fatal(err)
 	}

@@ -33,7 +33,11 @@ func (s *MongoStore) PutContext(ctx context.Context, routine Routine) (Routine, 
 	return saved, err
 }
 func (s *MongoStore) DueContext(ctx context.Context, now time.Time, limit int) ([]Routine, error) {
-	cursor, err := s.db.Collection(models.CollectionRoutines).Find(ctx, bson.M{"enabled": true, "next_run": bson.M{"$lte": now}}, options.Find().SetSort(bson.D{{Key: "next_run", Value: 1}}).SetLimit(int64(limit)))
+	find := options.Find().SetSort(bson.D{{Key: "next_run", Value: 1}, {Key: "public_id", Value: 1}})
+	if limit > 0 {
+		find.SetLimit(int64(limit))
+	}
+	cursor, err := s.db.Collection(models.CollectionRoutines).Find(ctx, bson.M{"enabled": true, "next_run": bson.M{"$lte": now}}, find)
 	if err != nil {
 		return nil, err
 	}

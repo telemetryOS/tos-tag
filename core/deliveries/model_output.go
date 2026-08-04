@@ -18,7 +18,7 @@ func ParseModelOutput(output string) (types.SlackResult, error) {
 	if raw == "" {
 		return types.SlackResult{}, fmt.Errorf("empty model output")
 	}
-	raw = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(raw, "```json"), "```"), "```"))
+	raw = unwrapJSONFence(raw)
 	if index := strings.Index(raw, `{"segments"`); index > 0 {
 		// Some harnesses leak a short planning/status sentence before the exact
 		// structured result. Recover the typed suffix instead of posting its JSON
@@ -66,6 +66,27 @@ func ParseModelOutput(output string) (types.SlackResult, error) {
 		return types.SlackResult{}, fmt.Errorf("model output cannot emit privileged Slack segments")
 	}
 	return types.SlackResult{}, fmt.Errorf("model output violates %s", SlackOutputContractVersion)
+}
+
+func unwrapJSONFence(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	prefix := ""
+	switch {
+	case strings.HasPrefix(trimmed, "```json"):
+		prefix = "```json"
+	case strings.HasPrefix(trimmed, "```"):
+		prefix = "```"
+	default:
+		return trimmed
+	}
+	if !strings.HasSuffix(trimmed, "```") || len(trimmed) == len(prefix) {
+		return trimmed
+	}
+	inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, prefix), "```"))
+	if strings.HasPrefix(inner, "{") || strings.HasPrefix(inner, "[") {
+		return inner
+	}
+	return trimmed
 }
 
 func normalizeModelSlackResult(result types.SlackResult) types.SlackResult {

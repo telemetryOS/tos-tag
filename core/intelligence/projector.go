@@ -89,14 +89,16 @@ func (p *Mongo) Project(ctx context.Context, observation models.Observation) (Re
 		messageTS = observation.MutationTargetTS
 	}
 	sourceFilter := bson.M{"organization_id": observation.OrganizationID, "channel_id": observation.ChannelID, "message_ts": messageTS}
-	if _, err := p.db.Collection(models.CollectionSituationFacts).DeleteMany(ctx, sourceFilter); err != nil {
-		return Result{}, err
-	}
-	if _, err := p.db.Collection(models.CollectionRestrictedSignals).DeleteMany(ctx, sourceFilter); err != nil {
-		return Result{}, err
-	}
-	if _, err := p.db.Collection(models.CollectionDerivations).DeleteMany(ctx, bson.M{"organization_id": observation.OrganizationID, "source_id": observation.PublicID}); err != nil {
-		return Result{}, err
+	if requiresProjectionCleanup(observation) {
+		if _, err := p.db.Collection(models.CollectionSituationFacts).DeleteMany(ctx, sourceFilter); err != nil {
+			return Result{}, err
+		}
+		if _, err := p.db.Collection(models.CollectionRestrictedSignals).DeleteMany(ctx, sourceFilter); err != nil {
+			return Result{}, err
+		}
+		if _, err := p.db.Collection(models.CollectionDerivations).DeleteMany(ctx, bson.M{"organization_id": observation.OrganizationID, "source_id": observation.PublicID}); err != nil {
+			return Result{}, err
+		}
 	}
 	count, err := p.db.Collection(models.CollectionChannels).CountDocuments(ctx, bson.M{"organization_id": observation.OrganizationID, "team_id": observation.TeamID, "channel_id": observation.ChannelID, "context_history_mode": string(types.ContextHistorySessionOnly)})
 	if err != nil {
@@ -144,6 +146,10 @@ func (p *Mongo) Project(ctx context.Context, observation models.Observation) (Re
 		return Result{}, err
 	}
 	return p.advance(ctx, observation, []string{derivedID})
+}
+
+func requiresProjectionCleanup(observation models.Observation) bool {
+	return observation.MutationTargetTS != "" || observation.EventType == string(types.SlackEventEdit) || observation.EventType == string(types.SlackEventDelete)
 }
 
 func (p *Mongo) advance(ctx context.Context, o models.Observation, ids []string) (Result, error) {

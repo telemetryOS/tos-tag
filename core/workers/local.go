@@ -256,11 +256,11 @@ func (m *Local) Terminate(ctx context.Context, workspace Workspace) error {
 	if !ok || process.workspace.Root != workspace.Root || process.workspace.AttemptID != workspace.AttemptID {
 		return ErrNotFound
 	}
+	defer process.cancel()
 	var revokeErr error
 	if m.revoker != nil {
 		revokeErr = m.revoker.RevokeAttempt(ctx, workspace.AttemptID)
 	}
-	process.cancel()
 	if process.stdin != nil {
 		_ = process.stdin.Close()
 	}

@@ -131,9 +131,6 @@ func (q *MemoryQueue) Cancel(_ context.Context, id types.JobID, reason string) (
 	q.jobs[id] = job
 	return job, nil
 }
-func (q *MemoryQueue) Interrupt(ctx context.Context, id types.JobID, reason string) (Job, error) {
-	return q.Cancel(ctx, id, reason)
-}
 func (q *MemoryQueue) MarkCompletedUndelivered(_ context.Context, id types.JobID, reason string) (Job, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -269,6 +266,12 @@ func (q *MemoryQueue) Get(_ context.Context, id types.JobID) (Job, error) {
 	return job, nil
 }
 
+func (q *MemoryQueue) Count(_ context.Context) (int, error) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return len(q.jobs), nil
+}
+
 func (q *MemoryQueue) List(_ context.Context) ([]Job, error) {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
@@ -278,6 +281,49 @@ func (q *MemoryQueue) List(_ context.Context) ([]Job, error) {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
 	return result, nil
+}
+
+func (q *MemoryQueue) ListReconciliation(_ context.Context, now time.Time) ([]Job, error) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	result := make([]Job, 0)
+	for _, job := range q.jobs {
+		switch job.State {
+		case StateWaitingApproval, StateNeedsReconciliation:
+			result = append(result, job)
+		case StateQueued:
+			if !job.ExpiresAt.After(now) || job.Attempt >= job.MaxAttempts {
+				result = append(result, job)
+			}
+		case StateRetryWait:
+			if !job.AvailableAt.After(now) {
+				result = append(result, job)
+			}
+		case StateSucceeded:
+			if !job.FinalDeliveryEnqueued && job.ExpiresAt.After(now) {
+				result = append(result, job)
+			}
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
+	return result, nil
+}
+
+func (q *MemoryQueue) MarkFinalDeliveryEnqueued(_ context.Context, id types.JobID) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	job, ok := q.jobs[id]
+	if !ok {
+		return ErrJobNotFound
+	}
+	if job.State != StateSucceeded {
+		return ErrInvalidState
+	}
+	job.FinalDeliveryEnqueued = true
+	job.UpdatedAt = q.now().UTC()
+	job.Version++
+	q.jobs[id] = job
+	return nil
 }
 
 func (q *MemoryQueue) ListOrganization(_ context.Context, organizationID string) ([]Job, error) {
@@ -292,6 +338,9 @@ func (q *MemoryQueue) ListOrganization(_ context.Context, organizationID string)
 			result = append(result, job)
 		}
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
+	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.After(result[j].CreatedAt) })
+	if len(result) > organizationListLimit {
+		result = result[:organizationListLimit]
+	}
 	return result, nil
 }

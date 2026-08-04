@@ -30,9 +30,12 @@ type DecisionRecord struct {
 
 type DecisionStore interface {
 	Record(context.Context, DecisionRecord) (DecisionRecord, bool, error)
+	Count(context.Context) (int, error)
 	List(context.Context) ([]DecisionRecord, error)
 	ListOrganization(context.Context, string) ([]DecisionRecord, error)
 }
+
+const decisionListLimit = 500
 
 type MemoryDecisionStore struct {
 	mu      sync.RWMutex
@@ -71,7 +74,16 @@ func (s *MemoryDecisionStore) List(_ context.Context) ([]DecisionRecord, error) 
 		result = append(result, record)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
+	if len(result) > decisionListLimit {
+		result = result[:decisionListLimit]
+	}
 	return result, nil
+}
+
+func (s *MemoryDecisionStore) Count(_ context.Context) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.records), nil
 }
 
 func (s *MemoryDecisionStore) ListOrganization(_ context.Context, organizationID string) ([]DecisionRecord, error) {
@@ -86,7 +98,10 @@ func (s *MemoryDecisionStore) ListOrganization(_ context.Context, organizationID
 			result = append(result, record)
 		}
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
+	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.After(result[j].CreatedAt) })
+	if len(result) > decisionListLimit {
+		result = result[:decisionListLimit]
+	}
 	return result, nil
 }
 
@@ -122,18 +137,26 @@ func (s *MongoDecisionStore) Record(ctx context.Context, record DecisionRecord) 
 }
 
 func (s *MongoDecisionStore) List(ctx context.Context) ([]DecisionRecord, error) {
-	return s.list(ctx, bson.M{})
+	return s.list(ctx, bson.M{}, decisionListLimit, 1)
+}
+
+func (s *MongoDecisionStore) Count(ctx context.Context) (int, error) {
+	count, err := s.db.Collection(models.CollectionDecisions).CountDocuments(ctx, bson.M{})
+	if err != nil {
+		return 0, fmt.Errorf("count decisions: %w", err)
+	}
+	return int(count), nil
 }
 
 func (s *MongoDecisionStore) ListOrganization(ctx context.Context, organizationID string) ([]DecisionRecord, error) {
 	if organizationID == "" {
 		return nil, errors.New("organization_id is required")
 	}
-	return s.list(ctx, bson.M{"organization_id": organizationID})
+	return s.list(ctx, bson.M{"organization_id": organizationID}, decisionListLimit, -1)
 }
 
-func (s *MongoDecisionStore) list(ctx context.Context, filter bson.M) ([]DecisionRecord, error) {
-	cursor, err := s.db.Collection(models.CollectionDecisions).Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}))
+func (s *MongoDecisionStore) list(ctx context.Context, filter bson.M, limit int64, direction int) ([]DecisionRecord, error) {
+	cursor, err := s.db.Collection(models.CollectionDecisions).Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "created_at", Value: direction}}).SetLimit(limit))
 	if err != nil {
 		return nil, err
 	}

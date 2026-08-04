@@ -95,6 +95,16 @@ func (c *MongoChain) Append(ctx context.Context, request AppendRequest) (Receipt
 		if headErr == nil && current.Sequence == receipt.Sequence && current.Hash == receipt.Hash {
 			return receipt, nil
 		}
+		// The receipt insert is durable even when another writer advances the
+		// head before this writer observes its CAS result. Return this exact
+		// attempt instead of creating a second key-less receipt on retry;
+		// recoverNext owns adoption of any temporarily orphaned receipt.
+		var persisted Receipt
+		if findErr := c.db.Collection(models.CollectionReceipts).FindOne(ctx, bson.M{"organization_id": request.OrganizationID, "public_id": receipt.ID}).Decode(&persisted); findErr == nil {
+			return persisted, nil
+		} else if !errors.Is(findErr, mongo.ErrNoDocuments) {
+			return Receipt{}, findErr
+		}
 		// Never delete a valid orphan here. Another writer may have adopted this
 		// exact receipt between the head read above and a compensating delete.
 		// recoverNext is the single owner of orphan adoption on the next retry.
@@ -167,4 +177,8 @@ func (c *MongoChain) Verify(ctx context.Context, org string) error {
 		return fmt.Errorf("audit head mismatch")
 	}
 	return nil
+}
+
+func (c *MongoChain) VerifyContentCommitment(epoch string, content []byte, commitment string) bool {
+	return c.signer.VerifyContentCommitment(epoch, content, commitment)
 }

@@ -75,6 +75,7 @@ type Observation struct {
 	DecisionLeaseToken      string        `bson:"decision_lease_token,omitempty"`
 	DecisionLeaseExpiresAt  time.Time     `bson:"decision_lease_expires_at,omitempty"`
 	OutputProduced          bool          `bson:"output_produced"`
+	OutputReservationID     string        `bson:"output_reservation_id,omitempty"`
 	OutputJobID             string        `bson:"output_job_id,omitempty"`
 	OutputDeliveryID        string        `bson:"output_delivery_id,omitempty"`
 	CreatedAt               time.Time     `bson:"created_at"`
@@ -165,14 +166,26 @@ type Channel struct {
 // from retained message content. Message TTL expiry must not cause a completed
 // conversation to be fully fetched again on every process restart.
 type SlackContextSyncState struct {
-	ID                   bson.ObjectID `bson:"_id,omitempty"`
-	OrganizationID       string        `bson:"organization_id"`
-	TeamID               string        `bson:"team_id"`
-	ChannelID            string        `bson:"channel_id"`
-	BootstrapCompleted   bool          `bson:"bootstrap_completed"`
-	BootstrapCompletedAt time.Time     `bson:"bootstrap_completed_at,omitempty"`
-	SyncedThrough        time.Time     `bson:"synced_through,omitempty"`
-	UpdatedAt            time.Time     `bson:"updated_at"`
+	ID                   bson.ObjectID             `bson:"_id,omitempty"`
+	OrganizationID       string                    `bson:"organization_id"`
+	TeamID               string                    `bson:"team_id"`
+	ChannelID            string                    `bson:"channel_id"`
+	BootstrapCompleted   bool                      `bson:"bootstrap_completed"`
+	BootstrapCompletedAt time.Time                 `bson:"bootstrap_completed_at,omitempty"`
+	SyncedThrough        time.Time                 `bson:"synced_through,omitempty"`
+	CatchUpThrough       time.Time                 `bson:"catch_up_through,omitempty"`
+	CatchUpLatest        time.Time                 `bson:"catch_up_latest,omitempty"`
+	CatchUpThreads       []SlackThreadCatchUpState `bson:"catch_up_threads,omitempty"`
+	LiveThrough          time.Time                 `bson:"live_through,omitempty"`
+	UpdatedAt            time.Time                 `bson:"updated_at"`
+}
+
+// SlackThreadCatchUpState is a content-free per-thread checkpoint used while
+// repairing a bounded offline gap. RootThreadTS is a Slack identifier, not
+// message content.
+type SlackThreadCatchUpState struct {
+	RootThreadTS  string    `bson:"root_thread_ts"`
+	SyncedThrough time.Time `bson:"synced_through"`
 }
 
 type ContextPack struct {
@@ -279,6 +292,8 @@ type Job struct {
 	ApprovalID             string        `bson:"approval_id,omitempty"`
 	ApprovedActionHash     string        `bson:"approved_action_hash,omitempty"`
 	ProgressMessageTS      string        `bson:"progress_message_ts,omitempty"`
+	FinalDeliveryEnqueued  bool          `bson:"final_delivery_enqueued,omitempty"`
+	WriterActive           bool          `bson:"writer_active"`
 	AvailableAt            time.Time     `bson:"available_at"`
 	CreatedAt              time.Time     `bson:"created_at"`
 	UpdatedAt              time.Time     `bson:"updated_at"`
@@ -323,7 +338,6 @@ type Delivery struct {
 	UpdatedAt      time.Time     `bson:"updated_at"`
 	ExpiresAt      time.Time     `bson:"expires_at"`
 	Version        int64         `bson:"version"`
-	WriterActive   bool          `bson:"writer_active"`
 }
 
 type ClassificationDecision struct {

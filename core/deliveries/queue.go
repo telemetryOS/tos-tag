@@ -71,9 +71,13 @@ type Queue interface {
 	Retry(context.Context, types.DeliveryID, string, string, time.Duration) (Record, error)
 	Abandon(context.Context, types.DeliveryID, string, string) (Record, error)
 	Get(context.Context, types.DeliveryID) (Record, error)
+	FindByIdempotency(context.Context, string, string) (Record, error)
+	Count(context.Context) (int, error)
 	List(context.Context) ([]Record, error)
 	ListOrganization(context.Context, string) ([]Record, error)
 }
+
+const organizationListLimit = 500
 
 type MemoryQueue struct {
 	mu      sync.RWMutex
@@ -107,6 +111,16 @@ func (q *MemoryQueue) Enqueue(_ context.Context, spec Spec) (Record, bool, error
 	record := Record{ID: types.DeliveryID(types.NewID("dlv")), OrganizationID: spec.OrganizationID, JobID: spec.JobID, DecisionID: spec.DecisionID, IdempotencyKey: spec.IdempotencyKey, Destination: spec.Destination, Result: spec.Result, Status: StatusPending, MaxAttempts: spec.MaxAttempts, RetryAt: now, CreatedAt: now, UpdatedAt: now, ExpiresAt: expiresAt, Version: 1}
 	q.records[record.ID], q.byKey[key] = record, record.ID
 	return record, true, nil
+}
+
+func (q *MemoryQueue) FindByIdempotency(_ context.Context, organizationID, idempotencyKey string) (Record, error) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	id, ok := q.byKey[organizationID+"/"+idempotencyKey]
+	if !ok {
+		return Record{}, ErrDeliveryNotFound
+	}
+	return q.records[id], nil
 }
 
 func (q *MemoryQueue) Claim(_ context.Context, worker types.WorkerID, duration time.Duration) (Record, error) {
@@ -225,6 +239,12 @@ func (q *MemoryQueue) List(_ context.Context) ([]Record, error) {
 	return result, nil
 }
 
+func (q *MemoryQueue) Count(_ context.Context) (int, error) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return len(q.records), nil
+}
+
 func (q *MemoryQueue) ListOrganization(_ context.Context, organizationID string) ([]Record, error) {
 	if organizationID == "" {
 		return nil, errors.New("organization_id is required")
@@ -237,6 +257,9 @@ func (q *MemoryQueue) ListOrganization(_ context.Context, organizationID string)
 			result = append(result, record)
 		}
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
+	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.After(result[j].CreatedAt) })
+	if len(result) > organizationListLimit {
+		result = result[:organizationListLimit]
+	}
 	return result, nil
 }

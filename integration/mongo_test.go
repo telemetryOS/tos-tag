@@ -37,6 +37,9 @@ func mongoDatabase(t *testing.T) (context.Context, *database.Database) {
 		t.Skip("set TOS_TAG_INTEGRATION_MONGO=1")
 	}
 	cfg := config.DefaultConfiguration
+	if uri := strings.TrimSpace(os.Getenv("TOS_TAG_INTEGRATION_MONGO_URI")); uri != "" {
+		cfg.Mongo.URI = uri
+	}
 	cfg.Mongo.Database = fmt.Sprintf("tos_tag_integration_%d", time.Now().UnixNano())
 	db := database.New(&cfg, blackbox.New())
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -157,6 +160,75 @@ func TestMongoAdmissionSurvivesControllerRestart(t *testing.T) {
 	}
 }
 
+func TestMongoAdmissionReconcilesInterruptedReleaseExactlyOnce(t *testing.T) {
+	ctx, db := mongoDatabase(t)
+	now := time.Now().UTC()
+	policy := orgconfig.ChannelPolicy{OrganizationID: "org", TeamID: "team", ChannelID: "support", Enrolled: true, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 2, MembershipRevision: "m1", MembershipRefreshedAt: now}
+	controller := admission.NewMongo(db)
+	first, err := controller.Admit(ctx, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := controller.Admit(ctx, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Reproduce a crash after the state decrement was durably marked but before
+	// the reservation itself was finalized as released.
+	stateID := policy.OrganizationID + "/" + policy.TeamID + "/" + policy.ChannelID
+	if _, err := db.Collection(models.CollectionAdmissionReservations).UpdateOne(ctx, bson.M{"_id": first}, bson.M{"$set": bson.M{
+		"completed": true, "completed_at": now, "cleanup_at": now.Add(24 * time.Hour),
+		"release_state": "releasing", "release_token": "interrupted", "release_lease_expires_at": now.Add(-time.Second),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Collection(models.CollectionAdmissionStates).UpdateOne(ctx, bson.M{"_id": stateID}, bson.M{
+		"$inc":      bson.M{"active": -1},
+		"$addToSet": bson.M{"release_markers": first},
+		"$set":      bson.M{"updated_at": now},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := admission.NewMongo(db)
+	third, err := restarted.Admit(ctx, policy)
+	if err != nil {
+		t.Fatalf("interrupted release was not reconciled: %v", err)
+	}
+	if _, err := restarted.Admit(ctx, policy); !errors.Is(err, admission.ErrConcurrency) {
+		t.Fatalf("release was applied more than once: %v", err)
+	}
+	restarted.Complete(ctx, second)
+	restarted.Complete(ctx, third)
+}
+
+func TestMongoAdmissionReconcilesCompletionBeforeCounterRelease(t *testing.T) {
+	ctx, db := mongoDatabase(t)
+	now := time.Now().UTC()
+	policy := orgconfig.ChannelPolicy{OrganizationID: "org", TeamID: "team", ChannelID: "support", Enrolled: true, ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1, MembershipRevision: "m1", MembershipRefreshedAt: now}
+	controller := admission.NewMongo(db)
+	reservation, err := controller.Admit(ctx, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Reproduce a crash after completion was persisted but before the state
+	// counter was decremented.
+	if _, err := db.Collection(models.CollectionAdmissionReservations).UpdateOne(ctx, bson.M{"_id": reservation}, bson.M{"$set": bson.M{
+		"completed": true, "completed_at": now, "cleanup_at": now.Add(24 * time.Hour), "release_state": "pending",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := admission.NewMongo(db)
+	replacement, err := restarted.Admit(ctx, policy)
+	if err != nil {
+		t.Fatalf("completion release was not reconciled: %v", err)
+	}
+	restarted.Complete(ctx, replacement)
+}
+
 func TestMongoApprovalIsIndependentExactAndSingleUse(t *testing.T) {
 	ctx, db := mongoDatabase(t)
 	store := approvals.NewMongoStore(db)
@@ -252,6 +324,9 @@ func TestMongoIndexesDedupeCountersFencingAndTTL(t *testing.T) {
 	_, _, _ = queue.Enqueue(ctx, spec)
 	spec.IdempotencyKey = "two"
 	_, _, _ = queue.Enqueue(ctx, spec)
+	if candidates, err := queue.ListReconciliation(ctx, now); err != nil || len(candidates) != 0 {
+		t.Fatalf("ordinary queued jobs entered reconciliation: candidates=%#v err=%v", candidates, err)
+	}
 	claimed, err := queue.Claim(ctx, "worker", time.Minute)
 	if err != nil {
 		t.Fatal(err)

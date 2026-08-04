@@ -24,7 +24,8 @@ type Store interface {
 	Recent(context.Context, string, []string, time.Time, int) ([]models.ChannelMessage, error)
 	CurrentMessage(context.Context, string, string, string, string) (models.ChannelMessage, error)
 	Channels(context.Context, string) ([]string, error)
-	MarkOutput(context.Context, string, string, string) (bool, error)
+	ReserveOutput(context.Context, string, string) (bool, error)
+	FinalizeOutput(context.Context, string, string, string, string) error
 	LateCandidates(context.Context, string, time.Time, time.Time, int) ([]models.Observation, error)
 }
 

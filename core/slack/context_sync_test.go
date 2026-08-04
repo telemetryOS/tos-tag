@@ -10,31 +10,39 @@ import (
 
 	slackapi "github.com/slack-go/slack"
 
+	"github.com/telemetryos/tos-tag/core/sessions"
 	"github.com/telemetryos/tos-tag/types"
 )
 
 type fakeContextSyncAPI struct {
-	channels       []slackapi.Channel
-	botChannels    []slackapi.Channel
-	botNextCursor  string
-	nextCursor     string
-	history        map[string][]slackapi.Message
-	replies        map[string][]slackapi.Message
-	listRateLimits int
-	rateLimitDelay time.Duration
-	historyLimits  map[string]int
-	replyLimits    map[string]int
-	historyErrors  map[string]error
-	replyErrors    map[string]error
-	conversationIn *slackapi.GetConversationsForUserParameters
-	listCalls      int
-	historyCalls   []string
-	historyParams  []slackapi.GetConversationHistoryParameters
-	historyCallAt  []time.Time
-	replyCalls     []string
+	channels          []slackapi.Channel
+	botChannels       []slackapi.Channel
+	botNextCursor     string
+	nextCursor        string
+	history           map[string][]slackapi.Message
+	historyPages      map[string][]*slackapi.GetConversationHistoryResponse
+	historyPage       map[string]int
+	replies           map[string][]slackapi.Message
+	listRateLimits    int
+	rateLimitDelay    time.Duration
+	historyLimits     map[string]int
+	replyLimits       map[string]int
+	historyErrors     map[string]error
+	replyErrors       map[string]error
+	conversationIn    *slackapi.GetConversationsForUserParameters
+	botConversationIn *slackapi.GetConversationsForUserParameters
+	listCalls         int
+	botListCalls      int
+	historyCalls      []string
+	historyParams     []slackapi.GetConversationHistoryParameters
+	historyCallAt     []time.Time
+	replyCalls        []string
 }
 
-func (f *fakeContextSyncAPI) GetConversationsContext(_ context.Context, params *slackapi.GetConversationsParameters) ([]slackapi.Channel, string, error) {
+func (f *fakeContextSyncAPI) GetBotConversationsForUserContext(_ context.Context, params *slackapi.GetConversationsForUserParameters) ([]slackapi.Channel, string, error) {
+	copy := *params
+	f.botConversationIn = &copy
+	f.botListCalls++
 	if f.botChannels != nil {
 		return f.botChannels, f.botNextCursor, nil
 	}
@@ -63,6 +71,17 @@ func (f *fakeContextSyncAPI) GetConversationHistoryContext(_ context.Context, pa
 	if err := f.historyErrors[params.ChannelID]; err != nil {
 		return nil, err
 	}
+	if pages := f.historyPages[params.ChannelID]; len(pages) > 0 {
+		if f.historyPage == nil {
+			f.historyPage = make(map[string]int)
+		}
+		index := f.historyPage[params.ChannelID]
+		if index >= len(pages) {
+			index = len(pages) - 1
+		}
+		f.historyPage[params.ChannelID]++
+		return pages[index], nil
+	}
 	return &slackapi.GetConversationHistoryResponse{Messages: f.history[params.ChannelID]}, nil
 }
 
@@ -82,7 +101,7 @@ func TestContextSyncCatchUpRepairsOnlyCompletedBotJoinedChannels(t *testing.T) {
 	botJoined.IsMember = true
 	api := &fakeContextSyncAPI{
 		channels:    []slackapi.Channel{joined, testSlackChannel("C-observe", "observe", false)},
-		botChannels: []slackapi.Channel{botJoined, testSlackChannel("C-observe", "observe", false)},
+		botChannels: []slackapi.Channel{botJoined},
 		history: map[string][]slackapi.Message{
 			"C-joined": {
 				{Msg: slackapi.Msg{Timestamp: mentionTS, User: "U-human", Text: "status <@U-tag|tag (local)>"}},
@@ -102,7 +121,11 @@ func TestContextSyncCatchUpRepairsOnlyCompletedBotJoinedChannels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run.syncThrough = now
+	statesBefore, err := state.List(context.Background(), "org", "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := statesBefore["C-joined"].CatchUpThrough
 	var recovered []types.SlackEnvelope
 	stats, err := syncer.CatchUp(context.Background(), run, func(_ context.Context, envelope types.SlackEnvelope) error {
 		recovered = append(recovered, envelope)
@@ -117,7 +140,7 @@ func TestContextSyncCatchUpRepairsOnlyCompletedBotJoinedChannels(t *testing.T) {
 	if len(api.historyCalls) != 1 || api.historyCalls[0] != "C-joined" {
 		t.Fatalf("catch-up polled non-member conversations: %v", api.historyCalls)
 	}
-	if len(api.historyParams) != 1 || api.historyParams[0].Oldest != slackHistoryTimestamp(previous) || api.historyParams[0].Latest != slackHistoryTimestamp(now) {
+	if len(api.historyParams) != 1 || api.historyParams[0].Oldest != slackHistoryTimestamp(previous) || api.historyParams[0].Latest != slackHistoryTimestamp(target) {
 		t.Fatalf("catch-up history window = %#v", api.historyParams)
 	}
 	if !recovered[0].IsMention && !recovered[1].IsMention {
@@ -127,7 +150,7 @@ func TestContextSyncCatchUpRepairsOnlyCompletedBotJoinedChannels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !states["C-joined"].SyncedThrough.Equal(now) || !states["C-observe"].SyncedThrough.Equal(previous) {
+	if !states["C-joined"].SyncedThrough.Equal(target) || !states["C-observe"].SyncedThrough.Equal(previous) {
 		t.Fatalf("catch-up watermarks = %#v", states)
 	}
 }
@@ -162,6 +185,236 @@ func TestContextSyncCatchUpNeverReplaysInitialHistory(t *testing.T) {
 	}
 	if stats.ChannelsCaughtUp != 0 || len(api.historyCalls) != 0 {
 		t.Fatalf("initial history was replayed: stats=%#v calls=%v", stats, api.historyCalls)
+	}
+}
+
+func TestContextSyncCatchUpIncludesAuthorizedDirectMessages(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	previous := now.Add(-time.Hour)
+	messageAt := now.Add(-30 * time.Minute)
+	messageTS := fmt.Sprintf("%d.%06d", messageAt.Unix(), messageAt.Nanosecond()/1_000)
+	state := NewMemoryContextSyncStateStore()
+	if err := state.CompleteBootstrap(context.Background(), "org", "team", "D-direct", previous); err != nil {
+		t.Fatal(err)
+	}
+	direct := slackapi.Channel{GroupConversation: slackapi.GroupConversation{Conversation: slackapi.Conversation{ID: "D-direct", IsIM: true, User: "U-human"}}}
+	api := &fakeContextSyncAPI{
+		channels: []slackapi.Channel{direct},
+		history:  map[string][]slackapi.Message{"D-direct": {{Msg: slackapi.Msg{Timestamp: messageTS, User: "U-human", Text: "can you catch this up?"}}}},
+	}
+	syncer, err := newContextSyncerWithAPIs(ContextSyncOptions{
+		OrganizationID: "org", TeamID: "team", BotUserID: "U-tag", Lookback: 24 * time.Hour, Timeout: time.Second,
+		MaxChannels: 10, MaxMessages: 10, MessagesPerChannel: 10, StateStore: state,
+	}, api, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := syncer.Discover(context.Background(), func(context.Context, types.SlackContextChannel) (bool, error) { return true, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recovered []types.SlackEnvelope
+	if _, err := syncer.CatchUp(context.Background(), run, func(_ context.Context, envelope types.SlackEnvelope) error {
+		recovered = append(recovered, envelope)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(recovered) != 1 || recovered[0].ChannelKind != types.SlackChannelKindDirectMessage || recovered[0].IsMention {
+		t.Fatalf("recovered direct message = %#v", recovered)
+	}
+	if len(api.historyCalls) != 1 || api.historyCalls[0] != "D-direct" {
+		t.Fatalf("direct-message history calls = %v", api.historyCalls)
+	}
+}
+
+func TestContextSyncCatchUpCheckpointsBusyChannelAndContinues(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	previous := now.Add(-2 * time.Hour)
+	newest := now.Add(-20 * time.Minute)
+	checkpoint := now.Add(-40 * time.Minute)
+	oldest := now.Add(-time.Hour)
+	timestamp := func(value time.Time) string {
+		return fmt.Sprintf("%d.%06d", value.Unix(), value.Nanosecond()/1_000)
+	}
+	state := NewMemoryContextSyncStateStore()
+	for _, channelID := range []string{"C-busy", "C-later"} {
+		if err := state.CompleteBootstrap(context.Background(), "org", "team", channelID, previous); err != nil {
+			t.Fatal(err)
+		}
+	}
+	busy := testSlackChannel("C-busy", "busy", false)
+	later := testSlackChannel("C-later", "later", false)
+	busyMember, laterMember := busy, later
+	busyMember.IsMember, laterMember.IsMember = true, true
+	busyFirst := &slackapi.GetConversationHistoryResponse{
+		Messages: []slackapi.Message{
+			{Msg: slackapi.Msg{Timestamp: timestamp(newest), User: "U-human", Text: "newest"}},
+			{Msg: slackapi.Msg{Timestamp: timestamp(checkpoint), User: "U-human", Text: "checkpoint"}},
+		},
+		HasMore: true,
+	}
+	busyFirst.ResponseMetaData.NextCursor = "next"
+	api := &fakeContextSyncAPI{
+		channels:    []slackapi.Channel{busy, later},
+		botChannels: []slackapi.Channel{busyMember, laterMember},
+		historyPages: map[string][]*slackapi.GetConversationHistoryResponse{
+			"C-busy": {
+				busyFirst,
+				{Messages: []slackapi.Message{{Msg: slackapi.Msg{Timestamp: timestamp(oldest), User: "U-human", Text: "oldest"}}}},
+			},
+			"C-later": {{Messages: []slackapi.Message{{Msg: slackapi.Msg{Timestamp: timestamp(newest), User: "U-human", Text: "later"}}}}},
+		},
+	}
+	syncer, err := newContextSyncerWithAPIs(ContextSyncOptions{
+		OrganizationID: "org", TeamID: "team", BotUserID: "U-tag", Lookback: 24 * time.Hour, Timeout: time.Second,
+		MaxChannels: 10, MaxMessages: 4, MessagesPerChannel: 2, StateStore: state,
+	}, api, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := syncer.Discover(context.Background(), func(context.Context, types.SlackContextChannel) (bool, error) { return true, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := run.syncThrough
+	var recovered []string
+	first, err := syncer.CatchUp(context.Background(), run, func(_ context.Context, envelope types.SlackEnvelope) error {
+		recovered = append(recovered, envelope.ChannelID+"/"+envelope.MessageTS)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ChannelsDeferred != 1 || first.ChannelsCaughtUp != 1 || len(recovered) != 3 {
+		t.Fatalf("first bounded catch-up = %#v recovered=%v", first, recovered)
+	}
+	states, err := state.List(context.Background(), "org", "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointDelta := states["C-busy"].CatchUpLatest.Sub(checkpoint)
+	if checkpointDelta < 0 {
+		checkpointDelta = -checkpointDelta
+	}
+	if !states["C-busy"].SyncedThrough.Equal(previous) || checkpointDelta > time.Microsecond {
+		t.Fatalf("busy checkpoint = %#v", states["C-busy"])
+	}
+	resumeLatest := slackHistoryTimestamp(states["C-busy"].CatchUpLatest)
+	if !states["C-later"].SyncedThrough.Equal(target) {
+		t.Fatalf("later channel did not complete = %#v", states["C-later"])
+	}
+
+	second, err := syncer.CatchUp(context.Background(), run, func(_ context.Context, envelope types.SlackEnvelope) error {
+		recovered = append(recovered, envelope.ChannelID+"/"+envelope.MessageTS)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ChannelsDeferred != 0 || second.ChannelsCaughtUp != 1 || len(recovered) != 4 {
+		t.Fatalf("second bounded catch-up = %#v recovered=%v", second, recovered)
+	}
+	if len(api.historyParams) < 3 || api.historyParams[2].Latest != resumeLatest {
+		t.Fatalf("resumed history params = %#v", api.historyParams)
+	}
+	states, err = state.List(context.Background(), "org", "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !states["C-busy"].SyncedThrough.Equal(target) || !states["C-busy"].CatchUpThrough.IsZero() {
+		t.Fatalf("busy catch-up did not complete = %#v", states["C-busy"])
+	}
+}
+
+func TestContextSyncStateHoldsLiveWatermarkUntilCatchUpCompletes(t *testing.T) {
+	state := NewMemoryContextSyncStateStore()
+	previous := time.Date(2026, 8, 4, 8, 0, 0, 0, time.UTC)
+	target := previous.Add(time.Hour)
+	live := target.Add(time.Minute)
+	if err := state.CompleteBootstrap(context.Background(), "org", "team", "C-channel", previous); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.BeginCatchUp(context.Background(), "org", "team", "C-channel", target); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Advance(context.Background(), "org", "team", "C-channel", live); err != nil {
+		t.Fatal(err)
+	}
+	states, _ := state.List(context.Background(), "org", "team")
+	if !states["C-channel"].SyncedThrough.Equal(previous) || !states["C-channel"].LiveThrough.Equal(live) {
+		t.Fatalf("active catch-up watermark = %#v", states["C-channel"])
+	}
+	if err := state.CompleteCatchUp(context.Background(), "org", "team", "C-channel", target); err != nil {
+		t.Fatal(err)
+	}
+	states, _ = state.List(context.Background(), "org", "team")
+	if !states["C-channel"].SyncedThrough.Equal(live) || !states["C-channel"].LiveThrough.IsZero() {
+		t.Fatalf("completed catch-up watermark = %#v", states["C-channel"])
+	}
+}
+
+func TestContextSyncCatchUpRecoversRepliesInExistingTagThreads(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	previous := now.Add(-2 * time.Hour)
+	rootAt := previous.Add(-time.Hour)
+	replyAt := now.Add(-time.Hour)
+	timestamp := func(value time.Time) string {
+		return fmt.Sprintf("%d.%06d", value.Unix(), value.Nanosecond()/1_000)
+	}
+	rootTS, replyTS := timestamp(rootAt), timestamp(replyAt)
+	state := NewMemoryContextSyncStateStore()
+	if err := state.CompleteBootstrap(context.Background(), "org", "team", "C-thread", previous); err != nil {
+		t.Fatal(err)
+	}
+	sessionStore := sessions.NewMemoryStore(func() time.Time { return now })
+	if _, _, err := sessionStore.Resolve(context.Background(), "org", "team", "C-thread", rootTS); err != nil {
+		t.Fatal(err)
+	}
+	channel := testSlackChannel("C-thread", "thread", false)
+	member := channel
+	member.IsMember = true
+	api := &fakeContextSyncAPI{
+		channels:    []slackapi.Channel{channel},
+		botChannels: []slackapi.Channel{member},
+		history:     map[string][]slackapi.Message{"C-thread": {}},
+		replies: map[string][]slackapi.Message{
+			"C-thread/" + rootTS: {
+				{Msg: slackapi.Msg{Timestamp: rootTS, User: "U-requester", Text: "old root"}},
+				{Msg: slackapi.Msg{Timestamp: replyTS, ThreadTimestamp: rootTS, User: "U-requester", Text: "offline continuation"}},
+			},
+		},
+	}
+	syncer, err := newContextSyncerWithAPIs(ContextSyncOptions{
+		OrganizationID: "org", TeamID: "team", BotUserID: "U-tag", Lookback: 24 * time.Hour, Timeout: time.Second,
+		MaxChannels: 10, MaxMessages: 10, MessagesPerChannel: 10, StateStore: state,
+		ActiveThreadRoots: func(ctx context.Context, channelID string, updatedSince time.Time) ([]string, error) {
+			return sessionStore.ListRoots(ctx, "org", "team", channelID, updatedSince)
+		},
+	}, api, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := syncer.Discover(context.Background(), func(context.Context, types.SlackContextChannel) (bool, error) { return true, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recovered []types.SlackEnvelope
+	stats, err := syncer.CatchUp(context.Background(), run, func(_ context.Context, envelope types.SlackEnvelope) error {
+		recovered = append(recovered, envelope)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ChannelsCaughtUp != 1 || stats.MessagesRecovered != 1 || len(recovered) != 1 {
+		t.Fatalf("thread catch-up = %#v recovered=%#v", stats, recovered)
+	}
+	if recovered[0].MessageTS != replyTS || recovered[0].ThreadTS != rootTS {
+		t.Fatalf("recovered active-thread reply = %#v", recovered[0])
+	}
+	if len(api.replyCalls) != 1 || api.replyCalls[0] != "C-thread/"+rootTS {
+		t.Fatalf("active-thread reply calls = %v", api.replyCalls)
 	}
 }
 
@@ -335,7 +588,7 @@ func TestContextSyncReconcilesBotMembershipSeparatelyFromUserVisibility(t *testi
 	botJoined.IsMember = true
 	api := &fakeContextSyncAPI{
 		channels:    []slackapi.Channel{visibleJoined, visibleNotJoined},
-		botChannels: []slackapi.Channel{botJoined, visibleNotJoined},
+		botChannels: []slackapi.Channel{botJoined},
 	}
 	syncer, err := newContextSyncer(ContextSyncOptions{
 		OrganizationID: "org", TeamID: "team", Lookback: time.Hour, Timeout: time.Minute,
@@ -354,6 +607,14 @@ func TestContextSyncReconcilesBotMembershipSeparatelyFromUserVisibility(t *testi
 	}
 	if len(got) != 2 || !got[0].IsChannel || !got[0].BotMembershipKnown || !got[0].BotIsMember || !got[1].BotMembershipKnown || got[1].BotIsMember {
 		t.Fatalf("bot membership reconciliation = %#v", got)
+	}
+	if api.botListCalls != 1 || api.botConversationIn == nil || len(api.botConversationIn.Types) != 2 {
+		t.Fatalf("bot membership request = %#v calls=%d", api.botConversationIn, api.botListCalls)
+	}
+	for _, conversationType := range api.botConversationIn.Types {
+		if conversationType == "im" || conversationType == "mpim" {
+			t.Fatalf("bot membership request included non-channel type %q", conversationType)
+		}
 	}
 }
 

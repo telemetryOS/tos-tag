@@ -203,7 +203,7 @@ func (s *MongoStore) ReviewNote(ctx context.Context, organizationID, channelID, 
 }
 
 func (s *MongoStore) ListNotes(ctx context.Context, organizationID, channelID string) ([]NoteRevision, error) {
-	return s.findNotes(ctx, bson.M{"organization_id": organizationID, "channel_id": channelID})
+	return s.findNotes(ctx, scopeFilter(organizationID, channelID))
 }
 
 func (s *MongoStore) ActiveNotes(ctx context.Context, organizationID, channelID string) ([]NoteRevision, error) {
@@ -211,7 +211,7 @@ func (s *MongoStore) ActiveNotes(ctx context.Context, organizationID, channelID 
 }
 
 func (s *MongoStore) findNotes(ctx context.Context, filter bson.M) ([]NoteRevision, error) {
-	cursor, err := s.db.Collection(models.CollectionNoteRevisions).Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "revision", Value: 1}}))
+	cursor, err := s.db.Collection(models.CollectionNoteRevisions).Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "channel_id", Value: 1}, {Key: "revision", Value: 1}}))
 	if err != nil {
 		return nil, err
 	}

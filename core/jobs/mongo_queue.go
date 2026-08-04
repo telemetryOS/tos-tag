@@ -91,9 +91,6 @@ func (q *MongoQueue) RecoverExpired(ctx context.Context) error {
 }
 
 func (q *MongoQueue) Claim(ctx context.Context, worker types.WorkerID, leaseDuration time.Duration) (Job, error) {
-	if err := q.RecoverExpired(ctx); err != nil {
-		return Job{}, err
-	}
 	now := q.now().UTC()
 	filter := bson.M{
 		"state":        string(StateQueued),
@@ -141,16 +138,7 @@ func (q *MongoQueue) Transition(ctx context.Context, id types.JobID, leaseToken 
 		mutate(&current)
 	}
 	now := q.now().UTC()
-	set := bson.M{
-		"state":                string(to),
-		"result":               current.Result,
-		"failure_reason":       current.FailureReason,
-		"available_at":         current.AvailableAt,
-		"approval_id":          current.ApprovalID,
-		"approved_action_hash": current.ApprovedActionHash,
-		"progress_message_ts":  current.ProgressMessageTS,
-		"updated_at":           now,
-	}
+	set := transitionSet(current, to, now)
 	if to == StateSucceeded || to == StateFailed || to == StateCancelled || to == StateRetryWait || to == StateNeedsReconciliation || to == StateWaitingApproval {
 		set["lease"] = models.Lease{}
 		set["writer_active"] = to == StateWaitingApproval
@@ -171,6 +159,24 @@ func (q *MongoQueue) Transition(ctx context.Context, id types.JobID, leaseToken 
 		return Job{}, fmt.Errorf("transition job: %w", err)
 	}
 	return fromModel(updated), nil
+}
+
+// transitionSet is the Mongo persistence side of Queue.Transition's mutate
+// contract. Keep it aligned with the fields callers are permitted to change
+// through the transition callback and with MemoryQueue.Transition.
+func transitionSet(current Job, to State, now time.Time) bson.M {
+	return bson.M{
+		"state":                string(to),
+		"result":               current.Result,
+		"failure_reason":       current.FailureReason,
+		"available_at":         current.AvailableAt,
+		"approval_id":          current.ApprovalID,
+		"approved_action_hash": current.ApprovedActionHash,
+		"progress_message_ts":  current.ProgressMessageTS,
+		"resolved_model":       current.ResolvedModel,
+		"route_trace":          current.RouteTrace,
+		"updated_at":           now,
+	}
 }
 
 func (q *MongoQueue) SuspendForApproval(ctx context.Context, id types.JobID, leaseToken, approvalID string) (Job, error) {
@@ -221,9 +227,6 @@ func (q *MongoQueue) Cancel(ctx context.Context, id types.JobID, reason string) 
 		return Job{}, err
 	}
 	return fromModel(updated), nil
-}
-func (q *MongoQueue) Interrupt(ctx context.Context, id types.JobID, reason string) (Job, error) {
-	return q.Cancel(ctx, id, reason)
 }
 func (q *MongoQueue) MarkCompletedUndelivered(ctx context.Context, id types.JobID, reason string) (Job, error) {
 	var updated models.Job
@@ -294,15 +297,63 @@ func (q *MongoQueue) Get(ctx context.Context, id types.JobID) (Job, error) {
 	return fromModel(doc), nil
 }
 
+func (q *MongoQueue) Count(ctx context.Context) (int, error) {
+	count, err := q.db.Collection(models.CollectionJobs).CountDocuments(ctx, bson.M{})
+	if err != nil {
+		return 0, fmt.Errorf("count jobs: %w", err)
+	}
+	return int(count), nil
+}
+
 func (q *MongoQueue) List(ctx context.Context) ([]Job, error) {
 	return q.list(ctx, bson.M{})
+}
+
+func (q *MongoQueue) ListReconciliation(ctx context.Context, now time.Time) ([]Job, error) {
+	return q.list(ctx, bson.M{"$or": bson.A{
+		bson.M{"state": string(StateWaitingApproval)},
+		bson.M{"state": string(StateNeedsReconciliation)},
+		bson.M{"state": string(StateQueued), "$or": bson.A{
+			bson.M{"expires_at": bson.M{"$lte": now}},
+			bson.M{"$expr": bson.M{"$gte": bson.A{"$attempt", "$max_attempts"}}},
+		}},
+		bson.M{"state": string(StateRetryWait), "available_at": bson.M{"$lte": now}},
+		bson.M{"state": string(StateSucceeded), "final_delivery_enqueued": bson.M{"$ne": true}, "expires_at": bson.M{"$gt": now}},
+	}})
+}
+
+func (q *MongoQueue) MarkFinalDeliveryEnqueued(ctx context.Context, id types.JobID) error {
+	result, err := q.db.Collection(models.CollectionJobs).UpdateOne(ctx,
+		bson.M{"public_id": string(id), "state": string(StateSucceeded)},
+		bson.M{"$set": bson.M{"final_delivery_enqueued": true, "updated_at": q.now().UTC()}, "$inc": bson.M{"version": 1}},
+	)
+	if err != nil {
+		return fmt.Errorf("mark final delivery enqueued: %w", err)
+	}
+	if result.MatchedCount == 0 {
+		return ErrInvalidState
+	}
+	return nil
 }
 
 func (q *MongoQueue) ListOrganization(ctx context.Context, organizationID string) ([]Job, error) {
 	if organizationID == "" {
 		return nil, errors.New("organization_id is required")
 	}
-	return q.list(ctx, bson.M{"organization_id": organizationID})
+	cursor, err := q.db.Collection(models.CollectionJobs).Find(ctx, bson.M{"organization_id": organizationID}, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}).SetLimit(organizationListLimit))
+	if err != nil {
+		return nil, fmt.Errorf("list recent jobs: %w", err)
+	}
+	defer cursor.Close(ctx)
+	var docs []models.Job
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, fmt.Errorf("decode recent jobs: %w", err)
+	}
+	result := make([]Job, len(docs))
+	for i, doc := range docs {
+		result[i] = fromModel(doc)
+	}
+	return result, nil
 }
 
 func (q *MongoQueue) list(ctx context.Context, filter bson.M) ([]Job, error) {
@@ -349,7 +400,7 @@ func fromModel(doc models.Job) Job {
 		AdmissionReservationID: doc.AdmissionReservationID,
 		ResolvedModel:          resolved, RouteTrace: trace,
 		SteeringEpoch: doc.SteeringEpoch, Lease: Lease{Owner: types.WorkerID(doc.Lease.Owner), Token: doc.Lease.Token, ExpiresAt: doc.Lease.ExpiresAt, Heartbeat: doc.Lease.Heartbeat},
-		Result: result, FailureReason: doc.FailureReason, ApprovalID: doc.ApprovalID, ApprovedActionHash: doc.ApprovedActionHash, ProgressMessageTS: doc.ProgressMessageTS,
+		Result: result, FailureReason: doc.FailureReason, ApprovalID: doc.ApprovalID, ApprovedActionHash: doc.ApprovedActionHash, ProgressMessageTS: doc.ProgressMessageTS, FinalDeliveryEnqueued: doc.FinalDeliveryEnqueued,
 		AvailableAt: doc.AvailableAt, CreatedAt: doc.CreatedAt, UpdatedAt: doc.UpdatedAt, ExpiresAt: doc.ExpiresAt, Version: doc.Version,
 	}
 }

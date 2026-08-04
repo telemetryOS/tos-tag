@@ -3,8 +3,8 @@ package core
 
 import (
 	"context"
-	"crypto/rand"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/RobertWHurst/blackbox"
@@ -107,7 +107,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	if cfg.Slack.LiveEnabled {
 		scopeResolver = organizationStore
 	}
-	admissionController := admission.NewMongo(db)
+	admissionController := admission.NewMongo(db, logger)
 	var classifierFloodGate flood.Gate
 	if cfg.Classifier.FloodProtectionEnabled {
 		classifierFloodGate, err = flood.NewMongo(db, cfg.Classifier.FloodMaxMessages, cfg.Classifier.FloodWindow)
@@ -139,15 +139,15 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	triggerStore := triggers.NewMongoStore(db)
 	routineScheduler := routines.NewScheduler(routineStore, jobQueue, routines.AuthorizerFunc(func(ctx context.Context, routine routines.Routine) error {
 		policy, err := organizationStore.Resolve(ctx, routine.OrganizationID, routine.WorkspaceID, routine.ChannelID)
-		if err != nil || !policy.Enrolled || policy.KillSwitch || !policy.MembershipRefreshedAt.After(time.Now().UTC().Add(-24*time.Hour)) {
+		if err != nil || !authorizedBackgroundScope(policy, time.Now().UTC(), slackOutputChannelAllowedConfig(cfg, routine.ChannelID)) {
 			return fmt.Errorf("routine scope denied")
 		}
 		return nil
 	}))
 	routineService := routines.NewService(routineScheduler, cfg.Jobs.Poll)
-	auditKey := make([]byte, 32)
-	if _, err := rand.Read(auditKey); err != nil {
-		return nil, fmt.Errorf("create audit commitment key: %w", err)
+	auditKey, err := cfg.AuditCommitmentKey()
+	if err != nil {
+		return nil, fmt.Errorf("load audit commitment key: %w", err)
 	}
 	auditChain, err := audit.NewMongoChain(db, auditKey)
 	if err != nil {
@@ -195,7 +195,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	approvalStore := approvals.NewMongoStore(db)
 	approvalAuthorizer := approvals.ApproverAuthorizerFunc(func(ctx context.Context, organizationID, workspaceID, channelID, userID string) error {
 		policy, resolveErr := organizationStore.Resolve(ctx, organizationID, workspaceID, channelID)
-		if resolveErr != nil || !policy.Enrolled || policy.KillSwitch || !policy.WorkspaceEnabled || !policy.MembershipRefreshedAt.After(time.Now().UTC().Add(-24*time.Hour)) {
+		if resolveErr != nil || !authorizedFreshScope(policy, time.Now().UTC()) {
 			return fmt.Errorf("approval channel policy denied")
 		}
 		for _, allowedUserID := range policy.ApproverUserIDs {
@@ -225,7 +225,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 			return nil, err
 		}
 	}
-	responseRouter, err := modelrouter.NewRegistry(defaultResponseProfiles(cfg.Models), nil, nil, cfg.Models.DefaultProfile, "routing/v1")
+	responseRouter, err := modelrouter.NewRegistry(DefaultResponseProfiles(cfg.Models), nil, nil, cfg.Models.DefaultProfile, "routing/v1")
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +286,10 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 				MessagesPerChannel: cfg.Slack.ContextSyncMessagesPerChannel,
 				RequestInterval:    cfg.Slack.ContextSyncRequestInterval,
 				StateStore:         contextSyncState,
-				Logger:             logger,
+				ActiveThreadRoots: func(ctx context.Context, channelID string, updatedSince time.Time) ([]string, error) {
+					return sessionStore.ListRoots(ctx, cfg.Slack.OrganizationID, cfg.Slack.TeamID, channelID, updatedSince)
+				},
+				Logger: logger,
 			})
 			if liveErr != nil {
 				return nil, fmt.Errorf("construct Slack user context sync: %w", liveErr)
@@ -322,11 +325,9 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 			if putErr != nil {
 				return slack.ModeChangeResult{}, fmt.Errorf("persist channel policy: %w", putErr)
 			}
-			_, _ = auditChain.Append(ctx, audit.AppendRequest{
-				OrganizationID: request.OrganizationID, Type: "channel_policy.mode_command", ActorID: request.UserID,
-				ResourceID: request.ChannelID, IdempotencyKey: "channel-mode/" + request.ChannelID + "/" + types.NewID("mode"),
-				Metadata: map[string]any{"previous_mode": previous, "mode": string(saved.ParticipationMode), "surface": "slack_slash_command"},
-			})
+			if auditErr := appendModeChangeAudit(ctx, auditChain, request, saved, previous); auditErr != nil {
+				logger.WithCtx(blackbox.Ctx{"organization_id": request.OrganizationID, "channel_id": request.ChannelID, "error_type": fmt.Sprintf("%T", auditErr)}).Error("channel mode change audit persistence failed")
+			}
 			return slack.ModeChangeResult{Mode: string(saved.ParticipationMode), Previous: previous, Changed: true}, nil
 		})
 	}
@@ -344,9 +345,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	}
 	triggerScheduler, err := triggers.NewScheduler(triggerStore, jobQueue, triggers.GateFunc(pipe.EvaluateHeartbeat), triggers.AuthorizerFunc(func(ctx context.Context, subscription triggers.Subscription) error {
 		policy, resolveErr := organizationStore.Resolve(ctx, subscription.OrganizationID, subscription.WorkspaceID, subscription.ChannelID)
-		participating := policy.ParticipationMode == types.ModeMention || policy.ParticipationMode == types.ModeAssist || policy.ParticipationMode == types.ModeProactive
-		membershipAuthorized := !policy.ParticipationManagedByMembership || (policy.BotMembershipKnown && policy.BotIsMember)
-		if resolveErr != nil || !policy.Enrolled || policy.KillSwitch || !participating || !membershipAuthorized || !policy.MembershipRefreshedAt.After(time.Now().UTC().Add(-24*time.Hour)) || !slackOutputChannelAllowedConfig(cfg, subscription.ChannelID) {
+		if resolveErr != nil || !authorizedBackgroundScope(policy, time.Now().UTC(), slackOutputChannelAllowedConfig(cfg, subscription.ChannelID)) {
 			return fmt.Errorf("trigger scope denied")
 		}
 		return nil
@@ -374,7 +373,27 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	return &Core{Config: cfg, Logger: logger, database: db, pipeline: pipe, server: srv, retention: retentionJanitor, router: responseRouter, toolBridge: toolBridge, toolIDs: allowedToolIDs, routines: routineService, triggers: triggerService, contextSync: slackContextSync, activity: activityFeed, memoryCurator: memoryCurator}, nil
 }
 
-func defaultResponseProfiles(cfg config.ModelConfig) []types.ModelProfile {
+func appendModeChangeAudit(ctx context.Context, appender audit.Appender, request slack.ModeChangeRequest, saved orgconfig.ChannelPolicy, previous string) error {
+	if appender == nil {
+		return fmt.Errorf("channel mode audit appender is required")
+	}
+	_, err := appender.Append(ctx, audit.AppendRequest{
+		OrganizationID: request.OrganizationID,
+		Type:           "channel_policy.mode_command",
+		ActorID:        request.UserID,
+		ResourceID:     request.ChannelID,
+		RetentionEpoch: time.Now().UTC().Format("2006-01"),
+		IdempotencyKey: "channel-mode/" + request.ChannelID + "/" + strconv.FormatInt(saved.Version, 10),
+		Metadata: map[string]any{
+			"previous_mode": previous,
+			"mode":          string(saved.ParticipationMode),
+			"surface":       "slack_slash_command",
+		},
+	})
+	return err
+}
+
+func DefaultResponseProfiles(cfg config.ModelConfig) []types.ModelProfile {
 	profiles := make([]types.ModelProfile, 0, 3)
 	for _, candidate := range []struct {
 		id       string
@@ -412,6 +431,18 @@ func slackOutputChannelAllowedConfig(cfg *config.Config, channelID string) bool 
 		}
 	}
 	return false
+}
+
+const membershipPolicyFreshness = 24 * time.Hour
+
+func authorizedFreshScope(policy orgconfig.ChannelPolicy, now time.Time) bool {
+	return policy.Enrolled && !policy.KillSwitch && policy.MembershipRefreshedAt.After(now.Add(-membershipPolicyFreshness))
+}
+
+func authorizedBackgroundScope(policy orgconfig.ChannelPolicy, now time.Time, outputAllowed bool) bool {
+	participating := policy.ParticipationMode == types.ModeMention || policy.ParticipationMode == types.ModeAssist || policy.ParticipationMode == types.ModeProactive
+	membershipAuthorized := !policy.ParticipationManagedByMembership || (policy.BotMembershipKnown && policy.BotIsMember)
+	return authorizedFreshScope(policy, now) && participating && membershipAuthorized && outputAllowed
 }
 
 type loggedClassifier struct {

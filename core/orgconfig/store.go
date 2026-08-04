@@ -115,7 +115,7 @@ func (s *Memory) Resolve(_ context.Context, org, team, channel string) (ChannelP
 		value.WorkspaceEnabled = workspace.Enabled
 		value.KillSwitch = value.KillSwitch || !workspace.Enabled
 	} else {
-		value.WorkspaceEnabled = true
+		return ChannelPolicy{}, ErrNotFound
 	}
 	return value, nil
 }
@@ -247,7 +247,8 @@ func (s *Memory) ListChannels(_ context.Context, org string) ([]ChannelPolicy, e
 				v.WorkspaceEnabled = workspace.Enabled
 				v.KillSwitch = v.KillSwitch || !workspace.Enabled
 			} else {
-				v.WorkspaceEnabled = true
+				v.WorkspaceEnabled = false
+				v.KillSwitch = true
 			}
 			out = append(out, v)
 		}

@@ -29,13 +29,15 @@ func (s *MongoStore) Resolve(ctx context.Context, organizationID, teamID, channe
 		return Session{}, false, fmt.Errorf("session scope is required")
 	}
 	filter := bson.M{"organization_id": organizationID, "team_id": teamID, "channel_id": channelID, "root_thread_ts": rootThreadTS}
+	now := s.now().UTC()
 	var existing models.Session
-	if err := s.db.Collection(models.CollectionSessions).FindOne(ctx, filter).Decode(&existing); err == nil {
+	if err := s.db.Collection(models.CollectionSessions).FindOneAndUpdate(ctx, filter, bson.M{
+		"$set": bson.M{"updated_at": now}, "$inc": bson.M{"version": 1},
+	}, options.FindOneAndUpdate().SetReturnDocument(options.After)).Decode(&existing); err == nil {
 		return sessionFromModel(existing), false, nil
 	} else if !errors.Is(err, mongo.ErrNoDocuments) {
 		return Session{}, false, fmt.Errorf("get session: %w", err)
 	}
-	now := s.now().UTC()
 	doc := models.Session{PublicID: types.NewID("ses"), OrganizationID: organizationID, TeamID: teamID, ChannelID: channelID, RootThreadTS: rootThreadTS, CurrentGeneration: 1, CreatedAt: now, UpdatedAt: now, Version: 1}
 	if _, err := s.db.Collection(models.CollectionSessions).InsertOne(ctx, doc); err != nil {
 		if !mongo.IsDuplicateKeyError(err) {
@@ -74,6 +76,34 @@ func (s *MongoStore) Find(ctx context.Context, organizationID, teamID, channelID
 		return Session{}, fmt.Errorf("find session: %w", err)
 	}
 	return sessionFromModel(doc), nil
+}
+
+func (s *MongoStore) ListRoots(ctx context.Context, organizationID, teamID, channelID string, updatedSince time.Time) ([]string, error) {
+	filter := bson.M{"organization_id": organizationID, "team_id": teamID, "channel_id": channelID}
+	if !updatedSince.IsZero() {
+		filter["updated_at"] = bson.M{"$gte": updatedSince.UTC()}
+	}
+	cursor, err := s.db.Collection(models.CollectionSessions).Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "root_thread_ts", Value: 1}}))
+	if err != nil {
+		return nil, fmt.Errorf("list channel session roots: %w", err)
+	}
+	defer cursor.Close(ctx)
+	var roots []string
+	for cursor.Next(ctx) {
+		var doc struct {
+			RootThreadTS string `bson:"root_thread_ts"`
+		}
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("decode channel session root: %w", err)
+		}
+		if doc.RootThreadTS != "" {
+			roots = append(roots, doc.RootThreadTS)
+		}
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, fmt.Errorf("iterate channel session roots: %w", err)
+	}
+	return roots, nil
 }
 
 func sessionFromModel(doc models.Session) Session {

@@ -117,13 +117,16 @@ func (s *Store) ActivateDirective(_ context.Context, organizationID, channelID, 
 	revisions := s.directives[key]
 	found := -1
 	for index := range revisions {
-		revisions[index].Active = revisions[index].ID == revisionID
-		if revisions[index].Active {
+		if revisions[index].ID == revisionID {
 			found = index
+			break
 		}
 	}
 	if found < 0 {
 		return DirectiveRevision{}, errors.New("directive revision not found")
+	}
+	for index := range revisions {
+		revisions[index].Active = index == found
 	}
 	s.directives[key] = revisions
 	return revisions[found], nil
@@ -164,6 +167,22 @@ func (s *Store) ListDirectives(_ context.Context, organizationID, channelID stri
 func (s *Store) ListNotes(_ context.Context, organizationID, channelID string) ([]NoteRevision, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if channelID == "" {
+		var result []NoteRevision
+		prefix := organizationID + "/"
+		for key, revisions := range s.notes {
+			if strings.HasPrefix(key, prefix) {
+				result = append(result, revisions...)
+			}
+		}
+		sort.Slice(result, func(i, j int) bool {
+			if result[i].ChannelID == result[j].ChannelID {
+				return result[i].Revision < result[j].Revision
+			}
+			return result[i].ChannelID < result[j].ChannelID
+		})
+		return result, nil
+	}
 	return append([]NoteRevision(nil), s.notes[scopeKey(organizationID, channelID)]...), nil
 }
 func (s *Store) ActiveNotes(_ context.Context, organizationID, channelID string) ([]NoteRevision, error) {

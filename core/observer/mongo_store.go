@@ -289,18 +289,44 @@ func (s *MongoStore) Channels(ctx context.Context, organizationID string) ([]str
 	return values, nil
 }
 
-func (s *MongoStore) MarkOutput(ctx context.Context, observationID, jobID, deliveryID string) (bool, error) {
+func (s *MongoStore) ReserveOutput(ctx context.Context, observationID, reservationID string) (bool, error) {
+	if observationID == "" || reservationID == "" {
+		return false, ErrInvalidEnvelope
+	}
 	result, err := s.db.Collection(models.CollectionObservations).UpdateOne(ctx, bson.M{
-		"public_id":       observationID,
-		"output_produced": false,
+		"public_id": observationID,
+		"$or": bson.A{
+			bson.M{"output_produced": false},
+			bson.M{"output_produced": true, "output_reservation_id": reservationID},
+		},
 	}, bson.M{
-		"$set": bson.M{"output_produced": true, "output_job_id": jobID, "output_delivery_id": deliveryID},
+		"$set": bson.M{"output_produced": true, "output_reservation_id": reservationID},
 		"$inc": bson.M{"version": 1},
 	})
 	if err != nil {
-		return false, fmt.Errorf("mark observation output: %w", err)
+		return false, fmt.Errorf("reserve observation output: %w", err)
 	}
-	return result.ModifiedCount == 1, nil
+	return result.MatchedCount == 1, nil
+}
+
+func (s *MongoStore) FinalizeOutput(ctx context.Context, observationID, reservationID, jobID, deliveryID string) error {
+	if observationID == "" || reservationID == "" || (jobID == "") == (deliveryID == "") {
+		return ErrInvalidEnvelope
+	}
+	result, err := s.db.Collection(models.CollectionObservations).UpdateOne(ctx, bson.M{
+		"public_id": observationID, "output_produced": true, "output_reservation_id": reservationID,
+	}, bson.M{
+		"$set":   bson.M{"output_job_id": jobID, "output_delivery_id": deliveryID},
+		"$unset": bson.M{"output_reservation_id": ""},
+		"$inc":   bson.M{"version": 1},
+	})
+	if err != nil {
+		return fmt.Errorf("finalize observation output: %w", err)
+	}
+	if result.ModifiedCount != 1 {
+		return ErrNoPendingObservation
+	}
+	return nil
 }
 
 func (s *MongoStore) LateCandidates(ctx context.Context, organizationID string, since, before time.Time, limit int) ([]models.Observation, error) {

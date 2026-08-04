@@ -48,7 +48,15 @@ func (q *MongoQueue) Enqueue(ctx context.Context, spec Spec) (Record, bool, erro
 
 func (q *MongoQueue) Claim(ctx context.Context, worker types.WorkerID, duration time.Duration) (Record, error) {
 	now := q.now().UTC()
-	_, _ = q.db.Collection(models.CollectionDeliveries).UpdateMany(ctx, bson.M{"status": string(StatusLeased), "lease.expires_at": bson.M{"$lte": now}}, bson.M{"$set": bson.M{"status": string(StatusPending), "lease": models.Lease{}, "updated_at": now}, "$inc": bson.M{"version": 1}})
+	if _, err := q.db.Collection(models.CollectionDeliveries).UpdateMany(ctx, bson.M{"status": string(StatusLeased), "lease.expires_at": bson.M{"$lte": now}}, bson.M{"$set": bson.M{"status": string(StatusPending), "lease": models.Lease{}, "updated_at": now}, "$inc": bson.M{"version": 1}}); err != nil {
+		return Record{}, fmt.Errorf("recover expired delivery leases: %w", err)
+	}
+	if _, err := q.db.Collection(models.CollectionDeliveries).UpdateMany(ctx, bson.M{
+		"status": bson.M{"$in": []string{string(StatusPending), string(StatusRetryWait)}},
+		"$expr":  bson.M{"$gte": []any{"$attempt", "$max_attempts"}},
+	}, bson.M{"$set": bson.M{"status": string(StatusAbandoned), "failure_reason": "attempts_exhausted", "lease": models.Lease{}, "updated_at": now}, "$inc": bson.M{"version": 1}}); err != nil {
+		return Record{}, fmt.Errorf("abandon exhausted deliveries: %w", err)
+	}
 	after := options.After
 	var doc models.Delivery
 	err := q.db.Collection(models.CollectionDeliveries).FindOneAndUpdate(ctx, bson.M{
@@ -107,6 +115,28 @@ func (q *MongoQueue) Get(ctx context.Context, id types.DeliveryID) (Record, erro
 	return deliveryFromModel(doc), nil
 }
 
+func (q *MongoQueue) FindByIdempotency(ctx context.Context, organizationID, idempotencyKey string) (Record, error) {
+	if organizationID == "" || idempotencyKey == "" {
+		return Record{}, ErrDeliveryNotFound
+	}
+	var doc models.Delivery
+	if err := q.db.Collection(models.CollectionDeliveries).FindOne(ctx, bson.M{"organization_id": organizationID, "idempotency_key": idempotencyKey}).Decode(&doc); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return Record{}, ErrDeliveryNotFound
+		}
+		return Record{}, fmt.Errorf("find delivery by idempotency: %w", err)
+	}
+	return deliveryFromModel(doc), nil
+}
+
+func (q *MongoQueue) Count(ctx context.Context) (int, error) {
+	count, err := q.db.Collection(models.CollectionDeliveries).CountDocuments(ctx, bson.M{})
+	if err != nil {
+		return 0, fmt.Errorf("count deliveries: %w", err)
+	}
+	return int(count), nil
+}
+
 func (q *MongoQueue) List(ctx context.Context) ([]Record, error) {
 	return q.list(ctx, bson.M{})
 }
@@ -115,7 +145,20 @@ func (q *MongoQueue) ListOrganization(ctx context.Context, organizationID string
 	if organizationID == "" {
 		return nil, errors.New("organization_id is required")
 	}
-	return q.list(ctx, bson.M{"organization_id": organizationID})
+	cursor, err := q.db.Collection(models.CollectionDeliveries).Find(ctx, bson.M{"organization_id": organizationID}, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}).SetLimit(organizationListLimit))
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+	var docs []models.Delivery
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, err
+	}
+	result := make([]Record, len(docs))
+	for i, doc := range docs {
+		result[i] = deliveryFromModel(doc)
+	}
+	return result, nil
 }
 
 func (q *MongoQueue) list(ctx context.Context, filter bson.M) ([]Record, error) {

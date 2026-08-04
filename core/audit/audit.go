@@ -143,6 +143,13 @@ func (c *Chain) Verify(organizationID string) error {
 	return nil
 }
 
+func (c *Chain) VerifyContentCommitment(epoch string, content []byte, commitment string) bool {
+	if epoch == "" || len(content) == 0 || commitment == "" {
+		return false
+	}
+	return hmac.Equal([]byte(c.commit(epoch, content)), []byte(commitment))
+}
+
 func (c *Chain) commit(epoch string, content []byte) string {
 	mac := hmac.New(sha256.New, c.hmacKey)
 	_, _ = mac.Write([]byte(epoch))

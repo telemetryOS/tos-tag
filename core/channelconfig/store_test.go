@@ -9,6 +9,7 @@ import (
 
 	"github.com/telemetryos/tos-tag/core/audit"
 	"github.com/telemetryos/tos-tag/core/orgconfig"
+	"github.com/telemetryos/tos-tag/models"
 	"github.com/telemetryos/tos-tag/types"
 )
 
@@ -30,6 +31,21 @@ func TestDirectiveActivationAndRollback(t *testing.T) {
 	}
 	if active, _ := store.ActiveDirective(context.Background(), "org", "alerts"); active.ID != first.ID {
 		t.Fatal("rollback did not restore prior directive")
+	}
+}
+
+func TestFailedDirectiveActivationPreservesCurrentRevision(t *testing.T) {
+	store := NewStore()
+	directive, err := store.PublishDirective(context.Background(), "org", "alerts", "Investigate alerts.", "U1", "source-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ActivateDirective(context.Background(), "org", "alerts", "missing"); err == nil {
+		t.Fatal("missing directive activation succeeded")
+	}
+	active, err := store.ActiveDirective(context.Background(), "org", "alerts")
+	if err != nil || active.ID != directive.ID {
+		t.Fatalf("active=%#v err=%v", active, err)
 	}
 }
 
@@ -72,9 +88,30 @@ func TestListDirectivesWithoutChannelReturnsOrganizationHistory(t *testing.T) {
 	}
 }
 
+func TestListNotesWithoutChannelReturnsOrganizationHistory(t *testing.T) {
+	store := NewStore()
+	first, err := store.ProposeNote(context.Background(), "org", "alerts", "Alert note.", []string{"m1"}, "U1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.ProposeNote(context.Background(), "org", "support", "Support note.", []string{"m2"}, "U1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = store.ProposeNote(context.Background(), "other-org", "alerts", "Do not include this.", []string{"m3"}, "U1")
+	values, err := store.ListNotes(context.Background(), "org", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 2 || values[0].ID != first.ID || values[1].ID != second.ID {
+		t.Fatalf("organization notes=%#v", values)
+	}
+}
+
 func TestEditorAllowsAnyWorkspaceUserInAnEnrolledChannelAndAuditsContentCommitment(t *testing.T) {
 	ctx := context.Background()
 	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutWorkspace(ctx, models.Workspace{OrganizationID: "org", TeamID: "team", Enabled: true})
 	_, err := scopes.PutChannel(ctx, orgconfig.ChannelPolicy{
 		OrganizationID: "org", TeamID: "team", ChannelID: "alerts", Enrolled: true,
 		ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 8,

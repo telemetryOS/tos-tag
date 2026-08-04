@@ -267,51 +267,10 @@ func (s *Scheduler) RunDue(ctx context.Context) error {
 	return nil
 }
 
-type Service struct {
-	scheduler *Scheduler
-	poll      time.Duration
-	cancel    context.CancelFunc
-	done      chan struct{}
-}
+type Service = schedule.Service
 
 func NewService(scheduler *Scheduler, poll time.Duration) *Service {
-	return &Service{scheduler: scheduler, poll: poll}
-}
-
-func (s *Service) Start(parent context.Context) {
-	if s == nil || s.scheduler == nil || s.poll <= 0 || s.cancel != nil {
-		return
-	}
-	ctx, cancel := context.WithCancel(parent)
-	s.cancel = cancel
-	s.done = make(chan struct{})
-	go func() {
-		defer close(s.done)
-		ticker := time.NewTicker(s.poll)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				_ = s.scheduler.RunDue(ctx)
-			}
-		}
-	}()
-}
-
-func (s *Service) Stop(ctx context.Context) error {
-	if s == nil || s.cancel == nil {
-		return nil
-	}
-	s.cancel()
-	select {
-	case <-s.done:
-		s.cancel = nil
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return schedule.NewService(scheduler, poll)
 }
 
 var _ Repository = (*Store)(nil)

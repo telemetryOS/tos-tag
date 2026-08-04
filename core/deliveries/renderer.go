@@ -37,6 +37,7 @@ var (
 	ErrInvalidResult     = errors.New("invalid Slack result")
 	gfmLinkPattern       = regexp.MustCompile(`\[[^\]\n]+\]\([^)\n]+\)`)
 	slackLinkPattern     = regexp.MustCompile(`<([^>|]+)\|([^>]+)>`)
+	slackBareLinkPattern = regexp.MustCompile(`<([A-Za-z][A-Za-z0-9+.-]*:[^>|]+)>`)
 	slackEntityPattern   = regexp.MustCompile(`<(?:@|#|!)[^>]*>`)
 	httpsLinkPattern     = regexp.MustCompile(`(?i)https://[^\s<>()]+`)
 	bareWikiSlugPattern  = regexp.MustCompile(`(?i)(?:^|[\s(])` + "`?" + `(?:primer|artifacts)/[a-z0-9][a-z0-9._/-]*` + "`?" + `(?:$|[\s),.;:])`)
@@ -988,6 +989,12 @@ func validateMRKDWN(text string, allowedMentions types.SlackMentionAllowlist) er
 			return fmt.Errorf("%w: unsafe Slack link", ErrInvalidResult)
 		}
 	}
+	for _, match := range slackBareLinkPattern.FindAllStringSubmatch(text, -1) {
+		parsed, err := url.Parse(match[1])
+		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+			return fmt.Errorf("%w: unsafe Slack link", ErrInvalidResult)
+		}
+	}
 	return nil
 }
 
@@ -1270,12 +1277,66 @@ func hasInlineSlackFormatting(text string) bool {
 	if slackLinkPattern.MatchString(text) {
 		return true
 	}
-	for _, marker := range []string{"`", "*", "_", "~"} {
-		if first := strings.Index(text, marker); first >= 0 && strings.Contains(text[first+1:], marker) {
+	if first := strings.IndexByte(text, '`'); first >= 0 && strings.Contains(text[first+1:], "`") {
+		return true
+	}
+	for _, marker := range []byte{'*', '_', '~'} {
+		if hasDelimitedStyle(text, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+func hasDelimitedStyle(text string, marker byte) bool {
+	for opening := 0; opening < len(text); opening++ {
+		if text[opening] != marker || !styleMarkerCanOpen(text, opening) {
+			continue
+		}
+		if hasClosingStyleMarker(text, opening+1, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasClosingStyleMarker(text string, start int, marker byte) bool {
+	for closing := start; closing < len(text); closing++ {
+		if text[closing] == marker && styleMarkerCanClose(text, closing) {
+			return true
+		}
+	}
+	return false
+}
+
+func styleMarkerCanOpen(text string, index int) bool {
+	if index+1 >= len(text) {
+		return false
+	}
+	next, _ := utf8.DecodeRuneInString(text[index+1:])
+	if unicode.IsSpace(next) {
+		return false
+	}
+	if index == 0 {
+		return true
+	}
+	previous, _ := utf8.DecodeLastRuneInString(text[:index])
+	return unicode.IsSpace(previous) || unicode.IsPunct(previous)
+}
+
+func styleMarkerCanClose(text string, index int) bool {
+	if index == 0 {
+		return false
+	}
+	previous, _ := utf8.DecodeLastRuneInString(text[:index])
+	if unicode.IsSpace(previous) {
+		return false
+	}
+	if index+1 >= len(text) {
+		return true
+	}
+	next, _ := utf8.DecodeRuneInString(text[index+1:])
+	return unicode.IsSpace(next) || unicode.IsPunct(next)
 }
 
 func renderRichTextCell(text string) map[string]any {
@@ -1314,7 +1375,8 @@ func renderRichTextElements(text string) []any {
 		buffer.Reset()
 	}
 	for index := 0; index < len(text); {
-		if text[index] == '<' {
+		codeActive := active["code"]
+		if !codeActive && text[index] == '<' {
 			match := slackLinkPattern.FindStringSubmatchIndex(text[index:])
 			if len(match) == 6 && match[0] == 0 {
 				flush()
@@ -1328,7 +1390,18 @@ func renderRichTextElements(text string) []any {
 			}
 		}
 		if styleName, marker := styles[text[index]]; marker {
-			if active[styleName] || strings.Contains(text[index+1:], string(text[index])) {
+			canToggle := false
+			switch {
+			case text[index] == '`':
+				canToggle = active[styleName] || strings.Contains(text[index+1:], "`")
+			case codeActive:
+				canToggle = false
+			case active[styleName]:
+				canToggle = styleMarkerCanClose(text, index)
+			default:
+				canToggle = styleMarkerCanOpen(text, index) && hasClosingStyleMarker(text, index+1, text[index])
+			}
+			if canToggle {
 				flush()
 				active[styleName] = !active[styleName]
 				index++

@@ -166,6 +166,7 @@ func TestChannelCoverageFiltersNonChannelAndIncompleteRecords(t *testing.T) {
 func TestChannelPolicyMutationIsAuditedAndPersisted(t *testing.T) {
 	srv, _ := newTestServer(t, false)
 	organizations := orgconfig.NewMemory()
+	_, _ = organizations.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-a", TeamID: "team", Enabled: true})
 	srv.deps.Organizations = organizations
 	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
 	policy := orgconfig.ChannelPolicy{

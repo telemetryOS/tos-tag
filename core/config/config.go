@@ -165,6 +165,11 @@ type KeystoreConfig struct {
 	Enabled   bool   `config:"enabled"`
 	MasterKey string `config:"masterKey"`
 }
+type AuditConfig struct {
+	CommitmentKey string `config:"commitmentKey"`
+}
+
+const developmentAuditCommitmentKey = "dG9zLXRhZy1kZXZlbG9wbWVudC1hdWRpdC1rZXkhISE="
 
 type Config struct {
 	Environment  string            `config:"environment"`
@@ -183,6 +188,7 @@ type Config struct {
 	Models       ModelConfig       `config:"models"`
 	Marketplaces MarketplaceConfig `config:"marketplaces"`
 	Keystore     KeystoreConfig    `config:"keystore"`
+	Audit        AuditConfig       `config:"audit"`
 }
 
 var DefaultConfiguration = Config{
@@ -200,6 +206,7 @@ var DefaultConfiguration = Config{
 	Logging:   LoggingConfig{Level: "info"},
 	Telemetry: TelemetryConfig{ServiceName: "tos-tag"},
 	Auth:      AuthConfig{Enabled: false},
+	Audit:     AuditConfig{CommitmentKey: developmentAuditCommitmentKey},
 	Slack: SlackConfig{
 		Mode:                          "stub",
 		ContextSyncLookback:           7 * 24 * time.Hour,
@@ -469,6 +476,9 @@ func Validate(cfg *Config) error {
 		if !strings.HasPrefix(cfg.Slack.AppLevelToken, "xapp-") || !strings.HasPrefix(cfg.Slack.BotUserOAuthToken, "xoxb-") {
 			return fmt.Errorf("Slack socket_mode requires an app-level xapp token and bot-user OAuth xoxb token")
 		}
+		if !strings.HasPrefix(cfg.Slack.BotUserID, "U") && !strings.HasPrefix(cfg.Slack.BotUserID, "W") {
+			return fmt.Errorf("Slack socket_mode requires a U- or W-prefixed botUserId")
+		}
 		if cfg.Slack.UserOAuthToken != "" && !strings.HasPrefix(cfg.Slack.UserOAuthToken, "xoxp-") {
 			return fmt.Errorf("Slack user OAuth token must use the xoxp prefix")
 		}
@@ -589,6 +599,12 @@ func Validate(cfg *Config) error {
 			return fmt.Errorf("enabled keystore requires a base64-encoded 32-byte master key")
 		}
 	}
+	if _, err := cfg.AuditCommitmentKey(); err != nil {
+		return err
+	}
+	if cfg.Environment != "development" && cfg.Audit.CommitmentKey == developmentAuditCommitmentKey {
+		return fmt.Errorf("non-development environments require a non-default audit commitment key")
+	}
 	return nil
 }
 
@@ -612,6 +628,14 @@ func (c *Config) KeystoreKey() ([]byte, error) {
 	key, err := base64.StdEncoding.DecodeString(c.Keystore.MasterKey)
 	if err != nil || len(key) != 32 {
 		return nil, fmt.Errorf("invalid keystore master key")
+	}
+	return key, nil
+}
+
+func (c *Config) AuditCommitmentKey() ([]byte, error) {
+	key, err := base64.StdEncoding.DecodeString(c.Audit.CommitmentKey)
+	if err != nil || len(key) != 32 {
+		return nil, fmt.Errorf("audit.commitmentKey must be a base64-encoded 32-byte key")
 	}
 	return key, nil
 }
