@@ -346,9 +346,21 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	redacted := make([]map[string]any, len(value))
 	for i, job := range value {
-		redacted[i] = map[string]any{"id": job.ID, "organization_id": job.OrganizationID, "workspace_id": job.WorkspaceID, "channel_id": job.ChannelID, "root_thread_ts": job.RootThreadTS, "session_id": job.SessionID, "generation": job.Generation, "observation_id": job.ObservationID, "kind": job.Kind, "state": job.State, "attempt": job.Attempt, "max_attempts": job.MaxAttempts, "resolved_model": job.ResolvedModel, "route_trace": job.RouteTrace, "failure_reason": job.FailureReason, "created_at": job.CreatedAt, "updated_at": job.UpdatedAt, "version": job.Version}
+		redacted[i] = map[string]any{"id": job.ID, "organization_id": job.OrganizationID, "workspace_id": job.WorkspaceID, "channel_id": job.ChannelID, "root_thread_ts": job.RootThreadTS, "session_id": job.SessionID, "generation": job.Generation, "observation_id": job.ObservationID, "kind": job.Kind, "state": job.State, "attempt": job.Attempt, "max_attempts": job.MaxAttempts, "resolved_model": job.ResolvedModel, "route_trace": job.RouteTrace, "failure_reason": job.FailureReason, "diagnostic_code": workerDiagnosticCode(job.FailureReason), "created_at": job.CreatedAt, "updated_at": job.UpdatedAt, "version": job.Version}
 	}
 	writeJSON(w, http.StatusOK, redacted)
+}
+
+func workerDiagnosticCode(reason string) string {
+	if !strings.HasPrefix(reason, "worker.") {
+		return ""
+	}
+	for _, value := range reason {
+		if (value < 'a' || value > 'z') && (value < '0' || value > '9') && value != '.' && value != '_' {
+			return ""
+		}
+	}
+	return reason
 }
 
 func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {

@@ -6,6 +6,11 @@ binary="${HOME}/.local/lib/tos-tag/api"
 compose_override="${repository}/deploy/arch/docker-compose.override.yml"
 host_environment="${repository}/deploy/arch/tos-tag.env"
 
+# User services do not inherit the interactive Fish PATH. Keep the portable
+# per-user binary directory available so worker provisioning can resolve the
+# pinned Codex CLI without baking one operator's home directory into config.
+export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
 cd "${repository}"
 
 docker_ready=false

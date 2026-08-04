@@ -543,7 +543,8 @@ derived state follow configured TTL and source-linked deletion rules.
 - Invalid classifier structure fails to silence or the deterministic fallback;
   it never starts unbounded work.
 - App Server initialization, thread, or turn failure records only a bounded
-  stage/code and releases the job according to retry policy.
+  stage/code. Deterministic local provisioning/configuration failures fail once;
+  transient worker failures release the job according to retry policy.
 - Empty or invalid model output is not posted.
 - Lease, policy, membership, or kill-switch revocation interrupts the turn and
   revokes tools.

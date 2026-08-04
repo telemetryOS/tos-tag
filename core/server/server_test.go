@@ -102,6 +102,35 @@ func TestTenantListsRequireOrganizationAndRedactExecutionPayloads(t *testing.T) 
 	}
 }
 
+func TestJobListSurfacesSafeWorkerDiagnosticCode(t *testing.T) {
+	srv, _ := newTestServer(t, false)
+	job, _, err := srv.deps.Jobs.Enqueue(context.Background(), jobs.Spec{OrganizationID: "org-a", WorkspaceID: "team", ChannelID: "channel", RootThreadTS: "1.0", SessionID: "session", Generation: 1, IdempotencyKey: "job-diagnostic", Kind: "agent", Input: "private prompt text", MaxAttempts: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = srv.deps.Jobs.Claim(context.Background(), "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = srv.deps.Jobs.Transition(context.Background(), job.ID, job.Lease.Token, jobs.StateRunning, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = srv.deps.Jobs.Transition(context.Background(), job.ID, job.Lease.Token, jobs.StateFailed, func(current *jobs.Job) {
+		current.FailureReason = "worker.provision"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/api/jobs?organization_id=org-a", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"diagnostic_code":"worker.provision"`) {
+		t.Fatalf("job diagnostic status=%d body=%s", response.Code, response.Body.String())
+	}
+	if got := workerDiagnosticCode("provider returned token=secret"); got != "" {
+		t.Fatalf("unsafe diagnostic reason was exposed: %q", got)
+	}
+}
+
 func TestOrganizationListSupportsHeaderSelector(t *testing.T) {
 	srv, _ := newTestServer(t, false)
 	organizations := orgconfig.NewMemory()

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
 	"reflect"
 	"slices"
 	"strings"
@@ -54,6 +55,25 @@ func TestWorkerCodexReportsProvisionStageWithoutExposingCause(t *testing.T) {
 	}
 	if !errors.Is(err, cause) {
 		t.Fatal("wrapped cause is not available to programmatic callers")
+	}
+}
+
+func TestWorkerStageErrorMarksDeterministicProvisionFailuresNonRetryable(t *testing.T) {
+	missingCommand := &WorkerStageError{Code: "worker.provision", Err: exec.ErrNotFound}
+	if missingCommand.Retryable() {
+		t.Fatal("missing worker executable was marked retryable")
+	}
+	unsafeSpec := &WorkerStageError{Code: "worker.provision", Err: workers.ErrUnsafeSpec}
+	if unsafeSpec.Retryable() {
+		t.Fatal("unsafe worker specification was marked retryable")
+	}
+	transient := &WorkerStageError{Code: "worker.provision", Err: errors.New("temporary process pressure")}
+	if !transient.Retryable() {
+		t.Fatal("unknown provision failure was marked non-retryable")
+	}
+	initialization := &WorkerStageError{Code: "worker.initialize", Err: exec.ErrNotFound}
+	if !initialization.Retryable() {
+		t.Fatal("non-provision stage unexpectedly inherited provision retry policy")
 	}
 }
 

@@ -1580,6 +1580,26 @@ func (p *Pipeline) processOneJob(ctx context.Context, workerID types.WorkerID) b
 			}
 			return true
 		}
+		var retryPolicy interface{ Retryable() bool }
+		if errors.As(runErr, &retryPolicy) && !retryPolicy.Retryable() {
+			reason := "agent_execution_failed"
+			if diagnostic != nil && diagnostic.DiagnosticCode() != "" {
+				reason = diagnostic.DiagnosticCode()
+			}
+			failed, transitionErr := p.deps.Jobs.Transition(ctx, job.ID, job.Lease.Token, jobs.StateFailed, func(current *jobs.Job) {
+				current.FailureReason = reason
+			})
+			if transitionErr == nil {
+				p.enqueueInteractiveFailureNotice(ctx, failed)
+			} else {
+				jobLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", transitionErr)}).Error("non-retryable agent failure persistence failed")
+			}
+			if p.deps.Admissions != nil {
+				p.deps.Admissions.Complete(ctx, job.AdmissionReservationID)
+			}
+			jobLogger.WithCtx(blackbox.Ctx{"failure_reason": reason}).Warn("agent job failed without retry")
+			return true
+		}
 		requeueCtx := ctx
 		cancelRequeue := func() {}
 		if ctx.Err() != nil {

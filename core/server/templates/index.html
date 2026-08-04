@@ -1126,7 +1126,7 @@
       execution.append(model, timeline);
       if (row.failure_reason) {
         const failure = document.createElement('div'); failure.className = 'job-failure';
-        failure.textContent = 'Failure: ' + row.failure_reason;
+        failure.textContent = row.diagnostic_code ? 'Failure stage: ' + row.diagnostic_code : 'Failure: ' + row.failure_reason;
         execution.append(failure);
       }
       return execution;

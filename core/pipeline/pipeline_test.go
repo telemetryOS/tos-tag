@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -206,6 +207,23 @@ func (*contextFailureHarness) Permission(context.Context, string, harness.Permis
 }
 func (*contextFailureHarness) Abort(context.Context, string) error { return nil }
 
+type nonRetryableProvisionHarness struct{}
+
+func (*nonRetryableProvisionHarness) Health(context.Context) error { return nil }
+func (*nonRetryableProvisionHarness) CreateSession(context.Context, string) (harness.Session, error) {
+	return harness.Session{}, &harness.WorkerStageError{Code: "worker.provision", Err: exec.ErrNotFound}
+}
+func (*nonRetryableProvisionHarness) Prompt(context.Context, string, harness.Prompt) error {
+	return nil
+}
+func (*nonRetryableProvisionHarness) Events(context.Context, string) (<-chan harness.Event, <-chan error) {
+	return nil, nil
+}
+func (*nonRetryableProvisionHarness) Permission(context.Context, string, harness.PermissionDecision) error {
+	return nil
+}
+func (*nonRetryableProvisionHarness) Abort(context.Context, string) error { return nil }
+
 type lifecycleHarness struct {
 	createCalls int
 	abortCalls  int
@@ -267,6 +285,39 @@ func TestRunHarnessTreatsTransientJobReadAsRetryable(t *testing.T) {
 	}
 	if h.abortCalls == 0 {
 		t.Fatal("harness session was not aborted after heartbeat read failure")
+	}
+}
+
+func TestProcessOneJobFailsDeterministicProvisionErrorWithoutRetry(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := config.DefaultConfiguration
+	queue := jobs.NewMemoryQueue(func() time.Time { return now })
+	deliveryQueue := deliveries.NewMemoryQueue(func() time.Time { return now })
+	job, _, err := queue.Enqueue(context.Background(), jobs.Spec{
+		OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "channel-test", RootThreadTS: "100.1",
+		SessionID: "session-test", Generation: 1, IdempotencyKey: "message/provision-failure", Kind: "agent_response",
+		Input: "test", MaxAttempts: 3, ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipe := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Jobs: queue, Deliveries: deliveryQueue, Harness: &nonRetryableProvisionHarness{}}}
+	if !pipe.processOneJob(context.Background(), "worker-test") {
+		t.Fatal("queued job was not processed")
+	}
+	failed, err := queue.Get(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.State != jobs.StateFailed || failed.Attempt != 1 || failed.FailureReason != "worker.provision" {
+		t.Fatalf("failed job = state %q attempt %d reason %q", failed.State, failed.Attempt, failed.FailureReason)
+	}
+	records, err := deliveryQueue.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].IdempotencyKey != string(job.ID)+"/failure" {
+		t.Fatalf("failure deliveries = %#v", records)
 	}
 }
 

@@ -640,6 +640,11 @@ Agent work, Approvals, Channels, Directives, Agent memory, and Automation stay v
 the concise operator navigation; record-oriented configuration and diagnostics
 are available under the collapsed **Advanced** disclosure.
 
+Failed agent work identifies its bounded diagnostic stage (for example,
+`worker.provision`) in both the Agent work table and job API. Deterministic
+local provisioning/configuration failures fail once instead of consuming the
+retry budget; transient worker failures continue through normal retry policy.
+
 The feed retains a bounded in-memory window of recent lifecycle records and
 streams new Slack intake, classifier, job, Thinking Steps, tool, delivery, and
 Codex App Server events without polling. Classifier records pair a bounded

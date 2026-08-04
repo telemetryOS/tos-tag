@@ -23,4 +23,6 @@ systemctl --user enable --now tos-tag.service
 
 User lingering and the system Docker service must already be enabled for boot
 startup. The startup wrapper waits for Docker and MongoDB health before
-launching the API.
+launching the API. It also supplies a deterministic service `PATH` containing
+`~/.local/bin`, where the per-user Codex CLI is installed; this does not depend
+on interactive shell initialization.

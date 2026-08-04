@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -42,6 +44,12 @@ type WorkerStageError struct {
 func (e *WorkerStageError) Error() string          { return "Codex worker failed at " + e.Code }
 func (e *WorkerStageError) Unwrap() error          { return e.Err }
 func (e *WorkerStageError) DiagnosticCode() string { return e.Code }
+func (e *WorkerStageError) Retryable() bool {
+	if e.Code != "worker.provision" {
+		return true
+	}
+	return !(errors.Is(e.Err, exec.ErrNotFound) || errors.Is(e.Err, workers.ErrUnsafeSpec) || errors.Is(e.Err, os.ErrNotExist) || errors.Is(e.Err, os.ErrPermission))
+}
 
 func workerStageError(code string, err error) error {
 	if err == nil {

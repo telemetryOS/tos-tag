@@ -158,3 +158,12 @@ query fix), plus `F12`, `F14`, `F17`, `F27`, `F29`, `F33`, `F37`, `F42`,
 - [x] `F82` Refuted: production always wires the approval coordinator.
 - [x] `F93` Refuted: conservative pack expiry is intentional retention behavior.
 - [x] `F95` Refuted: shutdown ordering preserves Mongo-authoritative pending work.
+
+## Arch runtime recovery and live regression — 2026-08-04
+
+- [x] Make the committed Arch launcher expose the per-user Codex binary path.
+- [x] Fail deterministic worker provisioning/configuration errors once without retry noise.
+- [x] Surface the safe worker diagnostic stage in Management job rows and details.
+- [x] Pass focused worker, pipeline, server, and deployment tests.
+- [ ] Commit, push, deploy, and restart the corrected Arch build.
+- [ ] Pass the bounded full live regression matrix in `#tos-tag`.
