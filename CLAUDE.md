@@ -76,10 +76,12 @@ Direct mentions trigger participation consideration, not mandatory thread
 placement. Prefer a channel reply for a brief, self-contained answer unlikely
 to continue. Prefer a thread for an investigation, multi-step/tool-heavy work,
 a narrow deep dive, or a conversation likely to continue. Existing tos-tag
-threads continue in thread. Per-channel cooldown suppresses ambient chatter,
-not an explicit mention or a human continuation in an active Tag thread; the
-hourly response budget, concurrency limit, and organization flood gate still
-apply to those invocations.
+threads continue in thread, except a reply beginning with another user's Slack
+mention is a human-to-human handoff when it neither mentions nor explicitly
+addresses Tag. Suppress that turn before classification. Per-channel cooldown
+suppresses ambient chatter, not an explicit mention or a human continuation in
+an active Tag thread; the hourly response budget, concurrency limit, and
+organization flood gate still apply to those invocations.
 
 The classifier may directly produce one short social response for greetings,
 thanks, farewells, praise, or light banter. Substantive answers require an
@@ -317,7 +319,7 @@ Before completion:
 make verify
 ```
 
-The deterministic classifier gate contains 47 natural messages plus context-cap
+The deterministic classifier gate contains 48 natural messages plus context-cap
 and deduplication invariants. To run the same cases through the configured real
 OpenAI classifier, with expected behavior kept outside provider input:
 

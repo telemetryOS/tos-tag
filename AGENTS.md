@@ -35,10 +35,13 @@ Current initiative constraints:
 - Treat a direct mention as a hard participation trigger, not a hard thread
   placement. Prefer an in-channel response for a brief, self-contained answer
   unlikely to continue; use a thread for deeper, multi-step, tool-heavy, narrow,
-  or likely-to-continue work. Once a tos-tag thread is active, continue there.
-  Apply per-channel cooldown only to ambient chatter; never let it discard a
-  direct mention or a human continuation in an active Tag thread. Keep hourly
-  response budgets, concurrency limits, and the organization flood gate intact.
+  or likely-to-continue work. Once a tos-tag thread is active, continue there,
+  except when a human reply begins by addressing another Slack user and neither
+  mentions nor explicitly addresses Tag; treat that as a human-to-human handoff
+  and stay silent. Apply per-channel cooldown only to ambient chatter; never let
+  it discard a direct mention or a human continuation in an active Tag thread.
+  Keep hourly response budgets, concurrency limits, and the organization flood
+  gate intact.
 - Use Slack Thinking Steps for admitted full-agent thread jobs as the progress
   surface. Reuse one transient current-action task card for every native or
   reviewed tool and dynamically declared validated skill, replacing it as work
@@ -138,7 +141,7 @@ Current local regression baseline (2026-08-04): direct classifier and ambient
 silence/social placement, native Tables/Data Tables, presentation-only
 Cards/Carousels, approval/resume, Wiki and reviewed
 source access, three overlapping jobs on the eight-worker pool, private-context
-isolation, the deterministic 49-case eval, the latest opt-in live OpenAI
+isolation, the deterministic 50-case eval, the latest opt-in live OpenAI
 48-case baseline (before the ambient Wiki report-link regression was added),
 and full `make verify` all passed. `make eval-live` must use only natural message
 text; evaluator outcomes, placement, reactions, model, and effort remain outside

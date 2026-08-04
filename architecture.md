@@ -189,12 +189,16 @@ Assist-mode initiative is a deterministic control-plane grant, not a model
 judgment. Full-agent work is allowed for direct mentions, active Tag threads,
 explicit addresses, clear questions, conversationally addressed requests,
 authoritative product questions, destination-safe alignment interventions, and
-operator-created triggers. The fact that Tag authored the previous channel turn
-is useful only for routing a question or request; it does not authorize a bare
-declarative status update. The classifier service suppresses an unauthorized
-recommendation with `policy.unsolicited_assist_work`, and the pipeline applies
-the same check again immediately before admission. Proactive channels retain
-classifier-gated initiative for declarative failures and incidents.
+operator-created triggers. A leading mention of another Slack user in an active
+Tag thread is deterministically treated as a human-to-human handoff when the
+turn neither mentions nor explicitly addresses Tag; it is suppressed before a
+provider call. Mentions used later as requested recipients remain available.
+The fact that Tag authored the previous channel turn is useful only for routing
+a question or request; it does not authorize a bare declarative status update.
+The classifier service suppresses an unauthorized recommendation with
+`policy.unsolicited_assist_work`, and the pipeline applies the same check again
+immediately before admission. Proactive channels retain classifier-gated
+initiative for declarative failures and incidents.
 
 Natural messages are evaluated without prompt-like hints such as “stay silent”
 or “reply in a thread.” Those phrases are tested only when they are the user's
@@ -584,7 +588,7 @@ tests, vet, behavioral evals, gosec, and govulncheck. Network and credential
 tests are opt-in. `integration/codex_live_test.go` verifies the installed App
 Server handshake, dynamic-tool registration, model/effort routing, structured
 output, event normalization, and teardown against a real authenticated Codex
-runtime. `make eval-live` sends the 47 natural classifier messages through the
+runtime. `make eval-live` sends the 48 natural classifier messages through the
 configured direct OpenAI provider and scores outcomes, source grounding,
 restricted disclosure, placement, reaction semantics, and model/effort routing;
 fixture names and expected results are never part of the provider request.

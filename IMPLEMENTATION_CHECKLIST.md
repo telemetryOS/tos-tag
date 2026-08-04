@@ -64,7 +64,8 @@ Only mark an item complete when source and verification evidence exist.
   46-message deterministic and live provider matrices (`48/48` with
   infrastructure invariants) plus a zero-reply/zero-job `#tos-tag` canary.
 - [x] Require text-confirmed source mutation intent before applying the Linear
-  redirect, and keep ambient Agent Wiki report links silent (`49/49`
+  redirect, keep ambient Agent Wiki report links silent, and suppress leading
+  third-party handoffs in active Tag threads before classification (`50/50`
   deterministic matrix with infrastructure invariants).
 - [x] Fall back conservatively on timeout or malformed output.
 

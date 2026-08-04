@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -14,6 +15,8 @@ import (
 )
 
 var ErrInvalidClassifierDecision = errors.New("invalid classifier decision")
+
+var leadingSlackUserAddressPattern = regexp.MustCompile(`^\s*<@U[A-Z0-9]+>(?:[\s,;:!?.]|$)`)
 
 type Classifier interface {
 	Decide(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error)
@@ -114,6 +117,9 @@ func EnforceParticipation(result Result, target Target, pack types.ContextPackRe
 }
 
 func assistInitiativeAuthorized(target Target, pack types.ContextPackRevision, decision types.ClassificationDecision) bool {
+	if thirdPartyAddressedTurn(target) {
+		return false
+	}
 	if target.Envelope.IsMention || target.ActiveThread || target.AuthorizedTrigger || explicitlyAddressesTag(target.Envelope.Text) {
 		return true
 	}
@@ -683,9 +689,27 @@ func hardSuppression(target Target) string {
 		return "suppress.unsupported_subtype"
 	case target.Envelope.IntegrationAuthored():
 		return "suppress.integration_message"
+	case thirdPartyAddressedTurn(target):
+		return "suppress.third_party_address"
 	default:
 		return ""
 	}
+}
+
+// thirdPartyAddressedTurn recognizes a narrow human-to-human handoff inside a
+// Tag-owned thread. Active-thread state remains a hard participation trigger
+// for normal continuations, but a leading Slack user address belongs to that
+// person unless the turn also mentions or explicitly addresses Tag. Mentions
+// used as the object of a request (for example, "summarize this for <@U123>")
+// do not match this gate.
+func thirdPartyAddressedTurn(target Target) bool {
+	if !target.ActiveThread || target.Envelope.IsMention || target.Envelope.ChannelKind == types.SlackChannelKindDirectMessage {
+		return false
+	}
+	if explicitlyAddressesTag(target.Envelope.Text) {
+		return false
+	}
+	return leadingSlackUserAddressPattern.MatchString(target.Envelope.Text)
 }
 
 func validateDecision(decision types.ClassificationDecision, pack types.ContextPackRevision) error {

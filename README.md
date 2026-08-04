@@ -705,11 +705,11 @@ govulncheck.
 Latest local baseline (2026-08-04):
 
 - all Go tests, race tests, and `go vet`: pass;
-- deterministic behavioral evaluation: `49/49` (47 natural classifier messages
+- deterministic behavioral evaluation: `50/50` (48 natural classifier messages
   plus context-cap and deduplication invariants), including silence, placement,
   privacy, routing, reaction, source-write intake, mandatory product retrieval,
-  conversational-reference, Wiki CRUD, ambient Wiki report-link silence, and
-  assist/proactive initiative contracts;
+  conversational-reference, active-thread human handoffs, Wiki CRUD, ambient
+  Wiki report-link silence, and assist/proactive initiative contracts;
 - latest live direct OpenAI classifier baseline (2026-08-03): `48/48`, with 38
   real provider calls and complete
   grounding/disclosure/placement/routing/reaction scores, and approximately
@@ -761,8 +761,8 @@ separately, and inspect only redacted structured logs.
 ```bash
 make test                 # deterministic test suite
 make race                 # race detector
-make eval                 # deterministic 49-case behavioral gate
-make eval-live            # opt-in 49-case live OpenAI classifier gate
+make eval                 # deterministic 50-case behavioral gate
+make eval-live            # opt-in 50-case live OpenAI classifier gate
 make security             # gosec + govulncheck
 make verify               # full local gate
 make run-live             # host live runtime from ignored runtime.env

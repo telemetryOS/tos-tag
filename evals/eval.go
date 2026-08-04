@@ -209,6 +209,8 @@ func Fixtures() []Fixture {
 	naturalThanksThread.ActiveThread = true
 	thread := base("The same timeout is happening in the worker too.")
 	thread.ActiveThread = true
+	humanHandoff := base("<@U03404W4Z> ^")
+	humanHandoff.ActiveThread = true
 	bot := base("<@tos-tag> Build 1842 completed successfully; should we continue?")
 	bot.Envelope.BotID = "another-bot"
 	bot.Envelope.IsMention = true
@@ -304,6 +306,7 @@ func Fixtures() []Fixture {
 		{Name: "brief_direct_mention_channel_reply", Target: briefMention, Pack: pack(), WantPredicted: types.OutcomeReplyInChannel, WantEffective: types.OutcomeReplyInChannel, WantLiveReactions: []string{"thinking_face", "speech_balloon"}, WantLiveRoutes: []LiveRoute{{Strength: "light", Effort: "low"}}},
 		{Name: "deep_direct_mention_thread_reply", Target: deepMention, Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeReplyInThread, LivePredicted: []types.ClassificationOutcome{types.OutcomeReplyInThread, types.OutcomeStartBackgroundJob}, LiveEffective: []types.ClassificationOutcome{types.OutcomeReplyInThread, types.OutcomeStartBackgroundJob}, WantLiveReactions: []string{"eyes", "hammer_and_wrench", "rotating_light", "thinking_face"}, WantLiveRoutes: []LiveRoute{{Strength: "standard", Effort: "medium"}, {Strength: "strong", Effort: "medium"}}},
 		{Name: "active_thread_reply", Target: thread, Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeReplyInThread},
+		{Name: "active_thread_human_handoff_silent", Target: humanHandoff, Pack: pack(), WantPredicted: types.OutcomeSilent, WantEffective: types.OutcomeSilent},
 		{Name: "ambient_question_shadowed", Target: base("Does anyone know what changed in the API deploy?"), Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeSilent}, LiveEffective: []types.ClassificationOutcome{types.OutcomeSilent}},
 		{Name: "ambient_product_plan_comparison", Target: productPlanComparison, Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeReplyInThread}, LiveEffective: []types.ClassificationOutcome{types.OutcomeReplyInThread}, WantLiveReactions: []string{"thinking_face", "speech_balloon"}, WantLiveRoutes: []LiveRoute{{Strength: "standard", Effort: "medium"}}, WantFullAgent: true},
 		{Name: "ambient_product_plan_transition_not_source_write", Target: productPlanTransition, Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeReplyInThread}, LiveEffective: []types.ClassificationOutcome{types.OutcomeReplyInThread}, WantLiveReactions: []string{"thinking_face"}, WantLiveRoutes: []LiveRoute{{Strength: "standard", Effort: "medium"}}, WantFullAgent: true, WantProductRetrieval: true, ForbidSourceRedirect: true},

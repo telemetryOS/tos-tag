@@ -3,6 +3,7 @@ package classifier
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,63 @@ func TestHardMentionSurvivesShadowMode(t *testing.T) {
 	result := newService(t, true).Decide(context.Background(), got, types.ContextPackRevision{})
 	if result.Effective.Outcome != types.OutcomeReplyInThread || result.Shadowed {
 		t.Fatalf("hard mention was shadowed: %#v", result)
+	}
+}
+
+func TestActiveThreadThirdPartyAddressIsSuppressedBeforeProvider(t *testing.T) {
+	calls := 0
+	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		calls++
+		return types.ClassificationDecision{}, errors.New("provider should not be called")
+	}), false, 0.9, 0.98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoff := target("<@U03404W4Z> ^")
+	handoff.ActiveThread = true
+	if service.RequiresProviderCall(handoff) {
+		t.Fatal("third-party handoff would consume a provider call")
+	}
+	result := service.Decide(context.Background(), handoff, types.ContextPackRevision{})
+	if calls != 0 || result.Predicted.Outcome != types.OutcomeSilent || result.Effective.Outcome != types.OutcomeSilent || !slices.Contains(result.Effective.ReasonCodes, "suppress.third_party_address") {
+		t.Fatalf("handoff result=%#v provider_calls=%d", result, calls)
+	}
+}
+
+func TestParticipationRecheckRejectsThirdPartyAddressedTurn(t *testing.T) {
+	decision := types.ClassificationDecision{
+		Outcome:           types.OutcomeReplyInThread,
+		Confidence:        0.99,
+		ReasonCodes:       []string{"provider.thread_reply"},
+		DisclosureClass:   types.DisclosureDestinationSafe,
+		RequiresFullAgent: true,
+		Reaction:          "speech_balloon",
+	}
+	target := Target{Mode: types.ModeAssist, ActiveThread: true, Envelope: types.SlackEnvelope{Text: "<@U03404W4Z> ^"}}
+	result := EnforceParticipation(Result{Predicted: decision, Effective: decision}, target, types.ContextPackRevision{})
+	if result.Effective.Outcome != types.OutcomeSilent || !result.Shadowed || !slices.Contains(result.Effective.ReasonCodes, "policy.unsolicited_assist_work") {
+		t.Fatalf("participation recheck allowed third-party address: %#v", result)
+	}
+}
+
+func TestThirdPartyAddressGatePreservesActiveThreadIntent(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		target Target
+		want   bool
+	}{
+		"leading handoff marker":      {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "<@U03404W4Z> ^"}}, want: true},
+		"leading direct question":     {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: " <@U03404W4Z>, can you check this?"}}, want: true},
+		"recipient later in request":  {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "Summarize this for <@U03404W4Z>."}}, want: false},
+		"Tag explicitly co-addressed": {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "<@U03404W4Z>, Tag, summarize this for both of us."}}, want: false},
+		"Tag directly mentioned":      {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "<@U03404W4Z> compare these", IsMention: true}}, want: false},
+		"direct message conversation": {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{ChannelKind: types.SlackChannelKindDirectMessage, Text: "<@U03404W4Z> is the owner"}}, want: false},
+		"inactive thread":             {target: Target{Envelope: types.SlackEnvelope{Text: "<@U03404W4Z> ^"}}, want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := thirdPartyAddressedTurn(testCase.target); got != testCase.want {
+				t.Fatalf("thirdPartyAddressedTurn()=%v want %v", got, testCase.want)
+			}
+		})
 	}
 }
 
