@@ -51,6 +51,37 @@ func TestNormalizeSlackMessageEditDeleteAndMention(t *testing.T) {
 	}
 }
 
+func TestNormalizeSlackAgentMessagesPreservesLoopPreventionSignals(t *testing.T) {
+	callback := slackevents.EventsAPICallbackEvent{TeamID: "team", EventID: "event", EventTime: 100}
+	for name, message := range map[string]*slackevents.MessageEvent{
+		"bot id":            {Channel: "channel", TimeStamp: "100.1", User: "U-claude", BotID: "B-claude", Text: "<@bot> should we continue?"},
+		"bot subtype":       {Channel: "channel", TimeStamp: "100.2", User: "U-app", SubType: types.SlackMessageSubtypeBotMessage, Text: "<@bot> should we continue?"},
+		"assistant subtype": {Channel: "channel", TimeStamp: "100.3", User: "U-agent", SubType: types.SlackMessageSubtypeAssistantAppThread, Text: "<@bot> should we continue?"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			event := slackevents.EventsAPIEvent{Type: slackevents.CallbackEvent, Data: callback, InnerEvent: slackevents.EventsAPIInnerEvent{Data: message}}
+			envelope, eligible, err := NormalizeEventsAPI("org", "bot", "envelope", event)
+			if err != nil || !eligible || !envelope.IsMention || !envelope.IntegrationAuthored() {
+				t.Fatalf("normalized agent message = %#v eligible=%v err=%v", envelope, eligible, err)
+			}
+		})
+	}
+}
+
+func TestSocketModeErrorContextKeepsDiagnosticMessage(t *testing.T) {
+	ctx := socketModeErrorContext(errors.New("websocket closed unexpectedly"))
+	if ctx["error_type"] != "*errors.errorString" || ctx["error"] != "websocket closed unexpectedly" {
+		t.Fatalf("socket error context = %#v", ctx)
+	}
+	nonError := socketModeErrorContext("opaque")
+	if nonError["error_type"] != "string" {
+		t.Fatalf("non-error context = %#v", nonError)
+	}
+	if _, exists := nonError["error"]; exists {
+		t.Fatalf("non-error payload fabricated an error message: %#v", nonError)
+	}
+}
+
 func TestNormalizeBotMembershipChangeOnlyAcceptsConfiguredBot(t *testing.T) {
 	callback := slackevents.EventsAPICallbackEvent{TeamID: "team", EventID: "membership-event", EventTime: 100}
 	event := slackevents.EventsAPIEvent{Type: slackevents.CallbackEvent, Data: callback, InnerEvent: slackevents.EventsAPIInnerEvent{Data: &slackevents.MemberJoinedChannelEvent{User: "bot", Channel: "channel", Team: "team"}}}

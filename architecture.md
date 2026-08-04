@@ -67,6 +67,14 @@ only their bounded one-time bootstrap. Exceptional Slack history reads use proac
 per-method pacing and still honor `Retry-After` in the background, keeping
 Socket Mode acknowledgement and live message processing responsive.
 
+Slack-authenticated bot, app, workflow, and assistant messages are never
+interlocutors. Live ingress and offline catch-up import them as resolved,
+unverified destination-local context without creating pending decisions. A
+classifier hard suppression remains as defense in depth for legacy pending
+records. Consequently another agent cannot elicit a reaction, classifier call,
+job, Thinking Steps stream, or delivery by mentioning Tag or joining an active
+Tag thread.
+
 ## Context and privacy
 
 Each channel has a context-history mode. `durable` is the default.
@@ -127,6 +135,14 @@ and have no organization-wide recall path.
 
 `core/classifier` calls OpenAI directly with a bounded structured-output schema.
 The call is stateless, tool-free, independently timed, and separately metered.
+
+Before context construction or any provider call, `core/flood` atomically
+charges a Mongo-authoritative fixed-window bucket scoped to organization and
+Slack workspace. Only targets that would reach the classifier consume the
+bucket. Exhaustion records an auditable silent decision and produces no
+reaction, job, agent call, or Slack delivery; bucket-store errors fail closed.
+The default is 1,000 eligible messages per one-hour bucket, independently
+configurable from per-channel response admission and worker concurrency.
 Its API key remains in the Go control plane and is never reused by Codex App
 Server.
 
@@ -145,7 +161,10 @@ conversation likely to continue belongs in a thread. Once a tos-tag thread is
 active, the same direct classifier evaluates each human reply before any
 full-agent fail-safe, and any response stays in that thread. The classifier may
 answer greetings, thanks, and light banter directly, but substantive content
-must be admitted to the full agent.
+must be admitted to the full agent. Channel cooldown is an ambient anti-chatter
+control and is bypassed for a direct mention or a human reply in an active Tag
+thread; per-hour response budgets, concurrency, and the organization flood gate
+remain enforced.
 
 The classifier may also admit an ambient alignment intervention when a current
 human statement materially conflicts with a recent destination-safe public
@@ -188,10 +207,13 @@ channels and threads can run concurrently. A suspended approval releases its
 worker and later resumes as a fresh, newly fenced attempt carrying the exact
 approved action hash.
 
-Model profiles are project-owned policy. The development default is
-`chatgpt-luna-max`, which resolves to OpenAI model `gpt-5.6-luna` and effort
-`max`. The classifier can select lower profiles for faster work. The selected
-model and effort are passed directly to Codex App Server at turn start.
+Model profiles are project-owned policy. The development strong/default route
+is `chatgpt-sol-medium`, which resolves to OpenAI model `gpt-5.6-sol` and
+effort `medium`. The classifier selects Luna low or Luna medium for ordinary
+work and reserves Sol medium for durable document authoring, complex tool use,
+tricky debugging/root-cause analysis, incidents, security, and other
+high-consequence work. The selected model and effort are passed directly to
+Codex App Server at turn start.
 
 ## Codex App Server boundary
 
@@ -219,7 +241,7 @@ Each thread receives:
 - a read-only sandbox policy with subprocess network access disabled;
 - disabled shell, MCP servers, plugins, and multi-agent tools;
 - configurable first-party web search (`live` in the local Slack runtime); and
-- only the two job-scoped dynamic tools described below.
+- only the three job-scoped dynamic tools described below.
 
 The Codex process uses a private configured `CODEX_HOME` solely for its own
 login and runtime state. Its generated command environment is otherwise clean:
@@ -281,13 +303,20 @@ existing behavior or a Linear feature for new or changed behavior.
 
 ## Dynamic tools and credentials
 
-Codex App Server receives two experimental dynamic function tools at
+Codex App Server receives three experimental dynamic function tools at
 `thread/start`:
 
-- `tos_tag_tool` accepts a reviewed `tool_id`, `operation_id`, typed argv, and
-  optional exact `approval_id`.
+- `tos_tag_tool` accepts a reviewed non-Wiki `tool_id`, `operation_id`, bounded
+  argv, and optional exact `approval_id`.
+- `tos_tag_wiki` accepts a typed page operation and semantic fields including
+  page reference, title, body, tags, and note. Go validates field combinations
+  and constructs the reviewed Wiki CLI arguments; generic Wiki argv is rejected.
 - `tos_tag_trigger` manages classifier-gated heartbeat subscriptions in the
   current Slack channel.
+
+Typed Wiki validation failures expose and persist only closed, content-free
+codes. A corrected call reuses the same Slack Thinking Steps card, so a
+self-corrected validation attempt does not leave a separate failure card.
 
 The App Server sends `item/tool/call` to the Go client. The control plane, not
 the Codex process, attaches the random attempt capability and calls a loopback
@@ -370,7 +399,7 @@ reaction-only outcomes never receive the footer.
 
 Delivery uses a graduated surface policy. Short and medium answers remain
 Slack-native. When the expected result is genuinely long and expository, or
-its sections/evidence/navigation make it a durable document, the strong/max
+its sections/evidence/navigation make it a durable document, the strong Sol-medium
 worker first writes Markdown under the Agent Wiki `artifacts` namespace through
 the reviewed page-only capability. Roughly 20,000 visible characters is a soft
 signal, not a renderer cutoff. Only a successful tool result can supply the
@@ -435,9 +464,14 @@ secrets.
 
 ## Channel directives, routines, and triggers
 
-`/tag-directive` opens a Slack modal that edits a revisioned channel directive.
-The directive is stored in MongoDB, audited, placed in the system context
-partition, and shown to both classifier and admitted agent.
+`/tag-directive` is available to any human user in the installed Slack
+workspace and opens a modal that edits the current enrolled channel's
+revisioned directive. Directive configuration does not reuse the reviewed-tool
+approver list, but still fails closed for a missing scope, unenrolled channel,
+or active channel kill switch. The directive is stored in MongoDB, audited,
+placed in the system context partition, and shown to both classifier and
+admitted agent. The management Directives page exposes the same create, edit,
+activate, and restore lifecycle.
 
 `/tag-mode` shows or changes the current channel's participation mode
 (`observe`, `assist`, or `proactive`) with an ephemeral reply. The command is
@@ -524,7 +558,7 @@ tests, vet, behavioral evals, gosec, and govulncheck. Network and credential
 tests are opt-in. `integration/codex_live_test.go` verifies the installed App
 Server handshake, dynamic-tool registration, model/effort routing, structured
 output, event normalization, and teardown against a real authenticated Codex
-runtime. `make eval-live` sends the 46 natural classifier messages through the
+runtime. `make eval-live` sends the 47 natural classifier messages through the
 configured direct OpenAI provider and scores outcomes, source grounding,
 restricted disclosure, placement, reaction semantics, and model/effort routing;
 fixture names and expected results are never part of the provider request.

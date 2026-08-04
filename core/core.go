@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/RobertWHurst/blackbox"
@@ -20,6 +19,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/contextpacks"
 	"github.com/telemetryos/tos-tag/core/database"
 	"github.com/telemetryos/tos-tag/core/deliveries"
+	"github.com/telemetryos/tos-tag/core/flood"
 	"github.com/telemetryos/tos-tag/core/harness"
 	"github.com/telemetryos/tos-tag/core/intelligence"
 	"github.com/telemetryos/tos-tag/core/jobs"
@@ -108,6 +108,13 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 		scopeResolver = organizationStore
 	}
 	admissionController := admission.NewMongo(db)
+	var classifierFloodGate flood.Gate
+	if cfg.Classifier.FloodProtectionEnabled {
+		classifierFloodGate, err = flood.NewMongo(db, cfg.Classifier.FloodMaxMessages, cfg.Classifier.FloodWindow)
+		if err != nil {
+			return nil, fmt.Errorf("construct classifier flood protection: %w", err)
+		}
+	}
 	usageRecorder := usage.NewMongo(db)
 	memoryStore := agentmemory.NewMongoStore(db)
 	var memoryCurator *agentmemory.Curator
@@ -327,7 +334,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 		Config: cfg, Logger: logger, Activity: activityFeed, Ingress: ingress, Transport: transport,
 		Observations: observations, Sessions: sessionStore, Jobs: jobQueue,
 		Decisions: decisionStore, Deliveries: deliveryQueue, ContextPacks: contextBuilder, ContextStore: contextStore,
-		Classifier: classificationService, Renderer: renderer, Scopes: scopeResolver, Intelligence: intelligenceProjector, Admissions: admissionController, ModelRouter: responseRouter, Harness: responseHarness, Usage: usageRecorder, ChannelConfig: channelConfiguration, Audit: auditChain, Approvals: approvalStore, ContextSyncState: contextSyncState, Memory: memoryStore,
+		Classifier: classificationService, Renderer: renderer, Scopes: scopeResolver, Intelligence: intelligenceProjector, Admissions: admissionController, FloodProtection: classifierFloodGate, ModelRouter: responseRouter, Harness: responseHarness, Usage: usageRecorder, ChannelConfig: channelConfiguration, Audit: auditChain, Approvals: approvalStore, ContextSyncState: contextSyncState, Memory: memoryStore,
 	})
 	if err != nil {
 		return nil, err
@@ -368,27 +375,21 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 }
 
 func defaultResponseProfiles(cfg config.ModelConfig) []types.ModelProfile {
-	baseID := strings.TrimSuffix(cfg.DefaultProfile, "-"+cfg.DefaultVariant)
-	if baseID == "" || baseID == cfg.DefaultProfile {
-		baseID = cfg.DefaultProfile
-	}
 	profiles := make([]types.ModelProfile, 0, 3)
 	for _, candidate := range []struct {
+		id       string
+		model    string
 		variant  string
 		strength string
 	}{
-		{variant: "low", strength: "light"},
-		{variant: "medium", strength: "standard"},
-		{variant: "max", strength: "strong"},
+		{id: cfg.FastProfileBase + "-low", model: cfg.FastModel, variant: "low", strength: "light"},
+		{id: cfg.FastProfileBase + "-medium", model: cfg.FastModel, variant: "medium", strength: "standard"},
+		{id: cfg.DefaultProfile, model: cfg.DefaultModel, variant: cfg.DefaultVariant, strength: "strong"},
 	} {
-		id := baseID + "-" + candidate.variant
-		if candidate.variant == cfg.DefaultVariant {
-			id = cfg.DefaultProfile
-		}
 		profiles = append(profiles, types.ModelProfile{
-			ID:                   id,
+			ID:                   candidate.id,
 			ProviderID:           cfg.DefaultProvider,
-			ModelID:              cfg.DefaultModel,
+			ModelID:              candidate.model,
 			Variant:              candidate.variant,
 			ProviderOptions:      map[string]any{"strength": candidate.strength},
 			RequiredCapabilities: []string{"structured"},
@@ -638,7 +639,7 @@ func (c *Core) startContextRefresh(parent context.Context) {
 				stats := run.Stats()
 				c.Logger.WithCtx(blackbox.Ctx{"channels_discovered": stats.ChannelsDiscovered, "channels_registered": stats.ChannelsRegistered}).Info("Slack membership reconciliation completed")
 				if _, err := c.contextSync.CatchUp(ctx, run, c.pipeline.RecoverContextEnvelope); err != nil && ctx.Err() == nil {
-					c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Warn("Slack direct-message catch-up stopped before completion")
+					c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Warn("Slack joined-channel missed-event catch-up stopped before completion")
 				}
 				if _, err := c.contextSync.Backfill(ctx, run, c.pipeline.ImportContextEnvelope); err != nil && ctx.Err() == nil {
 					c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Warn("Slack incremental context bootstrap stopped before completion")
@@ -674,7 +675,7 @@ func (c *Core) startContextBackfill(parent context.Context) {
 	go func() {
 		defer close(c.contextDone)
 		if _, err := c.contextSync.CatchUp(ctx, run, c.pipeline.RecoverContextEnvelope); err != nil && ctx.Err() == nil {
-			c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Error("Slack startup direct-message catch-up stopped before completion")
+			c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Error("Slack startup joined-channel missed-event catch-up stopped before completion")
 		}
 		if _, err := c.contextSync.Backfill(ctx, run, c.pipeline.ImportContextEnvelope); err != nil && ctx.Err() == nil {
 			c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Error("Slack user context backfill stopped before completion")

@@ -27,6 +27,12 @@ delivery. DMs and group DMs are never auto-enabled, and an optional exact-ID
 output allowlist can narrow joined-channel authority. This local authority does
 not become a tracked default or production authorization.
 
+Slack-authenticated bot, app, workflow, and assistant messages are retained
+only as unverified destination-local context. They bypass classification,
+reactions, agent admission, and delivery even when they mention Tag or post in
+an active Tag thread. Offline recovery applies the same human-author check, and
+classifier suppression protects any older pending integration records.
+
 An operator may set a channel to `session_only` context history. That mode
 fails closed against prior-session Slack history, cross-channel context,
 durable memory recall, and situation-fact recall, and prevents new durable
@@ -102,6 +108,10 @@ the minimum live operational records needed for delivery safety and audit.
   or kill-switch checks.
 - The direct OpenAI classifier key is control-plane-only and is never reused for
   Codex App Server. Codex authenticates through its private persisted home.
+- A Mongo-authoritative organization/workspace flood bucket is charged before
+  context construction or direct classification. Exhaustion and bucket-store
+  failures fail closed without reactions, agent work, or Slack output, limiting
+  provider-cost exposure during accidental or hostile message floods.
 - The memory curator is also control-plane-only. It may use a separately
   configured key or the existing control-plane classifier key, but neither is
   passed to Codex or helper subprocesses.

@@ -1,8 +1,9 @@
 # Reviewed TelemetryOS tools
 
 This catalog is the executable counterpart to the behavioral skills injected
-from `tag-agent-skills`. Codex App Server receives the bundle `SKILL.md` files
-and typed `tos_tag_tool` capability only; it does not receive this directory,
+from `tag-agent-skills`. Codex App Server receives the bundle `SKILL.md` files,
+the generic `tos_tag_tool` capability, and the dedicated typed `tos_tag_wiki`
+page facade; it does not receive this directory,
 the control-plane environment, or keystore references.
 
 `telemetryos.code` is the only source-tree capability. Its server-owned root is

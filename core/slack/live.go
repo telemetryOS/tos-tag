@@ -303,7 +303,7 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 				eventLogger.Info("Slack Socket Mode hello verified")
 				continue
 			case socketmode.EventTypeInvalidAuth, socketmode.EventTypeConnectionError, socketmode.EventTypeIncomingError, socketmode.EventTypeErrorWriteFailed, socketmode.EventTypeErrorBadMessage:
-				eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", event.Data)}).Error("Slack Socket Mode transport error")
+				eventLogger.WithCtx(socketModeErrorContext(event.Data)).Error("Slack Socket Mode transport error")
 				continue
 			case socketmode.EventTypeEventsAPI:
 				eventLogger.Info("Slack Events API envelope received")
@@ -343,8 +343,8 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 				}
 				configuration, loadErr := loadDirective(ctx, command.Request)
 				if loadErr != nil {
-					eventLogger.WithCtx(blackbox.Ctx{"channel_id": command.Request.ChannelID, "actor_id": command.Request.UserID, "error_type": fmt.Sprintf("%T", loadErr)}).Warn("Slack directive command authorization failed")
-					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralCommandResponse("You are not authorized to configure this channel's directive."))
+					eventLogger.WithCtx(blackbox.Ctx{"channel_id": command.Request.ChannelID, "actor_id": command.Request.UserID, "error_type": fmt.Sprintf("%T", loadErr)}).Warn("Slack directive command scope check failed")
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralCommandResponse("Channel directives are not available in this channel right now."))
 					continue
 				}
 				if ackErr := s.client.AckCtx(ctx, event.Request.EnvelopeID, nil); ackErr != nil {
@@ -380,7 +380,7 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 					saved, saveErr := saveDirective(ctx, directive)
 					if saveErr != nil {
 						eventLogger.WithCtx(blackbox.Ctx{"channel_id": directive.ChannelID, "actor_id": directive.UserID, "error_type": fmt.Sprintf("%T", saveErr)}).Error("Slack directive submission persistence failed")
-						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, slackapi.NewErrorsViewSubmissionResponse(map[string]string{directivePromptBlockID: "The directive was not saved. Check your channel authorization and try again."}))
+						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, slackapi.NewErrorsViewSubmissionResponse(map[string]string{directivePromptBlockID: "The directive was not saved. Check that the channel is still available and try again."}))
 						continue
 					}
 					if ackErr := s.client.AckCtx(ctx, event.Request.EnvelopeID, nil); ackErr != nil {
@@ -486,6 +486,14 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 			envelopeLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "duplicate": accepted.Duplicate, "ignored": false}).Info("Slack event durably accepted and acknowledged")
 		}
 	}
+}
+
+func socketModeErrorContext(data any) blackbox.Ctx {
+	ctx := blackbox.Ctx{"error_type": fmt.Sprintf("%T", data)}
+	if socketErr, ok := data.(error); ok {
+		ctx["error"] = socketErr.Error()
+	}
+	return ctx
 }
 
 func NormalizeBotMembershipChange(organizationID, botUserID string, data any) (BotMembershipChange, bool, error) {

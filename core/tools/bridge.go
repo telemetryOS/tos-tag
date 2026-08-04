@@ -142,10 +142,32 @@ func (b *Bridge) RevokeAttempt(_ context.Context, attemptID string) error {
 }
 
 type bridgeRequest struct {
-	ToolID      string   `json:"tool_id"`
-	OperationID string   `json:"operation_id"`
-	Arguments   []string `json:"arguments"`
-	ApprovalID  string   `json:"approval_id"`
+	ToolID      string      `json:"tool_id"`
+	OperationID string      `json:"operation_id"`
+	Arguments   []string    `json:"arguments"`
+	ApprovalID  string      `json:"approval_id"`
+	Wiki        *wikiAction `json:"wiki,omitempty"`
+}
+
+// wikiAction is the typed semantic request retained beside the exact reviewed
+// argv. It makes an approved delete resumable without giving the worker an
+// arbitrary argument surface.
+type wikiAction struct {
+	Operation     string   `json:"operation"`
+	PageReference string   `json:"page_reference,omitempty"`
+	Namespace     string   `json:"namespace,omitempty"`
+	Query         string   `json:"query,omitempty"`
+	Title         string   `json:"title,omitempty"`
+	Body          string   `json:"body,omitempty"`
+	Tags          []string `json:"tags,omitempty"`
+	Note          string   `json:"note,omitempty"`
+	Prefix        string   `json:"prefix,omitempty"`
+	Tag           string   `json:"tag,omitempty"`
+	Format        string   `json:"format,omitempty"`
+	Revision      int      `json:"revision,omitempty"`
+	Limit         int      `json:"limit,omitempty"`
+	Depth         int      `json:"depth,omitempty"`
+	AllowEmpty    bool     `json:"allow_empty,omitempty"`
 }
 
 func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +201,10 @@ func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
 		writeBridge(w, http.StatusBadRequest, map[string]any{"error": "invalid_request"})
 		return
 	}
+	if (input.ToolID == "telemetryos.wiki") != (input.Wiki != nil) {
+		writeBridge(w, http.StatusBadRequest, map[string]any{"error": "typed_wiki_request_required"})
+		return
+	}
 	if err := b.authorize(r.Context(), scope); err != nil {
 		_ = b.RevokeAttempt(r.Context(), scope.AttemptID)
 		writeBridge(w, http.StatusForbidden, map[string]any{"error": "execution_revoked"})
@@ -194,7 +220,11 @@ func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
 		writeBridge(w, http.StatusForbidden, map[string]any{"error": "tool_not_admitted"})
 		return
 	}
-	action := approvals.Action{OrganizationID: scope.OrganizationID, JobID: scope.JobID, WorkspaceID: scope.WorkspaceID, ChannelID: scope.ChannelID, ThreadTS: scope.ThreadTS, ToolID: bundle.Manifest.ID, ToolVersion: bundle.Manifest.Version, OperationID: operation.ID, Arguments: map[string]any{"argv": input.Arguments}, Destination: scope.WorkspaceID + "/" + scope.ChannelID, Risk: operation.Risk}
+	actionArguments := map[string]any{"argv": input.Arguments}
+	if input.Wiki != nil {
+		actionArguments["wiki"] = *input.Wiki
+	}
+	action := approvals.Action{OrganizationID: scope.OrganizationID, JobID: scope.JobID, WorkspaceID: scope.WorkspaceID, ChannelID: scope.ChannelID, ThreadTS: scope.ThreadTS, ToolID: bundle.Manifest.ID, ToolVersion: bundle.Manifest.Version, OperationID: operation.ID, Arguments: actionArguments, Destination: scope.WorkspaceID + "/" + scope.ChannelID, Risk: operation.Risk}
 	if operation.RequiresApproval() {
 		if input.ApprovalID == "" {
 			requesterID := b.approvalRequester(r.Context(), scope)
@@ -231,11 +261,18 @@ func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
 	result, err := b.gateway.Execute(r.Context(), input.ToolID, GatewayRequest{Request: Request{OrganizationID: scope.OrganizationID, JobID: scope.JobID, OperationID: input.OperationID, Args: input.Arguments, Capability: Capability{ToolID: bundle.Manifest.ID, ToolVersion: bundle.Manifest.Version, OperationID: input.OperationID, AttemptToken: scope.AttemptID, SteeringEpoch: scope.SteeringEpoch, ExpiresAt: minTime(scope.ExpiresAt, time.Now().UTC().Add(time.Duration(operation.TimeoutSeconds)*time.Second))}}})
 	if err != nil {
 		metadata := map[string]any{"tool_id": input.ToolID, "operation_id": input.OperationID, "exit_code": result.ExitCode, "duration_ms": result.Duration.Milliseconds(), "error_code": toolExecutionErrorCode(err)}
+		validationCode := toolValidationCode(input.ToolID, result.Output)
+		if validationCode != "" {
+			metadata["validation_code"] = validationCode
+		}
 		if _, appendErr := b.audit.Append(r.Context(), audit.AppendRequest{OrganizationID: scope.OrganizationID, Type: "tool.execution.failed", ActorID: "agent:" + scope.JobID, ResourceID: executionID, RetentionEpoch: time.Now().UTC().Format("2006-01"), IdempotencyKey: "tool-execution/" + executionID + "/failed", Metadata: metadata}); appendErr != nil {
 			writeBridge(w, http.StatusServiceUnavailable, map[string]any{"error": "audit_unavailable"})
 			return
 		}
 		response := map[string]any{"error": "tool_failed", "detail": err.Error(), "error_code": metadata["error_code"], "exit_code": result.ExitCode}
+		if validationCode != "" {
+			response["validation_code"] = validationCode
+		}
 		// Executor output is already bounded and has declared secret values
 		// redacted. Returning it on failure lets the worker correct invalid typed
 		// arguments instead of blindly retrying until the callback deadline.
@@ -250,6 +287,35 @@ func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeBridge(w, http.StatusOK, result)
+}
+
+func toolValidationCode(toolID, output string) string {
+	if toolID != "telemetryos.wiki" {
+		return ""
+	}
+	normalized := strings.ToLower(output)
+	switch {
+	case strings.Contains(normalized, "requires a value"):
+		return "wiki.cli.missing_flag_value"
+	case strings.Contains(normalized, "unknown flag") || strings.Contains(normalized, "unknown option"):
+		return "wiki.cli.unknown_flag"
+	case strings.Contains(normalized, "unexpected argument") || strings.Contains(normalized, "unexpected extra"):
+		return "wiki.cli.unexpected_argument"
+	case strings.Contains(normalized, "requires --title"):
+		return "wiki.cli.missing_title"
+	case strings.Contains(normalized, "requires inline --body") || strings.Contains(normalized, "requires --body"):
+		return "wiki.cli.missing_body"
+	case strings.Contains(normalized, "body is empty") || strings.Contains(normalized, "body is whitespace"):
+		return "wiki.cli.empty_body"
+	case strings.Contains(normalized, "not permitted by") || strings.Contains(normalized, "operation denied"):
+		return "wiki.cli.operation_denied"
+	case strings.Contains(normalized, "page reference") || strings.Contains(normalized, "invalid page ref"):
+		return "wiki.cli.page_reference_invalid"
+	case strings.Contains(normalized, "usage:"):
+		return "wiki.cli.usage"
+	default:
+		return ""
+	}
 }
 
 func toolExecutionErrorCode(err error) string {

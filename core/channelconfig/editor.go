@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/telemetryos/tos-tag/core/audit"
@@ -94,7 +93,7 @@ func (e *Editor) authorize(ctx context.Context, request EditRequest) error {
 		return ErrDirectiveForbidden
 	}
 	policy, err := e.scopes.Resolve(ctx, request.OrganizationID, request.WorkspaceID, request.ChannelID)
-	if err != nil || !policy.Enrolled || policy.KillSwitch || !policy.MembershipRefreshedAt.After(e.now().UTC().Add(-24*time.Hour)) || !slices.Contains(policy.ApproverUserIDs, request.ActorID) {
+	if err != nil || !policy.Enrolled || policy.KillSwitch {
 		return ErrDirectiveForbidden
 	}
 	return nil

@@ -20,6 +20,10 @@ commands, tests, and active documentation have been removed.
 
 - The classifier still calls the OpenAI Responses API directly.
 - It remains stateless and tool-free.
+- A durable, atomic organization/workspace flood bucket runs before context or
+  provider calls. The default is 1,000 eligible classifications per one-hour
+  fixed window; exhaustion or bucket-store failure produces no reaction, agent
+  work, or Slack output.
 - Its key is still `TAG__CLASSIFIER__OPENAI_API_KEY` and is not exposed to
   Codex App Server.
 - It chooses silence, reaction, direct social reply, placement, model profile,
@@ -45,8 +49,11 @@ commands, tests, and active documentation have been removed.
   disabled for Slack jobs. The turn is read-only and subprocess networking is
   disabled; first-party Codex web search is separately configurable and `live`
   in the local Slack runtime.
-- The only model-visible tools are job-scoped `tos_tag_tool` and
-  `tos_tag_trigger` dynamic functions.
+- The only model-visible tools are job-scoped `tos_tag_tool`, typed
+  `tos_tag_wiki`, and `tos_tag_trigger` dynamic functions.
+- Agent Wiki requests are semantic page operations. Go validates their fields,
+  constructs reviewed CLI argv, persists only closed validation codes, and
+  collapses corrected validation retries into one Slack progress step.
 - Dynamic tool requests are executed by the Go client through the existing
   lease/steering/expiry-fenced gateway. The capability is not placed in the
   Codex process environment.
@@ -92,7 +99,9 @@ commands, tests, and active documentation have been removed.
   fallback. Intentional reaction-only/direct classifier outcomes remain outside
   the stream path.
 - Slack-native exact-action approval and fresh-worker resume.
-- `/tag-directive` Slack modal with revisioned Mongo persistence and audit.
+- `/tag-directive` Slack modal available to every authenticated workspace user
+  for an enrolled, enabled channel, plus management-UI creation, revisioned
+  Mongo persistence, and audit.
 - Standard five-field cron routines and classifier-gated heartbeat trigger
   subscriptions with explicit IANA timezones, legacy interval compatibility,
   and a combined management Automation view/editor.
@@ -124,7 +133,7 @@ commands, tests, and active documentation have been removed.
 - Persistent Compose workspace/home/Mongo with disposable per-job roots.
 - Graduated response delivery: short/medium answers remain Slack-native, while
   genuinely document-sized expository work is published to Agent Wiki
-  `artifacts` by a strong/max worker and linked only from a successful write;
+  `artifacts` by the strong Sol-medium worker and linked only from a successful write;
   failed publication falls back to a compact Slack answer without a guessed
   link. Artifact segments are rejected unless the URL has successful
   same-attempt reviewed-tool provenance. References to existing Wiki pages use
@@ -137,14 +146,16 @@ commands, tests, and active documentation have been removed.
 Current migration evidence:
 
 - full verification components: pass, including all Go packages, the race
-  detector, vet, security scans, and the expanded `48/48` deterministic
+  detector, vet, security scans, and the expanded `49/49` deterministic
   behavioral eval;
-- opt-in direct OpenAI classifier eval: `48/48`, with `38` real provider calls
+- latest opt-in direct OpenAI classifier baseline: `48/48`, with `38` real provider calls
   and approximately `1.84s` mean case
-  latency; natural Slack text contained no evaluator outcome, placement,
-  reaction, model, effort, or method hints;
+  latency; it predates the ambient Wiki report-link regression, whose original
+  provider decision and deterministic correction are covered locally. Natural
+  Slack text contained no evaluator outcome, placement, reaction, model,
+  effort, or method hints;
 - live `#tos-tag` assist-initiative canary: the direct provider recommended
-  strong/max background work for an unmentioned declarative synthetic incident,
+  the then-current strong/max background route for an unmentioned declarative synthetic incident,
   while the runtime recorded effective `silent` with
   `policy.unsolicited_assist_work`; Slack had zero replies and Mongo had zero
   jobs for the observation;
@@ -169,7 +180,7 @@ Current migration evidence:
   concurrent Codex workers without output outside the allowed channel;
 - latest seven-message adversarial wave: pass. Seven natural messages were sent
   concurrently; direct social completed in about `5s`, light/low channel work in
-  `12-14s`, the standard/medium native table in `19s`, and the strong/max live
+  `12-14s`, the standard/medium native table in `19s`, and the then-current strong/max live
   OTel investigation in `197s`. Redacted logs confirmed zero selected evidence
   for the private-context refusal and typed `table` output for the comparison;
 - latest reviewed source-access case: pass. The classifier completed in
@@ -218,7 +229,7 @@ Current migration evidence:
   Natural `#tos-tag` probes covered classifier-only social reply, irrelevant
   silence, source-write redirection, light/low in-channel work, standard/medium
   product retrieval, native table delivery, destination-local privacy refusal,
-  reaction-only acknowledgement, and strong/max operational routing. The
+  reaction-only acknowledgement, and the then-current strong/max operational routing. The
   observed emoji set was `white_check_mark`, `speech_balloon`, `thinking_face`,
   `warning`, `rotating_light`, and `eyes`. Threaded work opened Thinking Steps
   roughly one second after classification. A malformed product-comparison table first

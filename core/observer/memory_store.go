@@ -175,6 +175,9 @@ func (s *MemoryStore) applyProjection(envelope types.SlackEnvelope, observation 
 		if envelope.BotID != "" {
 			current.BotID = envelope.BotID
 		}
+		if envelope.Subtype != "" {
+			current.Subtype = envelope.Subtype
+		}
 		current.Restricted = envelope.Restricted
 		s.messages[key] = current
 		return
@@ -192,6 +195,7 @@ func (s *MemoryStore) applyProjection(envelope types.SlackEnvelope, observation 
 		RootThreadTS:      envelope.RootThreadTS(),
 		AuthorID:          envelope.UserID,
 		BotID:             envelope.BotID,
+		Subtype:           envelope.Subtype,
 		Text:              text,
 		Deleted:           envelope.Kind == types.SlackEventDelete,
 		Restricted:        envelope.Restricted,

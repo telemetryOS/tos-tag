@@ -24,7 +24,7 @@ func TestOpenAIClassifierUsesDirectStructuredResponsesAPI(t *testing.T) {
 		if err := json.NewDecoder(request.Body).Decode(&received); err != nil {
 			t.Error(err)
 		}
-		decision := `{"outcome":"reply_in_thread","confidence":0.99,"reason_codes":["direct_question"],"topic_ids":["outage"],"releasable_evidence_ids":["alerts/1"],"restricted_signal_ids":[],"response_intent":"answer status","direct_reply":"","source_write_requested":false,"authoritative_product_retrieval_required":false,"disclosure_class":"destination_safe","requires_full_agent":true,"reaction":"rotating_light","agent_model_profile":"chatgpt-luna-max","agent_model_strength":"strong","agent_reasoning_effort":"max"}`
+		decision := `{"outcome":"reply_in_thread","confidence":0.99,"reason_codes":["direct_question"],"topic_ids":["outage"],"releasable_evidence_ids":["alerts/1"],"restricted_signal_ids":[],"response_intent":"answer status","direct_reply":"","source_write_requested":false,"authoritative_product_retrieval_required":false,"disclosure_class":"destination_safe","requires_full_agent":true,"reaction":"rotating_light","agent_model_profile":"chatgpt-sol-medium","agent_model_strength":"strong","agent_reasoning_effort":"medium"}`
 		body := fmt.Sprintf(`{"id":"resp_test","status":"completed","usage":{"input_tokens":1234,"output_tokens":321},"output":[{"type":"message","content":[{"type":"output_text","text":%q}]}]}`, decision)
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}
@@ -47,13 +47,13 @@ func TestOpenAIClassifierUsesDirectStructuredResponsesAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Outcome != types.OutcomeReplyInThread || decision.Reaction != "rotating_light" || decision.AgentModelProfile != "chatgpt-luna-max" || decision.AgentModelStrength != "strong" || decision.AgentReasoningEffort != "max" || decision.ClassifierModel != "gpt-5.6-luna" || decision.ClassifierResponseID != "resp_test" || decision.ClassifierInputTokens != 1234 || decision.ClassifierOutputTokens != 321 {
+	if decision.Outcome != types.OutcomeReplyInThread || decision.Reaction != "rotating_light" || decision.AgentModelProfile != "chatgpt-sol-medium" || decision.AgentModelStrength != "strong" || decision.AgentReasoningEffort != "medium" || decision.ClassifierModel != "gpt-5.6-luna" || decision.ClassifierResponseID != "resp_test" || decision.ClassifierInputTokens != 1234 || decision.ClassifierOutputTokens != 321 {
 		t.Fatalf("unexpected decision: %#v", decision)
 	}
 	if received["model"] != "gpt-5.6-luna" || received["store"] != false {
 		t.Fatalf("unexpected Responses API request: %#v", received)
 	}
-	if instructions, _ := received["instructions"].(string); !strings.Contains(instructions, "brief, self-contained") || !strings.Contains(instructions, "deeper dive") || !strings.Contains(instructions, "what would need to change") || !strings.Contains(instructions, "active_thread") || !strings.Contains(instructions, "thread-partition turns") || !strings.Contains(instructions, "ambient alignment intervention") || !strings.Contains(instructions, "destination_recent_participant_ids") || !strings.Contains(instructions, "likely_addressed_to_agent") || !strings.Contains(instructions, "imperative request") || !strings.Contains(instructions, "Take a look at the OpenAI pricing page") || !strings.Contains(instructions, "readily discoverable with web search") || !strings.Contains(instructions, "not a bare declaration") || !strings.Contains(instructions, "must not start full-agent work") || !strings.Contains(instructions, "conversation_focus") || !strings.Contains(instructions, "are we using it?") || !strings.Contains(instructions, "weather or forecast question") || !strings.Contains(instructions, "never claim the person is not a channel member") || !strings.Contains(instructions, "hammer_and_wrench marks implementation") || !strings.Contains(instructions, "speech_balloon marks a conversational explanation") || !strings.Contains(instructions, "direct_reply") || !strings.Contains(instructions, "one plain-text line") || !strings.Contains(instructions, "light/low profile") || !strings.Contains(instructions, "standard/medium profile") || !strings.Contains(instructions, "strong/max profile") || !strings.Contains(instructions, "document-sized synthesis") || !strings.Contains(instructions, "Agent Wiki artifact") || !strings.Contains(instructions, "formatting alone never justify max") || !strings.Contains(instructions, "never claim a direct mention when direct_mention is false") || !strings.Contains(instructions, "source_write_requested") || !strings.Contains(instructions, "authoritative_product_retrieval_required") || !strings.Contains(instructions, "marketing-messaging") || !strings.Contains(instructions, "Premium Trial") {
+	if instructions, _ := received["instructions"].(string); !strings.Contains(instructions, "brief, self-contained") || !strings.Contains(instructions, "deeper dive") || !strings.Contains(instructions, "what would need to change") || !strings.Contains(instructions, "active_thread") || !strings.Contains(instructions, "thread-partition turns") || !strings.Contains(instructions, "ambient alignment intervention") || !strings.Contains(instructions, "destination_recent_participant_ids") || !strings.Contains(instructions, "likely_addressed_to_agent") || !strings.Contains(instructions, "imperative request") || !strings.Contains(instructions, "Take a look at the OpenAI pricing page") || !strings.Contains(instructions, "readily discoverable with web search") || !strings.Contains(instructions, "not a bare declaration") || !strings.Contains(instructions, "must not start full-agent work") || !strings.Contains(instructions, "conversation_focus") || !strings.Contains(instructions, "are we using it?") || !strings.Contains(instructions, "weather or forecast question") || !strings.Contains(instructions, "never claim the person is not a channel member") || !strings.Contains(instructions, "hammer_and_wrench marks implementation") || !strings.Contains(instructions, "speech_balloon marks a conversational explanation") || !strings.Contains(instructions, "direct_reply") || !strings.Contains(instructions, "one plain-text line") || !strings.Contains(instructions, "light/low profile") || !strings.Contains(instructions, "standard/medium profile") || !strings.Contains(instructions, "strong profile") || !strings.Contains(instructions, "ChatGPT 5.6 Sol at medium reasoning effort") || !strings.Contains(instructions, "tricky debugging or root-cause analysis") || !strings.Contains(instructions, "document-sized synthesis") || !strings.Contains(instructions, "Agent Wiki artifact") || !strings.Contains(instructions, "formatting alone never justify the strong profile") || !strings.Contains(instructions, "never claim a direct mention when direct_mention is false") || !strings.Contains(instructions, "source_write_requested") || !strings.Contains(instructions, "authoritative_product_retrieval_required") || !strings.Contains(instructions, "marketing-messaging") || !strings.Contains(instructions, "Premium Trial") {
 		t.Fatalf("classifier placement guidance missing: %q", instructions)
 	}
 	inputs := received["input"].([]any)
@@ -96,6 +96,22 @@ func TestOpenAIClassifierRejectsUnallowlistedRecommendationWithoutLeakingContent
 	}
 }
 
+func TestAuditReasonCodesCannotContradictImmutableAddressingFacts(t *testing.T) {
+	mentioned := withConsistentAuditReasonCodes(types.ClassificationDecision{ReasonCodes: []string{
+		"ambient_simple_question", "not_likely_addressed_to_agent", "no_likely_address_signal", "no_direct_mention", "active_thread",
+	}}, Target{Envelope: types.SlackEnvelope{IsMention: true}, ActiveThread: false})
+	if slices.Contains(mentioned.ReasonCodes, "ambient_simple_question") || slices.Contains(mentioned.ReasonCodes, "not_likely_addressed_to_agent") || slices.Contains(mentioned.ReasonCodes, "no_likely_address_signal") || slices.Contains(mentioned.ReasonCodes, "no_direct_mention") || slices.Contains(mentioned.ReasonCodes, "active_thread") || !slices.Contains(mentioned.ReasonCodes, "policy.audit_reason_codes_corrected") {
+		t.Fatalf("mentioned reason codes = %#v", mentioned.ReasonCodes)
+	}
+
+	threadedWithoutMention := withConsistentAuditReasonCodes(types.ClassificationDecision{ReasonCodes: []string{
+		"direct_mention", "active_thread_false", "thread_followup",
+	}}, Target{ActiveThread: true})
+	if slices.Contains(threadedWithoutMention.ReasonCodes, "direct_mention") || slices.Contains(threadedWithoutMention.ReasonCodes, "active_thread_false") || !slices.Contains(threadedWithoutMention.ReasonCodes, "thread_followup") || !slices.Contains(threadedWithoutMention.ReasonCodes, "policy.audit_reason_codes_corrected") {
+		t.Fatalf("threaded reason codes = %#v", threadedWithoutMention.ReasonCodes)
+	}
+}
+
 func TestOpenAIRecommendationAllowsBoundedDirectSocialReplyWithoutAgent(t *testing.T) {
 	decision := types.ClassificationDecision{
 		Outcome: types.OutcomeReplyInChannel, Confidence: .99, ReasonCodes: []string{"social.thanks"},
@@ -123,7 +139,7 @@ func TestOpenAIRecommendationDefaultsOnlyMissingReaction(t *testing.T) {
 }
 
 func TestAmbientPolicyCorrectionsSurfaceAlignmentAndEnforceAdmittedPlacement(t *testing.T) {
-	profiles := []advertisedAgentProfile{{ID: "light", Strength: "light", ReasoningEffort: "low"}, {ID: "standard", Strength: "standard", ReasoningEffort: "medium"}, {ID: "strong", Strength: "strong", ReasoningEffort: "max"}}
+	profiles := []advertisedAgentProfile{{ID: "light", Strength: "light", ReasoningEffort: "low"}, {ID: "standard", Strength: "standard", ReasoningEffort: "medium"}, {ID: "strong", Strength: "strong", ReasoningEffort: "medium"}}
 	now := time.Now().UTC()
 	target := Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{ChannelID: "support", UserID: "U_ALEX", Text: "Checkout is healthy again.", EventTime: now}}
 	pack := types.ContextPackRevision{Sources: []types.ContextSource{{ID: "development/1", ChannelID: "development", AuthorID: "U_TOM", Provenance: "human_message", Partition: types.PartitionRecentOrg, Text: "Checkout is still timing out.", ObservedAt: now.Add(-time.Minute), DisclosureClass: types.DisclosureDestinationSafe}}}
@@ -159,8 +175,8 @@ func TestAmbientPolicyCorrectionsSurfaceAlignmentAndEnforceAdmittedPlacement(t *
 	}
 
 	background := withBackgroundProfileFloor(types.ClassificationDecision{Outcome: types.OutcomeStartBackgroundJob, RequiresFullAgent: true, AgentModelProfile: "light", AgentModelStrength: "light", AgentReasoningEffort: "low", ReasonCodes: []string{"work"}}, Target{Envelope: types.SlackEnvelope{Text: "Investigate the token exposure in production systems."}}, profiles)
-	if background.AgentModelProfile != "strong" || background.AgentReasoningEffort != "max" {
-		t.Fatalf("security background work was not raised to strong/max: %#v", background)
+	if background.AgentModelProfile != "strong" || background.AgentReasoningEffort != "medium" {
+		t.Fatalf("security background work was not raised to strong Sol/medium: %#v", background)
 	}
 	canonical := withCanonicalAgentProfile(types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, RequiresFullAgent: true, AgentModelProfile: "light", AgentModelStrength: "standard", AgentReasoningEffort: "low", ReasonCodes: []string{"reply"}}, profiles)
 	if canonical.AgentModelProfile != "standard" || canonical.AgentModelStrength != "standard" || canonical.AgentReasoningEffort != "medium" || !slices.Contains(canonical.ReasonCodes, "policy.canonical_agent_profile") {
@@ -178,7 +194,7 @@ func TestAmbientPolicyCorrectionsSurfaceAlignmentAndEnforceAdmittedPlacement(t *
 	if react.AgentModelProfile != "" || react.AgentModelStrength != "none" || react.AgentReasoningEffort != "" || !slices.Contains(react.ReasonCodes, "policy.non_agent_profile_cleared") {
 		t.Fatalf("react-only recommendation retained an agent profile: %#v", react)
 	}
-	silent := withCanonicalAgentProfile(types.ClassificationDecision{Outcome: types.OutcomeSilent, Reaction: "eyes", RequiresFullAgent: true, AgentModelProfile: "strong", AgentModelStrength: "strong", AgentReasoningEffort: "max", ReleasableEvidenceIDs: []string{"source/1"}, ReasonCodes: []string{"quiet"}}, profiles)
+	silent := withCanonicalAgentProfile(types.ClassificationDecision{Outcome: types.OutcomeSilent, Reaction: "eyes", RequiresFullAgent: true, AgentModelProfile: "strong", AgentModelStrength: "strong", AgentReasoningEffort: "medium", ReleasableEvidenceIDs: []string{"source/1"}, ReasonCodes: []string{"quiet"}}, profiles)
 	if silent.Reaction != "" || silent.RequiresFullAgent || silent.AgentModelProfile != "" || silent.AgentModelStrength != "none" || len(silent.ReleasableEvidenceIDs) != 0 || !slices.Contains(silent.ReasonCodes, "policy.silent_action_cleared") {
 		t.Fatalf("silent recommendation retained action fields: %#v", silent)
 	}
@@ -215,7 +231,7 @@ func TestAmbientPolicyCorrectionsSurfaceAlignmentAndEnforceAdmittedPlacement(t *
 	if staging.Outcome != types.OutcomeSilent {
 		t.Fatalf("substring tag was treated as an address: %#v", staging)
 	}
-	productComparison := withAmbientPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeStartBackgroundJob, Confidence: .93, ReasonCodes: []string{"research"}, RequiresFullAgent: true, Reaction: "eyes", AgentModelProfile: "strong", AgentModelStrength: "strong", AgentReasoningEffort: "max", ReleasableEvidenceIDs: []string{"irrelevant"}}, Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Text: "How do the Enterprise and Premium billing plans differ?"}}, types.ContextPackRevision{}, profiles)
+	productComparison := withAmbientPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeStartBackgroundJob, Confidence: .93, ReasonCodes: []string{"research"}, RequiresFullAgent: true, Reaction: "eyes", AgentModelProfile: "strong", AgentModelStrength: "strong", AgentReasoningEffort: "medium", ReleasableEvidenceIDs: []string{"irrelevant"}}, Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Text: "How do the Enterprise and Premium billing plans differ?"}}, types.ContextPackRevision{}, profiles)
 	if productComparison.Outcome != types.OutcomeStartBackgroundJob {
 		t.Fatalf("ambient policy unexpectedly rewrote product work before product policy: %#v", productComparison)
 	}
@@ -251,8 +267,19 @@ func TestAmbientPolicyCorrectionsSurfaceAlignmentAndEnforceAdmittedPlacement(t *
 	if !mixedWikiAndSourceWrite.SourceWriteRequested || mixedWikiAndSourceWrite.DirectReply != sourceWriteRedirectReply {
 		t.Fatalf("explicit mixed Wiki and source mutation bypassed the source boundary: %#v", mixedWikiAndSourceWrite)
 	}
-	if !isObviousSourceWriteRequest("Please patch the login regression") || isObviousSourceWriteRequest("Please review the login code and explain it") {
+	if !isObviousSourceWriteRequest("Please patch the login regression") || !isObviousSourceWriteRequest("Change tos-tag so every ambient message gets a reply") || isObviousSourceWriteRequest("Please review the login code and explain it") {
 		t.Fatal("source write heuristic did not preserve the read-only distinction")
+	}
+	reportUpdateText := "Team reports refreshed August 4:\n\n[Linear ENG velocity — 7/30/60/90](https://agentwiki.telemetryos.com/pages/linear) — fresh through August 4\n[GitHub commit volume — 7/30/60/90](https://agentwiki.telemetryos.com/pages/github) — fresh through August 4"
+	if isObviousSourceWriteRequest(reportUpdateText) {
+		t.Fatal("declarative Wiki report links were mistaken for a source mutation request")
+	}
+	reportUpdate := withSourceWritePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeSilent, Confidence: .99, ReasonCodes: []string{"ambient_declarative_update", "no_action_requested"}, SourceWriteRequested: true, DirectReply: sourceWriteRedirectReply}, Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Text: reportUpdateText}})
+	if reportUpdate.Outcome != types.OutcomeSilent || reportUpdate.SourceWriteRequested || reportUpdate.DirectReply != "" || !slices.Contains(reportUpdate.ReasonCodes, "policy.unconfirmed_source_write_ignored") {
+		t.Fatalf("unconfirmed provider source-write flag changed an ambient report update: %#v", reportUpdate)
+	}
+	if !isObviousSourceWriteRequest("Please commit the dependency fix") || !isObviousSourceWriteRequest("Please push the repaired branch") || !isObviousSourceWriteRequest("Please deploy the change") {
+		t.Fatal("explicit repository operations were not recognized as source writes")
 	}
 	readOnlyAnalysis := withReadOnlyCodeAnalysisPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInThread, Confidence: .91, RequiresFullAgent: true, AgentModelProfile: "light", AgentModelStrength: "light", AgentReasoningEffort: "low"}, Target{Envelope: types.SlackEnvelope{Text: "Review the Gateway authentication code and explain how token validation works."}}, profiles)
 	if readOnlyAnalysis.Outcome != types.OutcomeReplyInThread || readOnlyAnalysis.SourceWriteRequested || !readOnlyAnalysis.RequiresFullAgent || readOnlyAnalysis.AgentModelStrength != "standard" || readOnlyAnalysis.AgentReasoningEffort != "medium" {
@@ -271,8 +298,8 @@ func TestAmbientPolicyCorrectionsSurfaceAlignmentAndEnforceAdmittedPlacement(t *
 		t.Fatalf("code ownership question missed the read-only analysis floor: %#v", codeOwnership)
 	}
 	securityBoundary := withReadOnlyCodeAnalysisPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInThread, Confidence: .96, RequiresFullAgent: true, AgentModelProfile: "standard", AgentModelStrength: "standard", AgentReasoningEffort: "medium", ResponseIntent: "assess the boundary"}, Target{Envelope: types.SlackEnvelope{Text: "Investigate whether cross-channel context construction can leak private incident details."}}, profiles)
-	if securityBoundary.Outcome != types.OutcomeReplyInThread || securityBoundary.AgentModelStrength != "strong" || securityBoundary.AgentReasoningEffort != "max" || !strings.Contains(securityBoundary.ResponseIntent, "reviewed read-only source") {
-		t.Fatalf("security boundary analysis missed source-backed strong/max routing: %#v", securityBoundary)
+	if securityBoundary.Outcome != types.OutcomeReplyInThread || securityBoundary.AgentModelStrength != "strong" || securityBoundary.AgentReasoningEffort != "medium" || !strings.Contains(securityBoundary.ResponseIntent, "reviewed read-only source") {
+		t.Fatalf("security boundary analysis missed source-backed strong Sol/medium routing: %#v", securityBoundary)
 	}
 	briefQuestion := withBriefMentionPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInThread, Confidence: .9, RequiresFullAgent: true, AgentModelProfile: "standard", AgentModelStrength: "standard", AgentReasoningEffort: "medium"}, Target{Envelope: types.SlackEnvelope{Text: "<@tos-tag> when does the deploy window start?", IsMention: true}}, profiles)
 	if briefQuestion.Outcome != types.OutcomeReplyInChannel || briefQuestion.AgentModelStrength != "light" || briefQuestion.AgentReasoningEffort != "low" {
@@ -286,11 +313,11 @@ func TestAmbientPolicyCorrectionsSurfaceAlignmentAndEnforceAdmittedPlacement(t *
 	if nonProductSchedule.ProductRetrievalRequired {
 		t.Fatalf("operational deploy scheduling was mistaken for product knowledge: %#v", nonProductSchedule)
 	}
-	nonProductOperationalStatus := withProductKnowledgePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, ProductRetrievalRequired: true, RequiresFullAgent: true, AgentModelProfile: "strong", AgentModelStrength: "strong", AgentReasoningEffort: "max"}, Target{Envelope: types.SlackEnvelope{Text: "<@tos-tag> any operational issues?", IsMention: true}}, profiles)
+	nonProductOperationalStatus := withProductKnowledgePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, ProductRetrievalRequired: true, RequiresFullAgent: true, AgentModelProfile: "strong", AgentModelStrength: "strong", AgentReasoningEffort: "medium"}, Target{Envelope: types.SlackEnvelope{Text: "<@tos-tag> any operational issues?", IsMention: true}}, profiles)
 	if nonProductOperationalStatus.ProductRetrievalRequired {
 		t.Fatalf("operational status synthesis was mistaken for product knowledge: %#v", nonProductOperationalStatus)
 	}
-	nonProductOperationalTopic := withProductKnowledgePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, TopicIDs: []string{"feature-regression"}, RequiresFullAgent: true, AgentModelProfile: "strong", AgentModelStrength: "strong", AgentReasoningEffort: "max"}, Target{Envelope: types.SlackEnvelope{Text: "<@tos-tag> any operational issues?", IsMention: true}}, profiles)
+	nonProductOperationalTopic := withProductKnowledgePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInChannel, TopicIDs: []string{"feature-regression"}, RequiresFullAgent: true, AgentModelProfile: "strong", AgentModelStrength: "strong", AgentReasoningEffort: "medium"}, Target{Envelope: types.SlackEnvelope{Text: "<@tos-tag> any operational issues?", IsMention: true}}, profiles)
 	if nonProductOperationalTopic.ProductRetrievalRequired || slices.Contains(nonProductOperationalTopic.ReasonCodes, "policy.authoritative_product_retrieval") {
 		t.Fatalf("context topic mislabeled operational status as product knowledge: %#v", nonProductOperationalTopic)
 	}
@@ -309,6 +336,38 @@ func TestAmbientPolicyCorrectionsSurfaceAlignmentAndEnforceAdmittedPlacement(t *
 	ambientProductQuestion := withAmbientPolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeReplyInThread, Confidence: .99, ReasonCodes: []string{"product"}, ProductRetrievalRequired: true, RequiresFullAgent: true, Reaction: "thinking_face", AgentModelProfile: "standard", AgentModelStrength: "standard", AgentReasoningEffort: "medium"}, Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Text: "Does anyone know how Premium differs from Enterprise?"}}, types.ContextPackRevision{}, profiles)
 	if ambientProductQuestion.Outcome != types.OutcomeReplyInThread || !ambientProductQuestion.ProductRetrievalRequired {
 		t.Fatalf("undirected product question was suppressed: %#v", ambientProductQuestion)
+	}
+}
+
+func TestHighIntelligenceWorkUsesCanonicalStrongSolMediumProfile(t *testing.T) {
+	profiles := []advertisedAgentProfile{{ID: "chatgpt-luna-low", Strength: "light", ReasoningEffort: "low"}, {ID: "chatgpt-luna-medium", Strength: "standard", ReasoningEffort: "medium"}, {ID: "chatgpt-sol-medium", Model: "gpt-5.6-sol", Strength: "strong", ReasoningEffort: "medium"}}
+	base := types.ClassificationDecision{Outcome: types.OutcomeReplyInThread, RequiresFullAgent: true, AgentModelProfile: "chatgpt-luna-medium", AgentModelStrength: "standard", AgentReasoningEffort: "medium"}
+	cases := []string{
+		"Write a comprehensive architecture document for future operators.",
+		"Investigate and determine the root cause of this intermittent race condition.",
+		"Correlate the traces and logs, then cross-reference the source and wiki.",
+	}
+	for _, message := range cases {
+		got := withHighIntelligenceProfileCorrections(base, Target{Envelope: types.SlackEnvelope{Text: message}}, profiles)
+		if got.AgentModelProfile != "chatgpt-sol-medium" || got.AgentModelStrength != "strong" || got.AgentReasoningEffort != "medium" || !slices.Contains(got.ReasonCodes, "policy.high_intelligence_profile") {
+			t.Fatalf("high-intelligence route for %q = %#v", message, got)
+		}
+	}
+	shortEdit := withHighIntelligenceProfileCorrections(base, Target{Envelope: types.SlackEnvelope{Text: "Add a short section to the architecture reference."}}, profiles)
+	if shortEdit.AgentModelProfile != "chatgpt-luna-medium" || shortEdit.AgentModelStrength != "standard" {
+		t.Fatalf("small document edit was unnecessarily escalated: %#v", shortEdit)
+	}
+}
+
+func TestAdvertisedProfilesPreferDeploymentDefaultForEachStrength(t *testing.T) {
+	profiles := advertisedProfiles(modelrouter.Snapshot{DeploymentDefault: "chatgpt-sol-medium", Profiles: []types.ModelProfile{
+		{ID: "chatgpt-luna-low", ProviderID: "openai", ModelID: "gpt-5.6-luna", Variant: "low", ProviderOptions: map[string]any{"strength": "light"}, Enabled: true},
+		{ID: "chatgpt-luna-medium", ProviderID: "openai", ModelID: "gpt-5.6-luna", Variant: "medium", ProviderOptions: map[string]any{"strength": "standard"}, Enabled: true},
+		{ID: "chatgpt-luna-max", ProviderID: "openai", ModelID: "gpt-5.6-luna", Variant: "max", ProviderOptions: map[string]any{"strength": "strong"}, Enabled: true},
+		{ID: "chatgpt-sol-medium", ProviderID: "openai", ModelID: "gpt-5.6-sol", Variant: "medium", ProviderOptions: map[string]any{"strength": "strong"}, Enabled: true},
+	}})
+	if len(profiles) != 3 || profiles[2].ID != "chatgpt-sol-medium" || profiles[2].Model != "gpt-5.6-sol" || profiles[2].ReasoningEffort != "medium" {
+		t.Fatalf("advertised profiles did not canonicalize strong route: %#v", profiles)
 	}
 }
 
@@ -331,7 +390,7 @@ func TestConversationalAddressWeatherClarificationStaysInClassifier(t *testing.T
 }
 
 func TestConversationalReferenceUsesImmediatelyPrecedingTagTurn(t *testing.T) {
-	profiles := []advertisedAgentProfile{{ID: "light", Strength: "light", ReasoningEffort: "low"}, {ID: "standard", Strength: "standard", ReasoningEffort: "medium"}, {ID: "strong", Strength: "strong", ReasoningEffort: "max"}}
+	profiles := []advertisedAgentProfile{{ID: "light", Strength: "light", ReasoningEffort: "low"}, {ID: "standard", Strength: "standard", ReasoningEffort: "medium"}, {ID: "strong", Strength: "strong", ReasoningEffort: "medium"}}
 	now := time.Date(2026, 8, 2, 18, 0, 0, 0, time.UTC)
 	target := Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{ChannelID: "tos-tag", MessageTS: "3.0", UserID: "U_ALEX", Text: "are we using it?", EventTime: now}}
 	pack := types.ContextPackRevision{Sources: []types.ContextSource{
@@ -370,7 +429,7 @@ func TestAmbientPolicyCorrectionSurfacesDestinationSafeAlignmentConflictFromSile
 }
 
 func TestClarificationFollowupComposesUnresolvedRequest(t *testing.T) {
-	profiles := []advertisedAgentProfile{{ID: "light", Strength: "light", ReasoningEffort: "low"}, {ID: "standard", Strength: "standard", ReasoningEffort: "medium"}, {ID: "strong", Strength: "strong", ReasoningEffort: "max"}}
+	profiles := []advertisedAgentProfile{{ID: "light", Strength: "light", ReasoningEffort: "low"}, {ID: "standard", Strength: "standard", ReasoningEffort: "medium"}, {ID: "strong", Strength: "strong", ReasoningEffort: "medium"}}
 	now := time.Date(2026, 8, 2, 18, 1, 0, 0, time.UTC)
 	target := Target{Mode: types.ModeAssist, ActiveThread: true, Envelope: types.SlackEnvelope{ChannelID: "tos-tag", MessageTS: "3.0", ThreadTS: "1.0", UserID: "U_ALEX", Text: "latest go release", EventTime: now}}
 	pack := types.ContextPackRevision{Sources: []types.ContextSource{
@@ -410,7 +469,7 @@ func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) 
 
 func testProfileRegistry(t *testing.T) *modelrouter.Registry {
 	t.Helper()
-	router, err := modelrouter.NewRegistry([]types.ModelProfile{{ID: "chatgpt-luna-max", ProviderID: "openai", ModelID: "gpt-5.6-luna", Variant: "max", ProviderOptions: map[string]any{"strength": "strong"}, RequiredCapabilities: []string{"structured"}, AllowedDataClasses: []string{"internal"}, MaxInputTokens: 200000, MaxOutputTokens: 16000, Enabled: true}}, nil, nil, "chatgpt-luna-max", "test/v1")
+	router, err := modelrouter.NewRegistry([]types.ModelProfile{{ID: "chatgpt-sol-medium", ProviderID: "openai", ModelID: "gpt-5.6-sol", Variant: "medium", ProviderOptions: map[string]any{"strength": "strong"}, RequiredCapabilities: []string{"structured"}, AllowedDataClasses: []string{"internal"}, MaxInputTokens: 200000, MaxOutputTokens: 16000, Enabled: true}}, nil, nil, "chatgpt-sol-medium", "test/v1")
 	if err != nil {
 		t.Fatal(err)
 	}

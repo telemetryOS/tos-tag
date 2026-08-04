@@ -58,13 +58,15 @@ validation back to `product-knowledge`. `code-change-intake` routes
 source-mutation intent to a Linear bug or feature instead of granting a worker
 source-write authority.
 Executable access is limited to `tos_tag_tool` operations in the reviewed tool
-catalog; Aion source is not mounted and can be inspected only through bounded
+catalog plus the typed `tos_tag_wiki` page-CRUD facade; Aion source is not mounted and can be inspected only through bounded
 `telemetryos.code` reads. Linear, Wiki, and OTel workflows are likewise
 described by base skills and executed only through their reviewed tools. Public
 product content is available only through the
 fixed-host `telemetryos.product-docs` read tool, while arbitrary public research
 uses Codex's first-party live web search with untrusted-content handling and no
-credential or subprocess-network access. `tos_tag_trigger` separately manages
+credential or subprocess-network access. Go validates Wiki fields and builds
+the only admitted CLI argv; models cannot submit Wiki argv directly.
+`tos_tag_trigger` separately manages
 classifier-gated channel heartbeat subscriptions with explicit cron and IANA-timezone trigger
 authority. Ordinary `assist` traffic cannot launch full-agent work from an
 unaddressed declarative status update; only `proactive` or a deterministic
@@ -88,7 +90,7 @@ Slack delivery is graduated rather than character-gated. Short and medium
 answers use typed Block Kit directly, including non-interactive Cards and
 Carousels for compact entities/options and sortable/paginated Data Tables for
 captioned datasets. Document-shaped long-form synthesis uses
-the strong/max worker to publish Markdown under Agent Wiki `artifacts`, then
+the strong Sol-medium worker to publish Markdown under Agent Wiki `artifacts`, then
 returns a synopsis and the exact successful write URL as a typed artifact.
 About 20,000 visible characters is the soft planning signal; failed writes
 produce a compact Slack fallback and never a fabricated link. The pipeline

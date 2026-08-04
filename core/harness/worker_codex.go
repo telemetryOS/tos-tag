@@ -545,11 +545,18 @@ func (w *WorkerCodex) serverRequest(ctx context.Context, session *codexWorkerSes
 		}
 		invocation, bridgeArguments, err := session.prepareToolInvocation(request.CallID, request.Tool, request.Arguments)
 		if err != nil {
+			var validationErr *wikiValidationError
+			if errors.As(err, &validationErr) {
+				operationID, _ := wikiReviewedOperation(validationErr.Operation)
+				data := map[string]any{"call_id": request.CallID, "tool_id": wikiToolID, "operation_id": operationID, "resource_action": validationErr.Operation, "validation_code": validationErr.Code}
+				session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "tool.validation.failed", Data: data, CreatedAt: time.Now().UTC()})
+				session.publishToolValidation(method, validationErr.Code, operationID, validationErr.Operation)
+			}
 			return nil, err
 		}
 		endpoint := ""
 		switch request.Tool {
-		case "tos_tag_tool":
+		case "tos_tag_tool", wikiDynamicTool:
 			endpoint = session.access.Endpoint
 		case "tos_tag_trigger":
 			endpoint = session.access.TriggerEndpoint
@@ -561,21 +568,23 @@ func (w *WorkerCodex) serverRequest(ctx context.Context, session *codexWorkerSes
 		}
 		session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "tool.execution.started", Data: invocation.EventData(), CreatedAt: time.Now().UTC()})
 		output, success := w.callBridge(ctx, session.access.Capability, endpoint, bridgeArguments)
-		status := "failed"
-		if success {
-			status = "completed"
-		}
-		session.publishToolResult(method, status, request.Tool, request.Arguments)
+		validationCode := validationCodeFromBridgeOutput(output)
+		status := reviewedToolActivityStatus(success, validationCode)
+		session.publishToolResult(method, status, request.Tool, invocation)
 		resultType := "tool.execution.failed"
 		if success {
 			resultType = "tool.execution.completed"
 		}
-		session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: resultType, Data: invocation.EventData(), CreatedAt: time.Now().UTC()})
+		resultData := invocation.EventData()
+		if validationCode != "" {
+			resultData["validation_code"] = validationCode
+		}
+		session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: resultType, Data: resultData, CreatedAt: time.Now().UTC()})
 		if success {
-			if artifactURL := producedWikiArtifactURL(request.Tool, request.Arguments, output); artifactURL != "" {
+			if artifactURL := producedWikiArtifactURL("tos_tag_tool", bridgeArguments, output); artifactURL != "" {
 				session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "artifact.produced", Data: map[string]any{"url": artifactURL}, CreatedAt: time.Now().UTC()})
 			}
-			if referenceFingerprint, referenceURL := resolvedWikiReference(request.Tool, request.Arguments, output); referenceFingerprint != "" {
+			if referenceFingerprint, referenceURL := resolvedWikiReference("tos_tag_tool", bridgeArguments, output); referenceFingerprint != "" {
 				session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "wiki.reference.resolved", Data: map[string]any{"reference_sha256": referenceFingerprint, "url": referenceURL}, CreatedAt: time.Now().UTC()})
 			}
 		}
@@ -608,7 +617,7 @@ func (s *codexWorkerSession) publish(method, direction, status, title string) {
 	s.activity.Publish(activity.Record{OrganizationID: s.organizationID, Category: "codex", Kind: "codex.rpc", Level: codexActivityLevel(status), Title: title, Summary: direction + " · " + method + " · " + status, Details: details, OccurredAt: time.Now().UTC()})
 }
 
-func (s *codexWorkerSession) publishToolResult(method, status, dynamicTool string, arguments json.RawMessage) {
+func (s *codexWorkerSession) publishToolResult(method, status, dynamicTool string, invocation declaredToolInvocation) {
 	if s.activity == nil {
 		return
 	}
@@ -619,25 +628,54 @@ func (s *codexWorkerSession) publishToolResult(method, status, dynamicTool strin
 	if sessionID != "" {
 		details["session_id"] = sessionID
 	}
-	if toolID, operationID, resourceAction := completedToolOperation(dynamicTool, arguments); toolID != "" {
-		details["tool_id"] = toolID
-		details["operation_id"] = operationID
-		if resourceAction != "" {
-			details["resource_action"] = resourceAction
+	if invocation.ToolID != "" {
+		details["tool_id"] = invocation.ToolID
+		details["operation_id"] = invocation.OperationID
+		if invocation.ResourceAction != "" {
+			details["resource_action"] = invocation.ResourceAction
 		}
 	}
 	title := "Reviewed tool call completed"
 	if status == "failed" {
 		title = "Reviewed tool call failed"
+	} else if status == "interrupted_retrying" {
+		title = "Interrupted — retrying"
 	}
 	s.activity.Publish(activity.Record{OrganizationID: s.organizationID, Category: "codex", Kind: "codex.tool", Level: codexActivityLevel(status), Title: title, Summary: "outbound · " + method + " · " + status, Details: details, OccurredAt: time.Now().UTC()})
+}
+
+func (s *codexWorkerSession) publishToolValidation(method, code, operationID, resourceAction string) {
+	if s.activity == nil {
+		return
+	}
+	details := map[string]any{
+		"job_id": s.jobID, "attempt_id": s.attemptID, "method": method,
+		"direction": "outbound", "status": "interrupted_retrying", "dynamic_tool": wikiDynamicTool,
+		"tool_id": wikiToolID, "operation_id": operationID, "validation_code": code,
+	}
+	if resourceAction != "" {
+		details["resource_action"] = resourceAction
+	}
+	s.activity.Publish(activity.Record{OrganizationID: s.organizationID, Category: "codex", Kind: "codex.tool", Level: "warning", Title: "Interrupted — retrying", Summary: "outbound · " + method + " · interrupted_retrying", Details: details, OccurredAt: time.Now().UTC()})
 }
 
 func codexActivityLevel(status string) string {
 	if status == "failed" {
 		return "error"
+	} else if status == "interrupted_retrying" {
+		return "warning"
 	}
 	return "info"
+}
+
+func reviewedToolActivityStatus(success bool, validationCode string) string {
+	if success {
+		return "completed"
+	}
+	if safeValidationCode(validationCode) {
+		return "interrupted_retrying"
+	}
+	return "failed"
 }
 
 func (w *WorkerCodex) callBridge(ctx context.Context, capability, endpoint string, arguments json.RawMessage) (string, bool) {
@@ -728,6 +766,21 @@ func (s *codexWorkerSession) prepareToolInvocation(callID, tool string, argument
 	switch tool {
 	case "tos_tag_tool":
 		invocation.ToolID, invocation.OperationID, invocation.ResourceAction = completedToolOperation(tool, arguments)
+		if invocation.ToolID == wikiToolID {
+			return declaredToolInvocation{}, nil, &wikiValidationError{Code: "wiki.typed_interface_required", Operation: invocation.ResourceAction}
+		}
+	case wikiDynamicTool:
+		request, err := decodeWikiToolRequest(arguments)
+		if err != nil {
+			return declaredToolInvocation{}, nil, err
+		}
+		typedInvocation, forwarded, err := buildWikiBridgeRequest(request)
+		if err != nil {
+			return declaredToolInvocation{}, nil, err
+		}
+		typedInvocation.CallID = callID
+		typedInvocation.SkillNames = validatedSkills
+		return typedInvocation, forwarded, nil
 	case "tos_tag_trigger":
 		invocation.ToolID, invocation.OperationID = "tos-tag-triggers", declaration.Operation
 	default:
@@ -746,6 +799,28 @@ func (s *codexWorkerSession) prepareToolInvocation(callID, tool string, argument
 		return declaredToolInvocation{}, nil, errors.New("dynamic tool arguments could not be forwarded")
 	}
 	return invocation, bridgeArguments, nil
+}
+
+func validationCodeFromBridgeOutput(output string) string {
+	var response struct {
+		ValidationCode string `json:"validation_code"`
+	}
+	if json.Unmarshal([]byte(output), &response) != nil || !safeValidationCode(response.ValidationCode) {
+		return ""
+	}
+	return response.ValidationCode
+}
+
+func safeValidationCode(value string) bool {
+	if value == "" || len(value) > 96 {
+		return false
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '.' && char != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func nativeSkillNames(item map[string]any) []string {
@@ -917,9 +992,23 @@ func codexDynamicTools(skills []marketplace.SkillSnapshot) []map[string]any {
 	return []map[string]any{
 		{
 			"type": "function", "name": "tos_tag_tool",
-			"description": "Run one reviewed tos-tag marketplace operation through the current job capability. Declare every injected skill actively being followed in skill_names so Slack can show safe live progress. Calls must be sequential, narrowly scoped, and complete within the callback deadline; never fan out parallel source searches. For a Go version/adoption question, call telemetryos.code read once with arguments [\"versions\",\"<repo>\",\"go\"] before any broader source lookup. Write, destructive, and admin operations require an independently approved approval_id.",
+			"description": "Run one reviewed non-Wiki tos-tag marketplace operation through the current job capability. Agent Wiki calls must use tos_tag_wiki; telemetryos.wiki is rejected here. Declare every injected skill actively being followed in skill_names so Slack can show safe live progress. Calls must be sequential, narrowly scoped, and complete within the callback deadline; never fan out parallel source searches. For a Go version/adoption question, call telemetryos.code read once with arguments [\"versions\",\"<repo>\",\"go\"] before any broader source lookup. Write, destructive, and admin operations require an independently approved approval_id.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"skill_names", "tool_id", "operation_id", "arguments"}, "properties": map[string]any{
 				"skill_names": skillNamesSchema, "tool_id": map[string]any{"type": "string"}, "operation_id": map[string]any{"type": "string", "enum": []string{"read", "write", "delete"}}, "arguments": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"},
+			}},
+		},
+		{
+			"type": "function", "name": wikiDynamicTool,
+			"description": "Read or mutate one Agent Wiki page through a typed, page-only reviewed interface. Declare every injected skill actively being followed in skill_names. Supply semantic fields; Go validates them and constructs the only permitted Wiki CLI argv. Namespace administration, assets, moves, generic undo, and arbitrary CLI arguments are unavailable. rm requires an independently approved approval_id.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"skill_names", "operation"}, "properties": map[string]any{
+				"skill_names":    skillNamesSchema,
+				"operation":      map[string]any{"type": "string", "enum": []string{"map", "ls", "tree", "get", "search", "revs", "url", "put", "append", "restore", "revert", "rm"}},
+				"page_reference": map[string]any{"type": "string"}, "namespace": map[string]any{"type": "string"}, "query": map[string]any{"type": "string"},
+				"title": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"}, "tags": map[string]any{"type": "array", "maxItems": 64, "items": map[string]any{"type": "string"}},
+				"note": map[string]any{"type": "string"}, "prefix": map[string]any{"type": "string"}, "tag": map[string]any{"type": "string"},
+				"format": map[string]any{"type": "string", "enum": []string{"markdown", "html"}}, "revision": map[string]any{"type": "integer", "minimum": 1},
+				"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200}, "depth": map[string]any{"type": "integer", "minimum": 1, "maximum": 20},
+				"allow_empty": map[string]any{"type": "boolean"}, "approval_id": map[string]any{"type": "string"},
 			}},
 		},
 		{

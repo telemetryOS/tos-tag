@@ -257,9 +257,9 @@ func (s *ContextSyncer) CatchUp(parent context.Context, run *ContextSyncRun, rec
 	s.options.Logger.WithCtx(blackbox.Ctx{
 		"organization_id":    s.options.OrganizationID,
 		"channels_caught_up": stats.ChannelsCaughtUp,
-		"messages_recovered": stats.MessagesRecovered,
+		"messages_examined":  stats.MessagesRecovered,
 		"duration_ms":        stats.CompletedAt.Sub(stats.StartedAt).Milliseconds(),
-	}).Info("Slack direct-message catch-up completed")
+	}).Info("Slack joined-channel missed-event catch-up completed")
 	return stats, nil
 }
 

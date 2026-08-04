@@ -17,6 +17,11 @@ const (
 	SlackEventDelete  SlackEventKind = "message_delete"
 )
 
+const (
+	SlackMessageSubtypeBotMessage         = "bot_message"
+	SlackMessageSubtypeAssistantAppThread = "assistant_app_thread"
+)
+
 // SlackChannelKindGroupDM identifies multi-party direct messages (Slack
 // channel_type "mpim"). tos-tag ignores these conversations entirely: they are
 // excluded from discovery, live persistence, and channel coverage.
@@ -49,6 +54,26 @@ func (e SlackEnvelope) RootThreadTS() string {
 		return e.ThreadTS
 	}
 	return e.MessageTS
+}
+
+// IntegrationAuthored reports whether Slack identified the message as coming
+// from an app, bot, workflow, or assistant rather than a human. These messages
+// are useful as untrusted conversational context, but must never trigger Tag:
+// suppressing them before classification prevents agent-to-agent reply loops.
+func (e SlackEnvelope) IntegrationAuthored() bool {
+	return IsSlackIntegrationMessage(e.BotID, e.Subtype)
+}
+
+func IsSlackIntegrationMessage(botID, subtype string) bool {
+	if botID != "" {
+		return true
+	}
+	switch subtype {
+	case SlackMessageSubtypeBotMessage, SlackMessageSubtypeAssistantAppThread:
+		return true
+	default:
+		return false
+	}
 }
 
 type SlackAck struct {

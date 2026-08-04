@@ -2,21 +2,26 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/RobertWHurst/blackbox"
 
 	"github.com/telemetryos/tos-tag/core/activity"
+	"github.com/telemetryos/tos-tag/core/admission"
 	"github.com/telemetryos/tos-tag/core/approvals"
+	"github.com/telemetryos/tos-tag/core/audit"
 	"github.com/telemetryos/tos-tag/core/classifier"
 	"github.com/telemetryos/tos-tag/core/config"
 	"github.com/telemetryos/tos-tag/core/contextpacks"
 	"github.com/telemetryos/tos-tag/core/deliveries"
+	"github.com/telemetryos/tos-tag/core/flood"
 	"github.com/telemetryos/tos-tag/core/harness"
 	"github.com/telemetryos/tos-tag/core/jobs"
 	agentmemory "github.com/telemetryos/tos-tag/core/memory"
@@ -162,6 +167,29 @@ func (*transparentProgressHarness) Permission(context.Context, string, harness.P
 }
 func (*transparentProgressHarness) Abort(context.Context, string) error { return nil }
 
+type wikiValidationRetryHarness struct{}
+
+func (*wikiValidationRetryHarness) Health(context.Context) error { return nil }
+func (*wikiValidationRetryHarness) CreateSession(context.Context, string) (harness.Session, error) {
+	return harness.Session{ID: "wiki-validation-retry-session", CreatedAt: time.Now().UTC()}, nil
+}
+func (*wikiValidationRetryHarness) Prompt(context.Context, string, harness.Prompt) error { return nil }
+func (*wikiValidationRetryHarness) Events(context.Context, string) (<-chan harness.Event, <-chan error) {
+	events := make(chan harness.Event, 5)
+	errs := make(chan error)
+	events <- harness.Event{ID: "event-validation", Type: "tool.validation.failed", Data: map[string]any{"call_id": "call-1", "tool_id": "telemetryos.wiki", "operation_id": "write", "resource_action": "put", "validation_code": "wiki.body.required"}}
+	events <- harness.Event{Type: "tool.execution.started", Data: map[string]any{"call_id": "call-2", "tool_id": "telemetryos.wiki", "operation_id": "write", "resource_action": "put"}}
+	events <- harness.Event{Type: "tool.execution.completed", Data: map[string]any{"call_id": "call-2", "tool_id": "telemetryos.wiki", "operation_id": "write", "resource_action": "put"}}
+	events <- harness.Event{Type: "message.delta", Data: map[string]any{"text": `{"segments":[{"kind":"mrkdwn_text","text":"done"}]}`}}
+	close(events)
+	close(errs)
+	return events, errs
+}
+func (*wikiValidationRetryHarness) Permission(context.Context, string, harness.PermissionDecision) error {
+	return nil
+}
+func (*wikiValidationRetryHarness) Abort(context.Context, string) error { return nil }
+
 type contextFailureHarness struct{}
 
 func (*contextFailureHarness) Health(context.Context) error { return nil }
@@ -239,19 +267,24 @@ func newTestSystem(t *testing.T) testSystem {
 	deliveryQueue := deliveries.NewMemoryQueue(nil)
 	decisionStore := classifier.NewMemoryDecisionStore()
 	activityFeed := activity.New(50)
+	floodGate, err := flood.NewMemory(cfg.Classifier.FloodMaxMessages, cfg.Classifier.FloodWindow, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	pipe, err := New(Dependencies{
-		Config:       &cfg,
-		Activity:     activityFeed,
-		Ingress:      ingress,
-		Transport:    transport,
-		Observations: observer.NewMemoryStore(cfg.Retention.Messages, nil),
-		Sessions:     sessions.NewMemoryStore(nil),
-		Jobs:         jobQueue,
-		Decisions:    decisionStore,
-		Deliveries:   deliveryQueue,
-		ContextPacks: builder,
-		Classifier:   classificationService,
-		Renderer:     deliveries.NewRenderer(),
+		Config:          &cfg,
+		Activity:        activityFeed,
+		Ingress:         ingress,
+		Transport:       transport,
+		Observations:    observer.NewMemoryStore(cfg.Retention.Messages, nil),
+		Sessions:        sessions.NewMemoryStore(nil),
+		Jobs:            jobQueue,
+		Decisions:       decisionStore,
+		Deliveries:      deliveryQueue,
+		ContextPacks:    builder,
+		Classifier:      classificationService,
+		FloodProtection: floodGate,
+		Renderer:        deliveries.NewRenderer(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -340,6 +373,143 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 	}
 	if got := len(system.transport.ProgressStarts()); got != 1 {
 		t.Fatalf("duplicate caused %d progress streams", got)
+	}
+}
+
+func TestClassifierFloodProtectionDropsBeforeProviderOrAgent(t *testing.T) {
+	system := newTestSystem(t)
+	gate, err := flood.NewMemory(1, time.Hour, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	system.pipeline.deps.FloodProtection = gate
+	var providerCalls atomic.Int64
+	service, err := classifier.New(classifierFunc(func(context.Context, classifier.Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		providerCalls.Add(1)
+		return types.ClassificationDecision{
+			Outcome: types.OutcomeSilent, Confidence: 1,
+			ReasonCodes: []string{"test.silent"}, DisclosureClass: types.DisclosureDestinationSafe,
+		}, nil
+	}), false, .9, .98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	system.pipeline.deps.Classifier = service
+
+	for index, text := range []string{"What changed?", "Can you check again?"} {
+		message := envelope(fmt.Sprintf("flood-%d", index), "tos-tag", fmt.Sprintf("200.%03d", index), text)
+		if _, injectErr := system.ingress.Inject(context.Background(), message); injectErr != nil {
+			t.Fatal(injectErr)
+		}
+	}
+	waitFor(t, func() bool {
+		decisions, listErr := system.decisions.List(context.Background())
+		return listErr == nil && len(decisions) == 2
+	})
+	if got := providerCalls.Load(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+	decisions, err := system.decisions.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decisions[1].Result.Effective.Outcome != types.OutcomeSilent || decisions[1].Result.Effective.ReasonCodes[0] != "safety.classifier_flood_limit" {
+		t.Fatalf("flood decision = %#v", decisions[1])
+	}
+	if decisions[1].ContextPackRevisionID != "" {
+		t.Fatalf("flooded message unexpectedly built context pack %q", decisions[1].ContextPackRevisionID)
+	}
+	if listed, listErr := system.jobs.List(context.Background()); listErr != nil || len(listed) != 0 {
+		t.Fatalf("flooded messages created jobs: %#v err=%v", listed, listErr)
+	}
+	if len(system.transport.Requests()) != 0 || len(system.transport.ReactionRequests()) != 0 {
+		t.Fatalf("flooded messages produced Slack output: requests=%#v reactions=%#v", system.transport.Requests(), system.transport.ReactionRequests())
+	}
+}
+
+func TestExplicitInvocationAndActiveThreadBypassOnlyAdmissionCooldown(t *testing.T) {
+	now := time.Now().UTC()
+	clock := now
+	base := orgconfig.ChannelPolicy{
+		OrganizationID: "org-test", TeamID: "team-test", ChannelID: "development",
+		Enrolled: true, ParticipationMode: types.ModeAssist, Cooldown: time.Minute,
+		MaxResponsesPerHour: 10, MaxConcurrentJobs: 2,
+		MembershipRevision: "member/v1", MembershipRefreshedAt: now,
+	}
+
+	ambient := admissionPolicyForTarget(base, classifier.Target{})
+	if ambient.Cooldown != time.Minute {
+		t.Fatalf("ambient cooldown = %s, want 1m", ambient.Cooldown)
+	}
+	controller := admission.NewMemory(func() time.Time { return clock })
+	firstID, err := controller.Admit(context.Background(), ambient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.Complete(context.Background(), firstID)
+	if _, err := controller.Admit(context.Background(), ambient); !errors.Is(err, admission.ErrCooldown) {
+		t.Fatalf("ambient retry error = %v, want cooldown", err)
+	}
+	for name, target := range map[string]classifier.Target{
+		"direct mention": {Envelope: types.SlackEnvelope{IsMention: true}},
+		"active thread":  {ActiveThread: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			policy := admissionPolicyForTarget(base, target)
+			if policy.Cooldown != 0 {
+				t.Fatalf("cooldown = %s, want zero", policy.Cooldown)
+			}
+			if policy.MaxResponsesPerHour != base.MaxResponsesPerHour || policy.MaxConcurrentJobs != base.MaxConcurrentJobs {
+				t.Fatalf("safety bounds changed: %#v", policy)
+			}
+			id, err := controller.Admit(context.Background(), policy)
+			if err != nil {
+				t.Fatalf("explicit invocation was cooldown-blocked: %v", err)
+			}
+			controller.Complete(context.Background(), id)
+		})
+	}
+	if base.Cooldown != time.Minute {
+		t.Fatalf("source policy was mutated: %#v", base)
+	}
+}
+
+func TestProactiveBackgroundWorkImmediatelyAcknowledgesSourceMessage(t *testing.T) {
+	system := newTestSystem(t)
+	classificationService, err := classifier.New(classifierFunc(func(context.Context, classifier.Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		return types.ClassificationDecision{
+			Outcome:              types.OutcomeStartBackgroundJob,
+			Confidence:           .99,
+			ReasonCodes:          []string{"test.proactive_incident"},
+			ResponseIntent:       "investigate the reported failure",
+			DisclosureClass:      types.DisclosureDestinationSafe,
+			RequiresFullAgent:    true,
+			Reaction:             "rotating_light",
+			AgentModelStrength:   "standard",
+			AgentReasoningEffort: "medium",
+		}, nil
+	}), false, config.DefaultConfiguration.Classifier.AssistThreshold, config.DefaultConfiguration.Classifier.ChannelReplyThreshold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	system.pipeline.deps.Classifier = classificationService
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
+	_, _ = scopes.PutChannel(context.Background(), orgconfig.ChannelPolicy{
+		OrganizationID: "org-test", TeamID: "team-test", ChannelID: "tos-tag", Enrolled: true,
+		ParticipationMode: types.ModeProactive, MaxResponsesPerHour: 10, MaxConcurrentJobs: 1,
+		MembershipRevision: "m1", MembershipRefreshedAt: time.Now().UTC(),
+	})
+	system.pipeline.deps.Scopes = scopes
+
+	message := envelope("proactive-incident-1", "tos-tag", "101.001", "The lobby display has failed three times and needs attention.")
+	if _, err := system.ingress.Inject(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return len(system.transport.ProgressStarts()) == 1 })
+	if reactions := system.transport.ReactionRequests(); len(reactions) != 1 || reactions[0].Emoji != "rotating_light" || reactions[0].ChannelID != message.ChannelID || reactions[0].MessageTS != message.MessageTS {
+		t.Fatalf("proactive background work did not immediately acknowledge its source message: %#v", reactions)
 	}
 }
 
@@ -447,6 +617,41 @@ func TestFullAgentHarnessShowsSkillAndEveryToolLifecycle(t *testing.T) {
 	}
 	if result.AgentFooter == nil || len(result.AgentFooter.Activities) != 1 || result.AgentFooter.Activities[0] != "wiki" {
 		t.Fatalf("footer activities = %#v", result.AgentFooter)
+	}
+}
+
+func TestFullAgentHarnessCollapsesSelfCorrectedWikiValidationAttempt(t *testing.T) {
+	cfg := config.DefaultConfiguration
+	cfg.Jobs.Lease = time.Minute
+	transport := slack.NewStubDelivery()
+	auditLog, err := audit.NewMemoryAppender([]byte("01234567890123456789012345678901"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Harness: &wikiValidationRetryHarness{}, Transport: transport, Audit: auditLog}}
+	_, err = p.runHarness(context.Background(), jobs.Job{
+		ID: "job-wiki-validation", OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "tos-tag", ProgressMessageTS: "progress.1",
+		Input: `{"request":"publish"}`, ResolvedModel: types.ResolvedModel{ProviderID: "openai", ModelID: "gpt-5.6-luna", Variant: "medium"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates := transport.ProgressUpdates()
+	if len(updates) != 3 || updates[0].Step.Title != "Updating Agent Wiki" || updates[1].Step.Title != "Updated Agent Wiki" || updates[2].Step.Title != "Completed agent work" {
+		t.Fatalf("collapsed progress updates = %#v", updates)
+	}
+	for _, update := range updates {
+		if update.Step.Title == "Agent Wiki update failed" || update.Step.Title == "Retrying agent work" {
+			t.Fatalf("self-corrected validation leaked as a separate failure: %#v", updates)
+		}
+	}
+	receipts := auditLog.List("org-test")
+	if len(receipts) != 1 || receipts[0].Type != "tool.validation.failed" || receipts[0].Metadata["validation_code"] != "wiki.body.required" {
+		t.Fatalf("validation receipts = %#v", receipts)
+	}
+	encoded, _ := json.Marshal(receipts[0])
+	if strings.Contains(string(encoded), "publish") || strings.Contains(string(encoded), "artifacts/") {
+		t.Fatalf("validation receipt leaked request content: %s", encoded)
 	}
 }
 
@@ -933,6 +1138,39 @@ func TestContextSyncAutomaticallyAssistsOnlyBotJoinedChannels(t *testing.T) {
 	}
 }
 
+func TestContextSyncPreservesOperatorManagedProactiveMode(t *testing.T) {
+	cfg := contextSyncConfig()
+	cfg.Slack.AutoAssistJoinedChannels = true
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test", EnrollmentMode: "all_observable_channels"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
+	now := time.Now().UTC()
+	_, err := scopes.PutChannel(context.Background(), orgconfig.ChannelPolicy{
+		OrganizationID: "org-test", TeamID: "team-test", ChannelID: "tos-tag", Name: "tos-tag",
+		Enrolled: true, ParticipationMode: types.ModeProactive, MaxResponsesPerHour: 120, MaxConcurrentJobs: 8,
+		BotIsMember: true, BotMembershipKnown: true, ParticipationManagedByMembership: false,
+		MembershipRevision: "operator/v1", MembershipRefreshedAt: now.Add(-7 * time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Scopes: scopes}}
+	joined := types.SlackContextChannel{
+		OrganizationID: "org-test", TeamID: "team-test", ChannelID: "tos-tag", Name: "tos-tag",
+		RestrictionKnown: true, IsChannel: true, BotMembershipKnown: true, BotIsMember: true,
+	}
+	if authorized, err := p.RegisterContextChannel(context.Background(), joined); err != nil || !authorized {
+		t.Fatalf("register proactive channel authorized=%v err=%v", authorized, err)
+	}
+	policy, err := scopes.Resolve(context.Background(), "org-test", "team-test", "tos-tag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.ParticipationMode != types.ModeProactive || policy.ParticipationManagedByMembership {
+		t.Fatalf("operator proactive policy was overwritten: %#v", policy)
+	}
+}
+
 func TestUnknownAppMentionPrivacyIsDeferredBeforePersistence(t *testing.T) {
 	cfg := contextSyncConfig()
 	scopes := orgconfig.NewMemory()
@@ -958,7 +1196,7 @@ func TestUnknownAppMentionPrivacyIsDeferredBeforePersistence(t *testing.T) {
 	}
 }
 
-func TestSelfAuthoredSlackOutputBecomesResolvedContextWithoutDecision(t *testing.T) {
+func TestAgentAuthoredSlackOutputBecomesResolvedContextWithoutDecision(t *testing.T) {
 	cfg := contextSyncConfig()
 	cfg.Slack.BotUserID = "U-tag"
 	scopes := orgconfig.NewMemory()
@@ -997,12 +1235,59 @@ func TestSelfAuthoredSlackOutputBecomesResolvedContextWithoutDecision(t *testing
 	otherBot.UserID = "U-other-bot"
 	otherBot.BotID = "B-other"
 	accepted, err = p.HandleEnvelope(context.Background(), otherBot)
-	if err != nil || accepted.Ignored {
-		t.Fatalf("other integration was discarded: %#v err=%v", accepted, err)
+	if err != nil || !accepted.Ignored || !accepted.ResolvedContext {
+		t.Fatalf("other integration entered decision work: %#v err=%v", accepted, err)
 	}
-	pending, err := observations.ClaimPending(context.Background(), "worker", time.Minute)
-	if err != nil || pending.MessageTS != "392.002" {
-		t.Fatalf("other integration did not retain normal decision behavior: %#v err=%v", pending, err)
+	current, err = observations.CurrentMessage(context.Background(), "org-test", "team-test", "tos-tag", "392.002")
+	if err != nil || current.Text != "External integration update" || current.BotID != "B-other" {
+		t.Fatalf("other integration was not retained as context: %#v err=%v", current, err)
+	}
+
+	assistant := envelope("message/team-test/tos-tag/392.003", "tos-tag", "392.003", "Assistant app update")
+	assistant.UserID = "U-assistant"
+	assistant.Subtype = types.SlackMessageSubtypeAssistantAppThread
+	accepted, err = p.HandleEnvelope(context.Background(), assistant)
+	if err != nil || !accepted.Ignored || !accepted.ResolvedContext {
+		t.Fatalf("assistant app message entered decision work: %#v err=%v", accepted, err)
+	}
+	current, err = observations.CurrentMessage(context.Background(), "org-test", "team-test", "tos-tag", "392.003")
+	if err != nil || current.Subtype != types.SlackMessageSubtypeAssistantAppThread {
+		t.Fatalf("assistant app message was not retained with provenance: %#v err=%v", current, err)
+	}
+	if _, err := observations.ClaimPending(context.Background(), "worker", time.Minute); !errors.Is(err, observer.ErrNoPendingObservation) {
+		t.Fatalf("agent-authored output entered decision queue: %v", err)
+	}
+}
+
+func TestRecoveredAgentMentionRemainsContextOnly(t *testing.T) {
+	cfg := contextSyncConfig()
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test", EnrollmentMode: "all_observable_channels"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
+	_, err := scopes.PutChannel(context.Background(), orgconfig.ChannelPolicy{
+		OrganizationID: "org-test", TeamID: "team-test", ChannelID: "tos-tag", Enrolled: true,
+		ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 6, MaxConcurrentJobs: 2,
+		MembershipRevision: "member/v1", MembershipRefreshedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Scopes: scopes, Observations: observations}}
+
+	message := envelope("history/team-test/tos-tag/392.100", "tos-tag", "392.100", "<@U-tag> please continue")
+	message.UserID = "U-claude"
+	message.BotID = "B-claude"
+	message.IsMention = true
+	if err := p.RecoverContextEnvelope(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	current, err := observations.CurrentMessage(context.Background(), "org-test", "team-test", "tos-tag", "392.100")
+	if err != nil || current.BotID != "B-claude" {
+		t.Fatalf("recovered agent message was not retained as context: %#v err=%v", current, err)
+	}
+	if _, err := observations.ClaimPending(context.Background(), "worker", time.Minute); !errors.Is(err, observer.ErrNoPendingObservation) {
+		t.Fatalf("recovered agent mention entered decision queue: %v", err)
 	}
 }
 
@@ -1403,7 +1688,11 @@ func TestHeartbeatClassifierUsesDestinationFilteredContextAndOutputPolicy(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Observations: recording, ContextPacks: builder, Scopes: scopes, Classifier: service, Decisions: classifier.NewMemoryDecisionStore()}}
+	floodGate, err := flood.NewMemory(cfg.Classifier.FloodMaxMessages, cfg.Classifier.FloodWindow, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Observations: recording, ContextPacks: builder, Scopes: scopes, Classifier: service, Decisions: classifier.NewMemoryDecisionStore(), FloodProtection: floodGate}}
 	subscription := triggers.Subscription{ID: "heartbeat", OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "tos-tag", SessionID: "session", Generation: 1, OwnerID: "owner", Kind: triggers.KindHeartbeat, Instruction: "Check if useful participation is needed.", Interval: time.Minute, NextRun: now, ClassifierGate: true, MinConfidence: .8, Enabled: true}
 	decision, err := p.EvaluateHeartbeat(context.Background(), subscription, "window")
 	if err != nil || !decision.Accepted || !checked {
@@ -1418,6 +1707,47 @@ func TestHeartbeatClassifierUsesDestinationFilteredContextAndOutputPolicy(t *tes
 	decision, err = p.EvaluateHeartbeat(context.Background(), subscription, "window-2")
 	if err != nil || decision.Accepted || checked {
 		t.Fatalf("output allowlist did not fail heartbeat silent: decision=%#v checked=%v err=%v", decision, checked, err)
+	}
+}
+
+func TestHeartbeatSharesClassifierFloodProtectionBudget(t *testing.T) {
+	system := newTestSystem(t)
+	seed := envelope("heartbeat-context", "tos-tag", "370.001", "Recent channel context")
+	if _, err := system.pipeline.deps.Observations.Import(context.Background(), seed); err != nil {
+		t.Fatal(err)
+	}
+	gate, err := flood.NewMemory(1, time.Hour, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	system.pipeline.deps.FloodProtection = gate
+	var providerCalls atomic.Int64
+	service, err := classifier.New(classifierFunc(func(context.Context, classifier.Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		providerCalls.Add(1)
+		return types.ClassificationDecision{
+			Outcome: types.OutcomeStartBackgroundJob, Confidence: .99,
+			ReasonCodes: []string{"heartbeat.actionable"}, ResponseIntent: "run heartbeat",
+			DisclosureClass: types.DisclosureDestinationSafe, RequiresFullAgent: true, Reaction: "eyes",
+		}, nil
+	}), false, .9, .98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	system.pipeline.deps.Classifier = service
+	subscription := triggers.Subscription{
+		ID: "flood-heartbeat", OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "tos-tag",
+		OwnerID: "owner", Kind: triggers.KindHeartbeat, Instruction: "Review the current window.", ClassifierGate: true, Enabled: true,
+	}
+	first, err := system.pipeline.EvaluateHeartbeat(context.Background(), subscription, "window-1")
+	if err != nil || !first.Accepted {
+		t.Fatalf("first heartbeat = %#v err=%v", first, err)
+	}
+	second, err := system.pipeline.EvaluateHeartbeat(context.Background(), subscription, "window-2")
+	if err != nil || second.Accepted || second.Decision.ReasonCodes[0] != "safety.classifier_flood_limit" {
+		t.Fatalf("second heartbeat = %#v err=%v", second, err)
+	}
+	if got := providerCalls.Load(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
 	}
 }
 

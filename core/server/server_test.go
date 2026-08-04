@@ -125,6 +125,76 @@ func TestOrganizationListSupportsHeaderSelector(t *testing.T) {
 	}
 }
 
+func TestChannelCoverageFiltersNonChannelAndIncompleteRecords(t *testing.T) {
+	srv, _ := newTestServer(t, false)
+	organizations := orgconfig.NewMemory()
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	put := func(channelID, name string, restricted bool) {
+		t.Helper()
+		_, err := organizations.PutChannel(context.Background(), orgconfig.ChannelPolicy{
+			OrganizationID: "org-a", TeamID: "team", ChannelID: channelID, Name: name,
+			Enrolled: true, Restricted: restricted, ParticipationMode: types.ModeObserve,
+			MaxResponsesPerHour: 10, MaxConcurrentJobs: 2,
+			MembershipRevision: "m1", MembershipRefreshedAt: now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("C123ABC", "development", false)
+	put("G123ABC", "management", true)
+	put("D123ABC", "U123ABC", true)
+	put("G234ABC", "mpdm-private-group", true)
+	put("C234ABC", "", false)
+	put("C-invalid", "corrupt", false)
+	srv.deps.Organizations = organizations
+
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/api/channels?organization_id=org-a", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var channels []orgconfig.ChannelPolicy
+	if err := json.Unmarshal(response.Body.Bytes(), &channels); err != nil {
+		t.Fatal(err)
+	}
+	if len(channels) != 2 || channels[0].Name != "development" || channels[1].Name != "management" {
+		t.Fatalf("filtered channels=%#v", channels)
+	}
+}
+
+func TestChannelPolicyMutationIsAuditedAndPersisted(t *testing.T) {
+	srv, _ := newTestServer(t, false)
+	organizations := orgconfig.NewMemory()
+	srv.deps.Organizations = organizations
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	policy := orgconfig.ChannelPolicy{
+		OrganizationID: "org-a", TeamID: "team", ChannelID: "channel", Name: "tos-tag",
+		Enrolled: true, ParticipationMode: types.ModeProactive, MaxResponsesPerHour: 120,
+		MaxConcurrentJobs: 8, ContextHistoryMode: types.ContextHistorySessionOnly,
+		MembershipRevision: "operator/v1", MembershipRefreshedAt: now,
+	}
+	body, err := json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPut, "/admin/api/channels", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-TOS-TAG-CSRF", srv.csrf)
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("put status=%d body=%s", response.Code, response.Body.String())
+	}
+	saved, err := organizations.Resolve(context.Background(), "org-a", "team", "channel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.ParticipationMode != types.ModeProactive || saved.ContextHistoryMode != types.ContextHistorySessionOnly {
+		t.Fatalf("saved policy=%#v", saved)
+	}
+}
+
 func TestDirectiveManagementAPICreatesActivatesAndListsAcrossChannels(t *testing.T) {
 	srv, _ := newTestServer(t, false)
 	store := channelconfig.NewStore()
@@ -335,14 +405,14 @@ func TestDedicatedManagementPages(t *testing.T) {
 			t.Fatal("learned notes page does not normalize a null collection into its empty state")
 		}
 		if page == "channels" {
-			for _, marker := range []string{`function conversationLabel`, `Unavailable Slack channel`, `Change participation mode for`} {
+			for _, marker := range []string{`function conversationLabel`, `No usable Slack channels are known yet`, `Change participation mode for`} {
 				if !strings.Contains(response.Body.String(), marker) {
 					t.Fatalf("channel page missing fallback-label marker %s", marker)
 				}
 			}
 		}
 		if page == "directives" {
-			for _, marker := range []string{`id="directiveOverview"`, `id="directiveChannel"`, `id="directivePrompt"`, `id="saveDirective"`, `id="directiveHistory"`} {
+			for _, marker := range []string{`id="directiveOverview"`, `id="newDirective"`, `id="directiveChannel"`, `id="directivePrompt"`, `id="saveDirective"`, `id="directiveHistory"`} {
 				if !strings.Contains(response.Body.String(), marker) {
 					t.Fatalf("directive management page missing %s", marker)
 				}

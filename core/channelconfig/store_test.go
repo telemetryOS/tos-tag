@@ -72,13 +72,13 @@ func TestListDirectivesWithoutChannelReturnsOrganizationHistory(t *testing.T) {
 	}
 }
 
-func TestEditorRequiresChannelApproverAndAuditsContentCommitment(t *testing.T) {
+func TestEditorAllowsAnyWorkspaceUserInAnEnrolledChannelAndAuditsContentCommitment(t *testing.T) {
 	ctx := context.Background()
 	scopes := orgconfig.NewMemory()
 	_, err := scopes.PutChannel(ctx, orgconfig.ChannelPolicy{
 		OrganizationID: "org", TeamID: "team", ChannelID: "alerts", Enrolled: true,
 		ParticipationMode: types.ModeAssist, MaxResponsesPerHour: 10, MaxConcurrentJobs: 8,
-		ApproverUserIDs: []string{"U_APPROVER"}, MembershipRevision: "m1", MembershipRefreshedAt: time.Now().UTC(),
+		ApproverUserIDs: []string{"U_APPROVER"}, MembershipRevision: "stale-on-purpose", MembershipRefreshedAt: time.Now().UTC().Add(-72 * time.Hour),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -91,16 +91,33 @@ func TestEditorRequiresChannelApproverAndAuditsContentCommitment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := editor.Load(ctx, EditRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "alerts", ActorID: "U_OTHER"}); !errors.Is(err, ErrDirectiveForbidden) {
-		t.Fatalf("unauthorized load error=%v", err)
+	if _, err := editor.Load(ctx, EditRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "alerts", ActorID: "U_OTHER"}); err != nil {
+		t.Fatalf("workspace user load error=%v", err)
 	}
-	saved, err := editor.Save(ctx, EditRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "alerts", ActorID: "U_APPROVER", Prompt: "Investigate each alert using OTel evidence.", SourceID: "view-1"})
+	saved, err := editor.Save(ctx, EditRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "alerts", ActorID: "U_OTHER", Prompt: "Investigate each alert using OTel evidence.", SourceID: "view-1"})
 	if err != nil || saved.Revision != 1 {
 		t.Fatalf("saved=%#v err=%v", saved, err)
 	}
 	receipts := appender.List("org")
 	if len(receipts) != 1 || receipts[0].ContentCommitment == "" || strings.Contains(receipts[0].ContentCommitment, "Investigate") {
 		t.Fatalf("receipt=%#v", receipts)
+	}
+	if _, err := editor.Load(ctx, EditRequest{OrganizationID: "org", WorkspaceID: "other-team", ChannelID: "alerts", ActorID: "U_OTHER"}); !errors.Is(err, ErrDirectiveForbidden) {
+		t.Fatalf("cross-workspace load error=%v", err)
+	}
+	if _, err := editor.Load(ctx, EditRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "alerts"}); !errors.Is(err, ErrDirectiveForbidden) {
+		t.Fatalf("missing actor load error=%v", err)
+	}
+	policy, err := scopes.Resolve(ctx, "org", "team", "alerts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.KillSwitch = true
+	if _, err := scopes.PutChannel(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := editor.Load(ctx, EditRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "alerts", ActorID: "U_OTHER"}); !errors.Is(err, ErrDirectiveForbidden) {
+		t.Fatalf("kill-switched channel load error=%v", err)
 	}
 }
 

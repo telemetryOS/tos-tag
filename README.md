@@ -60,7 +60,7 @@ asymmetric authority:
 | Private context | Destination-local; never usable outside its originating private conversation |
 | Classifier | Direct OpenAI call, `gpt-5.6-luna`, reasoning effort `none` |
 | Memory curator | Direct OpenAI call, `gpt-5.6-luna`, reasoning effort `medium`; asynchronous and source-linked |
-| Full-agent default | `gpt-5.6-luna`, effort `max`; classifier may route admitted work to lower profiles |
+| Full-agent strong/default | `gpt-5.6-sol`, effort `medium`; classifier routes ordinary admitted work to Luna low/medium |
 | Capacity | Eight channel admission slots, eight job workers, 120 responses/hour |
 
 This is a development authorization, not a production default. The checked-in
@@ -92,7 +92,7 @@ The classifier and full agent are deliberately separate:
 | --- | --- | --- | --- | --- |
 | Ambient classifier | Direct OpenAI Responses API | Stateless | None | `TAG__CLASSIFIER__OPENAI_API_KEY` |
 | Memory curator | Direct OpenAI Responses API | Durable results in MongoDB | None | Control-plane OpenAI key |
-| Full agent | Codex App Server JSON-RPC over stdio | Ephemeral thread | Two job-scoped dynamic tools | Private Codex login in `CODEX_HOME` |
+| Full agent | Codex App Server JSON-RPC over stdio | Ephemeral thread | Three job-scoped dynamic tools | Private Codex login in `CODEX_HOME` |
 | Authority | Go control plane + MongoDB | Durable | Reviewed helper gateway | Encrypted organization keystore |
 
 See [architecture.md](architecture.md) for the full security and lifecycle
@@ -324,6 +324,9 @@ TAG__CLASSIFIER__REASONING_EFFORT=none
 TAG__CLASSIFIER__TIMEOUT=60s
 TAG__CLASSIFIER__MAX_RESPONSES_PER_HOUR=120
 TAG__CLASSIFIER__MAX_CONCURRENT_JOBS=8
+TAG__CLASSIFIER__FLOOD_PROTECTION_ENABLED=true
+TAG__CLASSIFIER__FLOOD_MAX_MESSAGES=1000
+TAG__CLASSIFIER__FLOOD_WINDOW=1h
 TAG__JOBS__WORKER_CONCURRENCY=8
 ```
 
@@ -335,7 +338,20 @@ defaults allow eight simultaneous admitted jobs per channel, backed by eight
 execution workers, and 120 responses per hour per channel; tune these explicit
 safety bounds for production traffic. The admission bound and worker-pool size
 are separate so global execution capacity can be sized independently from each
-channel's fairness limit.
+channel's fairness limit. Per-channel cooldown limits ambient chatter but does
+not discard direct mentions or human continuations in an active Tag thread;
+the hourly budget, concurrency limit, and organization flood gate still apply.
+
+Classifier flood protection is a separate organization/workspace-wide cost
+guard. The default fixed one-hour bucket allows 1,000 classifier-eligible
+messages. Once exhausted, later messages remain durably acknowledged and
+auditable but are dropped before context construction, direct classification,
+reactions, full-agent admission, or Slack output. MongoDB increments the bucket
+atomically, retains it briefly for diagnosis, and the gate fails closed if its
+state is unavailable. Hard-suppressed self/bot/integration events and live
+observe-only events that cannot call the provider do not consume this budget.
+Tune `FLOOD_MAX_MESSAGES` from expected peak workspace traffic, not from the
+much smaller per-channel response limit.
 
 ### Durable memory
 
@@ -389,8 +405,11 @@ A direct mention is a participation trigger, not a forced thread. Brief,
 self-contained answers that are unlikely to continue belong in-channel;
 investigations, tools, tables, artifacts, or likely follow-up belong in a
 thread. Short greetings and thanks can be answered directly by the classifier
-without starting Codex. Integration-authored messages are deterministically
-suppressed to prevent loops.
+without starting Codex. Integration-authored messages are retained as
+unverified destination-local context but bypass classification, reactions,
+jobs, and delivery to prevent agent-to-agent loops. This remains true when
+another Slack agent mentions Tag or writes inside an active Tag thread;
+offline catch-up also imports those messages without promoting them to work.
 
 Assist initiative is enforced independently of the model. A direct mention,
 active Tag thread, explicit address, clear question, conversationally addressed
@@ -465,14 +484,18 @@ current; shell commands and subprocesses still have no network access.
 ### Model profiles
 
 ```dotenv
-TAG__MODELS__DEFAULT_PROFILE=chatgpt-luna-max
+TAG__MODELS__DEFAULT_PROFILE=chatgpt-sol-medium
 TAG__MODELS__DEFAULT_PROVIDER=openai
-TAG__MODELS__DEFAULT_MODEL=gpt-5.6-luna
-TAG__MODELS__DEFAULT_VARIANT=max
+TAG__MODELS__DEFAULT_MODEL=gpt-5.6-sol
+TAG__MODELS__DEFAULT_VARIANT=medium
+TAG__MODELS__FAST_PROFILE_BASE=chatgpt-luna
+TAG__MODELS__FAST_MODEL=gpt-5.6-luna
 ```
 
-Lower strength/effort profiles remain available so the classifier can choose a
-faster path for straightforward admitted work.
+The classifier uses Luna low for brief work and Luna medium for ordinary
+analysis. It reserves the strong Sol-medium profile for durable document
+authoring, complex multi-tool work, tricky debugging or root-cause analysis,
+security and incident investigation, and similarly high-consequence work.
 
 ### Skills and tools
 
@@ -481,7 +504,10 @@ The development configuration automatically injects plugin `base` from
 
 Snapshots are hash-verified and materialized read-only under
 `.agents/skills/<name>`. Helper scripts from those repositories are excluded.
-Execution requires a separately reviewed entry in `tool-marketplace/`.
+Execution requires a separately reviewed entry in `tool-marketplace/`. Agent
+Wiki work uses the dedicated typed `tos_tag_wiki` function: the model supplies
+page fields and Go constructs the reviewed CLI argv. Generic Wiki argv is
+rejected.
 
 The currently injected behavioral skill inventory is `base` (14): `bug`,
 `code-change-intake`, `codebase-read`, `feature`, `linear-issue-manager`,
@@ -583,9 +609,12 @@ Invite the bot to a public/private channel to make it assist-capable under the
 membership-managed policy. Keep live regression traffic in `#tos-tag`. Broad
 scopes alone do not authorize output.
 
-The `/tag-directive` command opens a modal for the current channel directive.
-Directives are revisioned in MongoDB, audited, and supplied to both classifier
-and full agent.
+The `/tag-directive` command is available to any human user in the installed
+workspace and opens a modal for the current channel directive. The command
+remains bound to an enrolled, non-disabled channel in that Slack installation;
+it does not reuse the reviewed-action approver list. Directives are revisioned
+in MongoDB, audited, and supplied to both classifier and full agent. Operators
+can also create a directive for any available channel from the management UI.
 
 ### Logging and audit
 
@@ -653,17 +682,20 @@ make verify
 It runs formatting, all Go tests, race tests, vet, behavioral evals, gosec, and
 govulncheck.
 
-Latest complete baseline (2026-08-03):
+Latest local baseline (2026-08-04):
 
 - all Go tests, race tests, and `go vet`: pass;
-- deterministic behavioral evaluation: `48/48` (46 natural classifier messages
+- deterministic behavioral evaluation: `49/49` (47 natural classifier messages
   plus context-cap and deduplication invariants), including silence, placement,
   privacy, routing, reaction, source-write intake, mandatory product retrieval,
-  conversational-reference, Wiki CRUD, and assist/proactive initiative contracts;
-- live direct OpenAI classifier evaluation: `48/48`, with 38 real provider
-  calls and complete
+  conversational-reference, Wiki CRUD, ambient Wiki report-link silence, and
+  assist/proactive initiative contracts;
+- latest live direct OpenAI classifier baseline (2026-08-03): `48/48`, with 38
+  real provider calls and complete
   grounding/disclosure/placement/routing/reaction scores, and approximately
-  `1.84s` mean end-to-end case latency;
+  `1.84s` mean end-to-end case latency. It predates the new report-link case;
+  that failure's original provider decision and the deterministic correction
+  are covered by the current regression tests;
 - `gosec`: 0 issues across 88 Go files and 24,533 lines;
 - `govulncheck`: no reachable or imported vulnerable packages; one advisory is
   present in a required module but its affected package is not imported or
@@ -683,10 +715,10 @@ Latest complete baseline (2026-08-03):
 In the latest concurrent adversarial wave, measured end-to-end latency was about
 5 seconds for a direct social reply, 12-14 seconds for light/low in-channel
 agent replies, 19 seconds for a medium-effort native table, and 197 seconds for
-a strong/max production-telemetry investigation. Classifier calls over the
+a then-current strong/max production-telemetry investigation. Classifier calls over the
 live 63k-64k-token channel context took about 2-3 seconds. Classifier and
-full-agent latency are reported separately; max-effort work remains the
-clearest optimization target.
+full-agent latency are reported separately. The current strong route uses Sol
+at medium effort and has not been assigned that historical max-effort latency.
 
 The authenticated Codex App Server smoke is opt-in:
 
@@ -709,8 +741,8 @@ separately, and inspect only redacted structured logs.
 ```bash
 make test                 # deterministic test suite
 make race                 # race detector
-make eval                 # deterministic 48-case behavioral gate
-make eval-live            # opt-in 48-case live OpenAI classifier gate
+make eval                 # deterministic 49-case behavioral gate
+make eval-live            # opt-in 49-case live OpenAI classifier gate
 make security             # gosec + govulncheck
 make verify               # full local gate
 make run-live             # host live runtime from ignored runtime.env

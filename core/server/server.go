@@ -498,11 +498,12 @@ func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
 	}
 	values, err := s.deps.Organizations.ListChannels(r.Context(), organizationID)
 	if err == nil {
-		// Group DMs are ignored by policy; hide any registered before the
-		// mpim exclusion so coverage reflects conversations Tag actually uses.
+		// Channel Coverage is an operator surface for real Slack channels, not
+		// the complete context inventory. Exclude DMs, legacy MPIM rows, and
+		// incomplete/corrupt records instead of presenting identifiers as names.
 		filtered := values[:0]
 		for _, channel := range values {
-			if strings.HasPrefix(channel.Name, "mpdm-") {
+			if !manageableSlackChannel(channel) {
 				continue
 			}
 			filtered = append(filtered, channel)
@@ -510,6 +511,20 @@ func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
 		values = filtered
 	}
 	writeList(w, values, err)
+}
+
+func manageableSlackChannel(channel orgconfig.ChannelPolicy) bool {
+	id := strings.TrimSpace(channel.ChannelID)
+	name := strings.TrimSpace(channel.Name)
+	if len(id) < 2 || name == "" || strings.HasPrefix(name, "mpdm-") || (id[0] != 'C' && id[0] != 'G') {
+		return false
+	}
+	for _, character := range id[1:] {
+		if (character < 'A' || character > 'Z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
 }
 func (s *Server) listOrganizations(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Organizations == nil {
@@ -593,7 +608,7 @@ func (s *Server) putChannel(w http.ResponseWriter, r *http.Request) {
 	if !decodeMutation(w, r, s.csrf, &policy) {
 		return
 	}
-	if !s.auditMutation(w, r, policy.OrganizationID, policy.ChannelID, "channel_policy.put", "admin", map[string]any{"team_id": policy.TeamID, "enrolled": policy.Enrolled, "restricted": policy.Restricted, "kill_switch": policy.KillSwitch, "context_history_mode": policy.ContextHistoryMode}) {
+	if !s.auditMutation(w, r, policy.OrganizationID, policy.ChannelID, "channel_policy.put", "admin", map[string]any{"team_id": policy.TeamID, "enrolled": policy.Enrolled, "restricted": policy.Restricted, "kill_switch": policy.KillSwitch, "history_mode": string(policy.ContextHistoryMode), "participation_mode": string(policy.ParticipationMode), "participation_managed_by_membership": policy.ParticipationManagedByMembership}) {
 		return
 	}
 	saved, err := s.deps.Organizations.PutChannel(r.Context(), policy)

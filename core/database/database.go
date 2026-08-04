@@ -167,6 +167,7 @@ func RequiredIndexes() []IndexSpec {
 		{models.CollectionAdmissionStates, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "team_id", Value: 1}, {Key: "channel_id", Value: 1}}, Options: unique("admission_scope_unique")}},
 		{models.CollectionAdmissionReservations, mongo.IndexModel{Keys: bson.D{{Key: "state_id", Value: 1}, {Key: "completed", Value: 1}, {Key: "expires_at", Value: 1}}, Options: named("admission_expiry_reconcile")}},
 		{models.CollectionAdmissionReservations, mongo.IndexModel{Keys: bson.D{{Key: "cleanup_at", Value: 1}}, Options: ttl("admission_reservation_cleanup")}},
+		{models.CollectionClassifierFloodBuckets, mongo.IndexModel{Keys: bson.D{{Key: "expires_at", Value: 1}}, Options: ttl("classifier_flood_bucket_cleanup")}},
 		{models.CollectionApprovals, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "public_id", Value: 1}}, Options: unique("approval_public_unique")}},
 		{models.CollectionApprovals, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "expires_at", Value: 1}}, Options: named("approval_pending")}},
 		{models.CollectionApprovals, mongo.IndexModel{Keys: bson.D{{Key: "cleanup_at", Value: 1}}, Options: ttl("approval_cleanup")}},

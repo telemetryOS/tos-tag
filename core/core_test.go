@@ -30,7 +30,7 @@ func TestLoggedClassifierUsesConservativeDeterministicFallback(t *testing.T) {
 	}
 }
 
-func TestDefaultResponseProfilesExposeLowMediumAndMaxEffort(t *testing.T) {
+func TestDefaultResponseProfilesExposeLunaLowMediumAndSolMedium(t *testing.T) {
 	profiles := defaultResponseProfiles(config.DefaultConfiguration.Models)
 	if len(profiles) != 3 {
 		t.Fatalf("profile count = %d", len(profiles))
@@ -38,7 +38,7 @@ func TestDefaultResponseProfilesExposeLowMediumAndMaxEffort(t *testing.T) {
 	want := map[string]string{
 		"chatgpt-luna-low":    "light",
 		"chatgpt-luna-medium": "standard",
-		"chatgpt-luna-max":    "strong",
+		"chatgpt-sol-medium":  "strong",
 	}
 	for _, profile := range profiles {
 		strength, _ := profile.ProviderOptions["strength"].(string)
@@ -46,6 +46,9 @@ func TestDefaultResponseProfilesExposeLowMediumAndMaxEffort(t *testing.T) {
 			t.Fatalf("unexpected profile: %#v", profile)
 		}
 		delete(want, profile.ID)
+	}
+	if strong := profiles[2]; strong.ModelID != "gpt-5.6-sol" || strong.Variant != "medium" {
+		t.Fatalf("strong profile must use Sol at medium effort: %#v", strong)
 	}
 	if len(want) != 0 {
 		t.Fatalf("missing profiles: %#v", want)

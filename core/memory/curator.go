@@ -196,7 +196,14 @@ func (c *Curator) candidates(ctx context.Context) ([]Batch, error) {
 	for _, channel := range sessionOnlyChannels {
 		excluded[channel.OrganizationID+"/"+channel.ChannelID] = struct{}{}
 	}
-	cursor, err := c.db.Collection(models.CollectionMessages).Find(ctx, bson.M{"deleted": false, "bot_id": bson.M{"$in": bson.A{"", nil}}, "text": bson.M{"$ne": ""}, "original_at": bson.M{"$gte": now.Add(-c.options.Lookback)}, "expires_at": bson.M{"$gt": now}}, options.Find().SetSort(bson.D{{Key: "updated_at", Value: -1}}).SetLimit(5000))
+	cursor, err := c.db.Collection(models.CollectionMessages).Find(ctx, bson.M{
+		"deleted":     false,
+		"bot_id":      bson.M{"$in": bson.A{"", nil}},
+		"subtype":     bson.M{"$nin": bson.A{types.SlackMessageSubtypeBotMessage, types.SlackMessageSubtypeAssistantAppThread}},
+		"text":        bson.M{"$ne": ""},
+		"original_at": bson.M{"$gte": now.Add(-c.options.Lookback)},
+		"expires_at":  bson.M{"$gt": now},
+	}, options.Find().SetSort(bson.D{{Key: "updated_at", Value: -1}}).SetLimit(5000))
 	if err != nil {
 		return nil, err
 	}

@@ -265,17 +265,13 @@ type evalProfileSource struct{ snapshot modelrouter.Snapshot }
 func (s evalProfileSource) Snapshot() modelrouter.Snapshot { return s.snapshot }
 
 func evalProfiles(cfg config.ModelConfig) []types.ModelProfile {
-	baseID := strings.TrimSuffix(cfg.DefaultProfile, "-"+cfg.DefaultVariant)
-	if baseID == "" || baseID == cfg.DefaultProfile {
-		baseID = cfg.DefaultProfile
-	}
 	profiles := make([]types.ModelProfile, 0, 3)
-	for _, candidate := range []struct{ variant, strength string }{{"low", "light"}, {"medium", "standard"}, {"max", "strong"}} {
-		id := baseID + "-" + candidate.variant
-		if candidate.variant == cfg.DefaultVariant {
-			id = cfg.DefaultProfile
-		}
-		profiles = append(profiles, types.ModelProfile{ID: id, ProviderID: cfg.DefaultProvider, ModelID: cfg.DefaultModel, Variant: candidate.variant, ProviderOptions: map[string]any{"strength": candidate.strength}, MaxInputTokens: 200000, MaxOutputTokens: 16000, Enabled: true})
+	for _, candidate := range []struct{ id, model, variant, strength string }{
+		{cfg.FastProfileBase + "-low", cfg.FastModel, "low", "light"},
+		{cfg.FastProfileBase + "-medium", cfg.FastModel, "medium", "standard"},
+		{cfg.DefaultProfile, cfg.DefaultModel, cfg.DefaultVariant, "strong"},
+	} {
+		profiles = append(profiles, types.ModelProfile{ID: candidate.id, ProviderID: cfg.DefaultProvider, ModelID: candidate.model, Variant: candidate.variant, ProviderOptions: map[string]any{"strength": candidate.strength}, MaxInputTokens: 200000, MaxOutputTokens: 16000, Enabled: true})
 	}
 	return profiles
 }

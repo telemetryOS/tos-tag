@@ -99,9 +99,9 @@ func TestMentionStrongAgentRecommendationUsesThreadProgressSurface(t *testing.T)
 			DisclosureClass:      types.DisclosureDestinationSafe,
 			RequiresFullAgent:    true,
 			Reaction:             "thinking_face",
-			AgentModelProfile:    "chatgpt-luna-max",
+			AgentModelProfile:    "chatgpt-sol-medium",
 			AgentModelStrength:   "strong",
-			AgentReasoningEffort: "max",
+			AgentReasoningEffort: "medium",
 		}, nil
 	}), false, .9, .95)
 	if err != nil {
@@ -124,9 +124,9 @@ func TestMentionStrongThreadRecommendationIsNotDownconvertedAsBrief(t *testing.T
 			DisclosureClass:      types.DisclosureDestinationSafe,
 			RequiresFullAgent:    true,
 			Reaction:             "rotating_light",
-			AgentModelProfile:    "chatgpt-luna-max",
+			AgentModelProfile:    "chatgpt-sol-medium",
 			AgentModelStrength:   "strong",
-			AgentReasoningEffort: "max",
+			AgentReasoningEffort: "medium",
 		}, nil
 	}), false, .9, .95)
 	if err != nil {
@@ -149,9 +149,9 @@ func TestMentionExplicitChannelPlacementOverridesStrongThreadDefault(t *testing.
 			DisclosureClass:      types.DisclosureDestinationSafe,
 			RequiresFullAgent:    true,
 			Reaction:             "thinking_face",
-			AgentModelProfile:    "chatgpt-luna-max",
+			AgentModelProfile:    "chatgpt-sol-medium",
 			AgentModelStrength:   "strong",
-			AgentReasoningEffort: "max",
+			AgentReasoningEffort: "medium",
 		}, nil
 	}), false, .9, .95)
 	if err != nil {
@@ -460,10 +460,12 @@ func TestActiveThreadActionStillStartsAgent(t *testing.T) {
 	}
 }
 
-func TestSelfMessageAndKillSwitchSuppressBeforeClassifier(t *testing.T) {
+func TestSelfIntegrationAndKillSwitchSuppressBeforeClassifier(t *testing.T) {
 	for name, mutate := range map[string]func(*Target){
-		"self": func(target *Target) { target.SelfAuthored = true },
-		"kill": func(target *Target) { target.KillSwitched = true },
+		"self":                 func(target *Target) { target.SelfAuthored = true },
+		"external bot":         func(target *Target) { target.Envelope.BotID = "B-claude" },
+		"assistant app thread": func(target *Target) { target.Envelope.Subtype = types.SlackMessageSubtypeAssistantAppThread },
+		"kill":                 func(target *Target) { target.KillSwitched = true },
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := target("is the system down?")
@@ -576,7 +578,7 @@ func TestAssistModeBlocksUnsolicitedDeclarativeAgentWork(t *testing.T) {
 		Outcome: types.OutcomeStartBackgroundJob, Confidence: .99,
 		ReasonCodes: []string{"active_incident"}, ResponseIntent: "investigate the incident",
 		DisclosureClass: types.DisclosureDestinationSafe, RequiresFullAgent: true,
-		Reaction: "rotating_light", AgentModelProfile: "strong", AgentModelStrength: "strong", AgentReasoningEffort: "max",
+		Reaction: "rotating_light", AgentModelProfile: "strong", AgentModelStrength: "strong", AgentReasoningEffort: "medium",
 	}
 	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
 		return background, nil
@@ -726,5 +728,28 @@ func TestObserveShadowStillSuppressesSelfAuthoredMessagesBeforeClassification(t 
 	result := newService(t, true).Decide(context.Background(), got, types.ContextPackRevision{})
 	if result.Predicted.Outcome != types.OutcomeSilent || result.Shadowed || result.Effective.ReasonCodes[0] != "suppress.self_message" {
 		t.Fatalf("self-authored observe event reached shadow classification: %#v", result)
+	}
+}
+
+func TestServiceRequiresProviderCall(t *testing.T) {
+	live := newService(t, false)
+	if live.RequiresProviderCall(Target{Mode: types.ModeObserve}) {
+		t.Fatal("live observe-only target should not call provider")
+	}
+	if !live.RequiresProviderCall(Target{Mode: types.ModeAssist}) {
+		t.Fatal("assist target should call provider")
+	}
+	if live.RequiresProviderCall(Target{Mode: types.ModeAssist, SelfAuthored: true}) {
+		t.Fatal("hard-suppressed target should not call provider")
+	}
+	if live.RequiresProviderCall(Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{BotID: "B-claude"}}) {
+		t.Fatal("external agent target should not call provider")
+	}
+	if live.RequiresProviderCall(Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Subtype: types.SlackMessageSubtypeAssistantAppThread}}) {
+		t.Fatal("assistant app target should not call provider")
+	}
+	shadow := newService(t, true)
+	if !shadow.RequiresProviderCall(Target{Mode: types.ModeObserve}) {
+		t.Fatal("shadow observe target should call provider for measurement")
 	}
 }

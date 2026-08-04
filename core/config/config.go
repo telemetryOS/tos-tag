@@ -90,19 +90,22 @@ func (c ContextPackConfig) PartitionTotal() int {
 }
 
 type ClassifierConfig struct {
-	Mode                  string        `config:"mode"`
-	Provider              string        `config:"provider"`
-	BaseURL               string        `config:"baseUrl"`
-	OpenAIAPIKey          string        `config:"openAiApiKey"`
-	Model                 string        `config:"model"`
-	ReasoningEffort       string        `config:"reasoningEffort"`
-	Timeout               time.Duration `config:"timeout"`
-	MaxOutputTokens       int           `config:"maxOutputTokens"`
-	ReactionEmojis        []string      `config:"reactionEmojis"`
-	AssistThreshold       float64       `config:"assistThreshold"`
-	ChannelReplyThreshold float64       `config:"channelReplyThreshold"`
-	MaxResponsesPerHour   int           `config:"maxResponsesPerHour"`
-	MaxConcurrentJobs     int           `config:"maxConcurrentJobs"`
+	Mode                   string        `config:"mode"`
+	Provider               string        `config:"provider"`
+	BaseURL                string        `config:"baseUrl"`
+	OpenAIAPIKey           string        `config:"openAiApiKey"`
+	Model                  string        `config:"model"`
+	ReasoningEffort        string        `config:"reasoningEffort"`
+	Timeout                time.Duration `config:"timeout"`
+	MaxOutputTokens        int           `config:"maxOutputTokens"`
+	ReactionEmojis         []string      `config:"reactionEmojis"`
+	AssistThreshold        float64       `config:"assistThreshold"`
+	ChannelReplyThreshold  float64       `config:"channelReplyThreshold"`
+	MaxResponsesPerHour    int           `config:"maxResponsesPerHour"`
+	MaxConcurrentJobs      int           `config:"maxConcurrentJobs"`
+	FloodProtectionEnabled bool          `config:"floodProtectionEnabled"`
+	FloodMaxMessages       int           `config:"floodMaxMessages"`
+	FloodWindow            time.Duration `config:"floodWindow"`
 }
 
 type MemoryConfig struct {
@@ -142,6 +145,8 @@ type ModelConfig struct {
 	DefaultProvider string `config:"defaultProvider"`
 	DefaultModel    string `config:"defaultModel"`
 	DefaultVariant  string `config:"defaultVariant"`
+	FastProfileBase string `config:"fastProfileBase"`
+	FastModel       string `config:"fastModel"`
 }
 type MarketplaceConfig struct {
 	SkillRoot       string   `config:"skillRoot"`
@@ -223,18 +228,21 @@ var DefaultConfiguration = Config{
 		Headroom:  5_000,
 	},
 	Classifier: ClassifierConfig{
-		Mode:                  "shadow",
-		Provider:              "deterministic",
-		BaseURL:               "https://api.openai.com/v1",
-		Model:                 "gpt-5.6-luna",
-		ReasoningEffort:       "none",
-		Timeout:               60 * time.Second,
-		MaxOutputTokens:       2048,
-		ReactionEmojis:        []string{"eyes", "thinking_face", "white_check_mark", "warning", "rotating_light", "hammer_and_wrench", "speech_balloon"},
-		AssistThreshold:       0.90,
-		ChannelReplyThreshold: 0.98,
-		MaxResponsesPerHour:   120,
-		MaxConcurrentJobs:     8,
+		Mode:                   "shadow",
+		Provider:               "deterministic",
+		BaseURL:                "https://api.openai.com/v1",
+		Model:                  "gpt-5.6-luna",
+		ReasoningEffort:        "none",
+		Timeout:                60 * time.Second,
+		MaxOutputTokens:        2048,
+		ReactionEmojis:         []string{"eyes", "thinking_face", "white_check_mark", "warning", "rotating_light", "hammer_and_wrench", "speech_balloon"},
+		AssistThreshold:        0.90,
+		ChannelReplyThreshold:  0.98,
+		MaxResponsesPerHour:    120,
+		MaxConcurrentJobs:      8,
+		FloodProtectionEnabled: true,
+		FloodMaxMessages:       1000,
+		FloodWindow:            time.Hour,
 	},
 	Memory: MemoryConfig{
 		BaseURL:         "https://api.openai.com/v1",
@@ -257,10 +265,12 @@ var DefaultConfiguration = Config{
 	},
 	Codex: CodexConfig{Command: "codex", WorkerRoot: "/tmp/tos-tag-workers", WebSearchMode: "disabled", Timeout: 5 * time.Minute},
 	Models: ModelConfig{
-		DefaultProfile:  "chatgpt-luna-max",
+		DefaultProfile:  "chatgpt-sol-medium",
 		DefaultProvider: "openai",
-		DefaultModel:    "gpt-5.6-luna",
-		DefaultVariant:  "max",
+		DefaultModel:    "gpt-5.6-sol",
+		DefaultVariant:  "medium",
+		FastProfileBase: "chatgpt-luna",
+		FastModel:       "gpt-5.6-luna",
 	},
 }
 
@@ -513,6 +523,9 @@ func Validate(cfg *Config) error {
 	if cfg.Classifier.MaxResponsesPerHour <= 0 || cfg.Classifier.MaxConcurrentJobs <= 0 || cfg.Jobs.Lease <= 0 || cfg.Jobs.Poll <= 0 || cfg.Jobs.MaxAttempts <= 0 || cfg.Jobs.WorkerConcurrency <= 0 || cfg.Jobs.WorkerConcurrency > 64 {
 		return fmt.Errorf("classifier and job bounds must be positive and worker concurrency must not exceed 64")
 	}
+	if cfg.Classifier.FloodProtectionEnabled && (cfg.Classifier.FloodMaxMessages <= 0 || cfg.Classifier.FloodWindow <= 0) {
+		return fmt.Errorf("enabled classifier flood protection requires a positive message limit and window")
+	}
 	if cfg.Classifier.Timeout <= 0 || cfg.Classifier.MaxOutputTokens <= 0 || len(cfg.Classifier.ReactionEmojis) == 0 {
 		return fmt.Errorf("classifier timeout, output bound, and reaction allowlist are required")
 	}
@@ -536,8 +549,8 @@ func Validate(cfg *Config) error {
 			return fmt.Errorf("invalid memory curation bounds")
 		}
 	}
-	if cfg.Models.DefaultProfile == "" || cfg.Models.DefaultProvider == "" || cfg.Models.DefaultModel == "" {
-		return fmt.Errorf("default model profile, provider, and model are required")
+	if cfg.Models.DefaultProfile == "" || cfg.Models.DefaultProvider == "" || cfg.Models.DefaultModel == "" || cfg.Models.DefaultVariant == "" || cfg.Models.FastProfileBase == "" || cfg.Models.FastModel == "" {
+		return fmt.Errorf("default and fast model profile configuration is required")
 	}
 	switch strings.ToLower(strings.TrimSpace(cfg.Codex.WebSearchMode)) {
 	case "disabled", "cached", "indexed", "live":
@@ -632,6 +645,9 @@ func (c *Config) RedactedStatus() map[string]any {
 		"classifier_reasoning_effort":         c.Classifier.ReasoningEffort,
 		"classifier_max_responses_hour":       c.Classifier.MaxResponsesPerHour,
 		"classifier_max_concurrent_jobs":      c.Classifier.MaxConcurrentJobs,
+		"classifier_flood_protection_enabled": c.Classifier.FloodProtectionEnabled,
+		"classifier_flood_max_messages":       c.Classifier.FloodMaxMessages,
+		"classifier_flood_window":             c.Classifier.FloodWindow.String(),
 		"memory_enabled":                      c.Memory.Enabled,
 		"memory_model":                        c.Memory.Model,
 		"memory_reasoning_effort":             c.Memory.ReasoningEffort,
@@ -645,6 +661,9 @@ func (c *Config) RedactedStatus() map[string]any {
 		"codex_app_server_enabled":            c.Codex.Enabled,
 		"codex_web_search_mode":               c.Codex.WebSearchMode,
 		"default_model_profile":               c.Models.DefaultProfile,
+		"default_model":                       c.Models.DefaultModel,
+		"default_model_variant":               c.Models.DefaultVariant,
+		"fast_model":                          c.Models.FastModel,
 		"skill_marketplace_configured":        c.Marketplaces.SkillRoot != "" || c.Marketplaces.BaseRoot != "",
 		"base_plugin":                         c.Marketplaces.BasePlugin,
 		"tool_marketplace_configured":         c.Marketplaces.ToolRoot != "",

@@ -24,6 +24,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/config"
 	"github.com/telemetryos/tos-tag/core/contextpacks"
 	"github.com/telemetryos/tos-tag/core/deliveries"
+	"github.com/telemetryos/tos-tag/core/flood"
 	"github.com/telemetryos/tos-tag/core/harness"
 	"github.com/telemetryos/tos-tag/core/intelligence"
 	"github.com/telemetryos/tos-tag/core/jobs"
@@ -61,9 +62,10 @@ type Dependencies struct {
 		UpsertContextChannel(context.Context, orgconfig.ChannelPolicy) (orgconfig.ChannelPolicy, error)
 		ListChannels(context.Context, string) ([]orgconfig.ChannelPolicy, error)
 	}
-	Intelligence intelligence.Projector
-	Admissions   admission.Controller
-	ModelRouter  interface {
+	Intelligence    intelligence.Projector
+	Admissions      admission.Controller
+	FloodProtection flood.Gate
+	ModelRouter     interface {
 		Resolve(context.Context, types.ModelRouteContext, modelrouter.Constraints) (types.ResolvedModel, types.DecisionTrace, error)
 		Allowed(types.ResolvedModel) bool
 	}
@@ -113,6 +115,9 @@ func New(deps Dependencies) (*Pipeline, error) {
 	}
 	if deps.Logger == nil {
 		deps.Logger = blackbox.New()
+	}
+	if deps.Config.Classifier.FloodProtectionEnabled && deps.FloodProtection == nil {
+		return nil, fmt.Errorf("enabled classifier flood protection requires a gate")
 	}
 	return &Pipeline{deps: deps, sessionStartedAt: time.Now().UTC()}, nil
 }
@@ -223,6 +228,24 @@ func (p *Pipeline) HandleEnvelope(ctx context.Context, envelope types.SlackEnvel
 			return slack.AcceptResult{}, err
 		}
 		eventLogger.WithCtx(blackbox.Ctx{"observation_id": accepted.Observation.PublicID, "duplicate": accepted.Duplicate, "duration_ms": time.Since(started).Milliseconds()}).Debug("Slack self-authored output retained as resolved context without classification")
+		return slack.AcceptResult{Duplicate: accepted.Duplicate, Ignored: true, ResolvedContext: true}, nil
+	}
+	// External Slack apps and agents are context, never interlocutors. Import
+	// their output as resolved, unverified destination-local context so humans
+	// can refer to it, but do not enqueue classifier, reaction, or agent work.
+	// This is the primary fail-closed loop boundary; classifier suppression is a
+	// second defense for legacy pending observations.
+	if envelope.IntegrationAuthored() {
+		accepted, err := p.deps.Observations.Import(ctx, envelope)
+		if err != nil {
+			eventLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err)}).Error("Slack integration context import failed")
+			return slack.AcceptResult{}, err
+		}
+		if err := p.advanceContextSyncWatermark(ctx, envelope); err != nil {
+			eventLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err)}).Error("Slack integration context watermark persistence failed")
+			return slack.AcceptResult{}, err
+		}
+		eventLogger.WithCtx(blackbox.Ctx{"observation_id": accepted.Observation.PublicID, "duplicate": accepted.Duplicate, "duration_ms": time.Since(started).Milliseconds()}).Debug("Slack integration output retained as resolved context without classification")
 		return slack.AcceptResult{Duplicate: accepted.Duplicate, Ignored: true, ResolvedContext: true}, nil
 	}
 	eventLogger.Info("Slack envelope persistence started")
@@ -377,7 +400,7 @@ func (p *Pipeline) RecoverContextEnvelope(ctx context.Context, envelope types.Sl
 		_, activeErr := p.deps.Sessions.Find(ctx, envelope.OrganizationID, envelope.TeamID, envelope.ChannelID, envelope.RootThreadTS())
 		activeThread = activeErr == nil
 	}
-	humanAuthored := envelope.BotID == "" && (p.deps.Config.Slack.BotUserID == "" || envelope.UserID != p.deps.Config.Slack.BotUserID)
+	humanAuthored := !envelope.IntegrationAuthored() && (p.deps.Config.Slack.BotUserID == "" || envelope.UserID != p.deps.Config.Slack.BotUserID)
 	direct := humanAuthored && (envelope.IsMention || activeThread)
 	canRespond := policy.ParticipationMode != types.ModeObserve && slackOutputChannelAllowed(p.deps.Config, envelope.ChannelID)
 	if !direct || !canRespond {
@@ -451,7 +474,13 @@ func (p *Pipeline) ensureContextChannel(ctx context.Context, channel types.Slack
 	}
 	participationMode := types.ModeObserve
 	participationManaged := p.deps.Config.Slack.AutoAssistJoinedChannels && channel.BotMembershipKnown
-	if participationManaged && channel.IsChannel && channel.BotMembershipKnown && channel.BotIsMember {
+	if err == nil && !current.ParticipationManagedByMembership {
+		// A channel changed through /tag-mode or the management API is
+		// operator-managed. Slack inventory refreshes membership metadata but
+		// must not replace that explicit observe/assist/proactive choice.
+		participationMode = current.ParticipationMode
+		participationManaged = false
+	} else if participationManaged && channel.IsChannel && channel.BotMembershipKnown && channel.BotIsMember {
 		participationMode = types.ModeAssist
 	}
 	policy := orgconfig.ChannelPolicy{
@@ -500,11 +529,17 @@ func contextChannelPolicyCurrent(current orgconfig.ChannelPolicy, channel types.
 	if !channel.BotMembershipKnown {
 		return true
 	}
+	if !current.BotMembershipKnown || current.BotIsMember != channel.BotIsMember {
+		return false
+	}
+	if !current.ParticipationManagedByMembership {
+		return true
+	}
 	desiredMode := types.ModeObserve
 	if autoAssist && channel.IsChannel && channel.BotIsMember {
 		desiredMode = types.ModeAssist
 	}
-	return current.BotMembershipKnown && current.BotIsMember == channel.BotIsMember && current.ParticipationManagedByMembership == autoAssist && (!autoAssist || current.ParticipationMode == desiredMode)
+	return autoAssist && current.ParticipationMode == desiredMode
 }
 
 func (p *Pipeline) runDecisions(ctx context.Context) {
@@ -548,7 +583,7 @@ func (p *Pipeline) processOneDecision(ctx context.Context) bool {
 	} else {
 		observationLogger.Info("observation decision completed")
 	}
-	if observation.EventType == string(types.SlackEventMessage) && containsIncident(observation.Text) {
+	if observation.EventType == string(types.SlackEventMessage) && !types.IsSlackIntegrationMessage(observation.BotID, observation.Subtype) && containsIncident(observation.Text) {
 		p.reconsiderLateQuestions(ctx, observation)
 	}
 	return true
@@ -594,19 +629,39 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 			return fmt.Errorf("persist channel disclosure class: %w", err)
 		}
 	}
-	// Organization intelligence is downstream of membership and kill-switch
-	// authorization so denied Slack content never enters the shared projection.
-	if revision == 1 && p.deps.Intelligence != nil {
-		if _, err := p.deps.Intelligence.Project(ctx, observation); err != nil {
-			return fmt.Errorf("project organization intelligence: %w", err)
-		}
-	}
-
 	activeThread := false
 	if envelope.ThreadTS != "" {
 		_, activeErr := p.deps.Sessions.Find(ctx, envelope.OrganizationID, envelope.TeamID, envelope.ChannelID, envelope.RootThreadTS())
 		activeThread = activeErr == nil
 	}
+	target := classifier.Target{
+		ObservationID: observation.PublicID,
+		Envelope:      envelope,
+		Mode:          mode,
+		ActiveThread:  activeThread,
+		WorkflowLoop:  isWorkflowLoopOrigin(envelope.OriginTag),
+		Deleted:       envelope.Kind == types.SlackEventDelete,
+		SelfAuthored:  envelope.BotID == "tos-tag-stub" || p.selfAuthoredEnvelope(envelope),
+	}
+	if p.deps.Config.Classifier.FloodProtectionEnabled && p.deps.Classifier.RequiresProviderCall(target) {
+		budget, budgetErr := p.deps.FloodProtection.Admit(ctx, flood.Scope{OrganizationID: envelope.OrganizationID, TeamID: envelope.TeamID})
+		if budgetErr != nil {
+			return p.recordFloodDrop(ctx, observation, envelope, revision, flood.Result{}, "safety.classifier_flood_gate_unavailable", budgetErr)
+		}
+		if !budget.Allowed {
+			return p.recordFloodDrop(ctx, observation, envelope, revision, budget, "safety.classifier_flood_limit", nil)
+		}
+	}
+
+	// Organization intelligence is downstream of membership, kill-switch, and
+	// flood-protection authorization so denied or flooded Slack content never
+	// enters the shared projection.
+	if revision == 1 && p.deps.Intelligence != nil && !target.Envelope.IntegrationAuthored() {
+		if _, err := p.deps.Intelligence.Project(ctx, observation); err != nil {
+			return fmt.Errorf("project organization intelligence: %w", err)
+		}
+	}
+
 	pack, err := p.buildContextPack(ctx, envelope, observation.PublicID, observation.OrganizationReceivedSeq)
 	if err != nil {
 		if envelope.IsMention || activeThread {
@@ -620,15 +675,6 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 			return fmt.Errorf("persist context pack: %w", err)
 		}
 	}
-	target := classifier.Target{
-		ObservationID: observation.PublicID,
-		Envelope:      envelope,
-		Mode:          mode,
-		ActiveThread:  activeThread,
-		WorkflowLoop:  isWorkflowLoopOrigin(envelope.OriginTag),
-		Deleted:       envelope.Kind == types.SlackEventDelete,
-		SelfAuthored:  envelope.BotID == "tos-tag-stub" || p.selfAuthoredEnvelope(envelope),
-	}
 	decision := p.deps.Classifier.Decide(ctx, target, pack)
 	// Re-apply the model-independent initiative boundary immediately before
 	// admission. The classifier service already applies it, but this second
@@ -637,7 +683,8 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 	reservationID := ""
 	if createsJob(decision.Effective) || hasDirectReply(decision.Effective) {
 		if p.deps.Admissions != nil && channelPolicy != nil {
-			reservationID, err = p.deps.Admissions.Admit(ctx, *channelPolicy)
+			admissionPolicy := admissionPolicyForTarget(*channelPolicy, target)
+			reservationID, err = p.deps.Admissions.Admit(ctx, admissionPolicy)
 			if err != nil {
 				decision = classifier.Suppress(decision, admissionReason(err))
 				reservationID = ""
@@ -670,13 +717,13 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 	}).Info("classification decision recorded")
 	p.publishClassificationActivity(envelope, recordedDecision)
 	p.appendReceipt(ctx, audit.AppendRequest{OrganizationID: envelope.OrganizationID, Type: "decision.recorded", ResourceID: recordedDecision.ID, RetentionEpoch: retentionEpoch(pack.ExpiresAt), IdempotencyKey: fmt.Sprintf("decision/%s/%d", observation.PublicID, revision), Metadata: map[string]any{"outcome": string(recordedDecision.Result.Effective.Outcome), "revision": revision}})
-	// Reaction-only and lightweight outcomes deliver their reaction here, and
-	// admitted answer work applies the classifier-selected emoji immediately as
-	// an acknowledgement on the message it is about to answer. Background and
-	// approval outcomes stay reaction-free: they do not answer the source
-	// message directly.
-	answersSourceMessage := recordedDecision.Result.Effective.Outcome == types.OutcomeReplyInThread || recordedDecision.Result.Effective.Outcome == types.OutcomeReplyInChannel
-	if recordedDecision.Result.Effective.Reaction != "" && (answersSourceMessage || !createsJob(recordedDecision.Result.Effective)) {
+	// Every admitted non-silent decision applies the classifier-selected emoji
+	// immediately. For full-agent work this is the fast acknowledgement stage;
+	// Thinking Steps then provide the slower, detailed progress stage. This also
+	// applies to proactive background work and approval requests: even though
+	// they do not answer the source message directly, the person who triggered
+	// them still needs immediate, visible feedback that Tag acted.
+	if recordedDecision.Result.Effective.Reaction != "" {
 		p.applyClassifierReaction(ctx, envelope, revision, recordedDecision)
 	}
 	if hasDirectReply(recordedDecision.Result.Effective) {
@@ -779,6 +826,55 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 	if !won {
 		p.deps.Logger.Warnf("observation output guard already held observation=%s", observation.PublicID)
 	}
+	return nil
+}
+
+func (p *Pipeline) recordFloodDrop(ctx context.Context, observation models.Observation, envelope types.SlackEnvelope, revision int64, budget flood.Result, reason string, gateErr error) error {
+	decision := classifier.SilentResult(reason)
+	recorded, _, err := p.deps.Decisions.Record(ctx, classifier.DecisionRecord{
+		OrganizationID:        envelope.OrganizationID,
+		ObservationID:         observation.PublicID,
+		DecisionRevision:      revision,
+		OrganizationWatermark: observation.OrganizationReceivedSeq,
+		Result:                decision,
+	})
+	if err != nil {
+		return fmt.Errorf("record classifier flood-protection drop: %w", err)
+	}
+	logContext := blackbox.Ctx{
+		"organization_id": envelope.OrganizationID,
+		"team_id":         envelope.TeamID,
+		"channel_id":      envelope.ChannelID,
+		"observation_id":  observation.PublicID,
+		"decision_id":     recorded.ID,
+		"reason_code":     reason,
+		"bucket_count":    budget.Count,
+		"bucket_limit":    budget.Limit,
+	}
+	if !budget.WindowStart.IsZero() {
+		logContext["window_start"] = budget.WindowStart.Format(time.RFC3339)
+		logContext["window_end"] = budget.WindowEnd.Format(time.RFC3339)
+	}
+	if gateErr != nil {
+		logContext["error_type"] = fmt.Sprintf("%T", gateErr)
+	}
+	p.deps.Logger.WithCtx(logContext).Warn("classifier flood protection dropped observation before model call")
+	p.publishClassificationActivity(envelope, recorded)
+	p.appendReceipt(ctx, audit.AppendRequest{
+		OrganizationID: envelope.OrganizationID,
+		Type:           "decision.flood_dropped",
+		ResourceID:     recorded.ID,
+		RetentionEpoch: retentionEpoch(observation.ExpiresAt),
+		IdempotencyKey: fmt.Sprintf("decision/%s/%d/flood-drop", observation.PublicID, revision),
+		Metadata: map[string]any{
+			"outcome":      string(types.OutcomeSilent),
+			"reason":       reason,
+			"bucket_count": budget.Count,
+			"bucket_limit": budget.Limit,
+			"window_start": budget.WindowStart,
+			"window_end":   budget.WindowEnd,
+		},
+	})
 	return nil
 }
 
@@ -1014,7 +1110,7 @@ func (p *Pipeline) buildContextPack(ctx context.Context, envelope types.SlackEnv
 			partition, priority = types.PartitionEvidence, 90
 		}
 		provenance := "human_message"
-		if message.BotID != "" || (message.AuthorID != "" && message.AuthorID == p.deps.Config.Slack.BotUserID) {
+		if types.IsSlackIntegrationMessage(message.BotID, message.Subtype) || (message.AuthorID != "" && message.AuthorID == p.deps.Config.Slack.BotUserID) {
 			provenance = "agent_output_unverified"
 		}
 		candidates = append(candidates, types.ContextCandidate{
@@ -1066,6 +1162,16 @@ func (p *Pipeline) EvaluateHeartbeat(ctx context.Context, subscription triggers.
 		EventTime:      now,
 		ReceivedAt:     now,
 	}
+	classifierTarget := classifier.Target{ObservationID: targetID, Envelope: envelope, Mode: mode, AuthorizedTrigger: true}
+	if p.deps.Config.Classifier.FloodProtectionEnabled && p.deps.Classifier.RequiresProviderCall(classifierTarget) {
+		budget, budgetErr := p.deps.FloodProtection.Admit(ctx, flood.Scope{OrganizationID: subscription.OrganizationID, TeamID: subscription.WorkspaceID})
+		if budgetErr != nil {
+			return p.recordHeartbeatFloodDrop(ctx, subscription, targetID, classifier.SilentResult("safety.classifier_flood_gate_unavailable"), budget, budgetErr)
+		}
+		if !budget.Allowed {
+			return p.recordHeartbeatFloodDrop(ctx, subscription, targetID, classifier.SilentResult("safety.classifier_flood_limit"), budget, nil)
+		}
+	}
 	pack, err := p.buildContextPack(ctx, envelope, targetID, 0)
 	if err != nil {
 		return triggers.GateDecision{}, fmt.Errorf("build heartbeat context pack: %w", err)
@@ -1075,7 +1181,6 @@ func (p *Pipeline) EvaluateHeartbeat(ctx context.Context, subscription triggers.
 			return triggers.GateDecision{}, fmt.Errorf("persist heartbeat context pack: %w", err)
 		}
 	}
-	classifierTarget := classifier.Target{ObservationID: targetID, Envelope: envelope, Mode: mode, AuthorizedTrigger: true}
 	result := p.deps.Classifier.Decide(ctx, classifierTarget, pack)
 	result = classifier.EnforceParticipation(result, classifierTarget, pack)
 	record, _, err := p.deps.Decisions.Record(ctx, classifier.DecisionRecord{
@@ -1096,6 +1201,47 @@ func (p *Pipeline) EvaluateHeartbeat(ctx context.Context, subscription triggers.
 		Metadata: map[string]any{"channel_id": subscription.ChannelID, "outcome": string(result.Effective.Outcome), "confidence": result.Effective.Confidence, "shadowed": result.Shadowed},
 	})
 	return triggers.GateDecision{Accepted: createsJob(result.Effective), Decision: result.Effective, PackID: pack.ID}, nil
+}
+
+func (p *Pipeline) recordHeartbeatFloodDrop(ctx context.Context, subscription triggers.Subscription, targetID string, result classifier.Result, budget flood.Result, gateErr error) (triggers.GateDecision, error) {
+	record, _, err := p.deps.Decisions.Record(ctx, classifier.DecisionRecord{
+		OrganizationID:   subscription.OrganizationID,
+		ObservationID:    targetID,
+		DecisionRevision: 1,
+		Result:           result,
+	})
+	if err != nil {
+		return triggers.GateDecision{}, fmt.Errorf("record heartbeat flood-protection drop: %w", err)
+	}
+	logContext := blackbox.Ctx{
+		"organization_id": subscription.OrganizationID,
+		"team_id":         subscription.WorkspaceID,
+		"channel_id":      subscription.ChannelID,
+		"trigger_id":      subscription.ID,
+		"decision_id":     record.ID,
+		"reason_code":     result.Effective.ReasonCodes[0],
+		"bucket_count":    budget.Count,
+		"bucket_limit":    budget.Limit,
+	}
+	if gateErr != nil {
+		logContext["error_type"] = fmt.Sprintf("%T", gateErr)
+	}
+	p.deps.Logger.WithCtx(logContext).Warn("classifier flood protection dropped heartbeat before model call")
+	p.appendReceipt(ctx, audit.AppendRequest{
+		OrganizationID: subscription.OrganizationID,
+		Type:           "trigger.heartbeat.flood_dropped",
+		ResourceID:     subscription.ID,
+		IdempotencyKey: targetID + "/flood-drop",
+		Metadata: map[string]any{
+			"channel_id":   subscription.ChannelID,
+			"reason":       result.Effective.ReasonCodes[0],
+			"bucket_count": budget.Count,
+			"bucket_limit": budget.Limit,
+			"window_start": budget.WindowStart,
+			"window_end":   budget.WindowEnd,
+		},
+	})
+	return triggers.GateDecision{Accepted: false, Decision: result.Effective}, nil
 }
 
 func authorizedPolicy(policy orgconfig.ChannelPolicy, now time.Time) bool {
@@ -1689,9 +1835,26 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 						p.updateJobProgress(ctx, job, safeSkillProgressStep(skillName, types.SlackProgressInProgress))
 					}
 				}
-			} else if event.Type == "tool.execution.started" || event.Type == "tool.execution.completed" || event.Type == "tool.execution.failed" {
+			} else if event.Type == "tool.validation.failed" || event.Type == "tool.execution.started" || event.Type == "tool.execution.completed" || event.Type == "tool.execution.failed" {
 				toolID, _ := event.Data["tool_id"].(string)
 				operationID, _ := event.Data["operation_id"].(string)
+				validationCode, _ := event.Data["validation_code"].(string)
+				if !safeToolValidationCode(validationCode) {
+					validationCode = ""
+				}
+				if event.Type == "tool.validation.failed" && validationCode != "" && p.deps.Audit != nil {
+					receiptID := event.ID
+					if receiptID == "" {
+						receiptID = types.NewID("event")
+					}
+					if _, err := p.deps.Audit.Append(ctx, audit.AppendRequest{
+						OrganizationID: job.OrganizationID, Type: "tool.validation.failed", ActorID: "agent:" + string(job.ID), ResourceID: receiptID,
+						RetentionEpoch: time.Now().UTC().Format("2006-01"), IdempotencyKey: "tool-validation/" + string(job.ID) + "/" + receiptID,
+						Metadata: map[string]any{"tool_id": toolID, "operation_id": operationID, "validation_code": validationCode},
+					}); err != nil {
+						return types.SlackResult{}, fmt.Errorf("persist tool validation receipt: %w", err)
+					}
+				}
 				if toolID != "" && operationID != "" {
 					resourceAction, _ := event.Data["resource_action"].(string)
 					callID, _ := event.Data["call_id"].(string)
@@ -1699,7 +1862,7 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 					if event.Type == "tool.execution.completed" {
 						status = types.SlackProgressComplete
 						completedToolOperations[toolID+"/"+operationID+"/"+resourceAction] = struct{}{}
-					} else if event.Type == "tool.execution.failed" {
+					} else if event.Type == "tool.execution.failed" && validationCode == "" {
 						status = types.SlackProgressError
 					}
 					step := safeToolProgressLifecycleStep(toolID, operationID, resourceAction, callID, status)
@@ -1847,6 +2010,18 @@ func eventInt64(value any) int64 {
 
 func safeToolProgressStep(toolID, operationID, resourceAction string) types.SlackProgressStep {
 	return safeToolProgressLifecycleStep(toolID, operationID, resourceAction, "", types.SlackProgressComplete)
+}
+
+func safeToolValidationCode(value string) bool {
+	if value == "" || len(value) > 96 {
+		return false
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '.' && char != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func safeToolProgressLifecycleStep(toolID, operationID, resourceAction, _ string, status types.SlackProgressStatus) types.SlackProgressStep {
@@ -2234,4 +2409,15 @@ func admissionReason(err error) string {
 	default:
 		return "admission.unavailable"
 	}
+}
+
+func admissionPolicyForTarget(policy orgconfig.ChannelPolicy, target classifier.Target) orgconfig.ChannelPolicy {
+	// Cooldown limits ambient channel chatter; it must not discard explicit
+	// invocations or a human continuation in a Tag-owned active thread. The
+	// per-hour response budget, concurrency limit, organization flood gate, and
+	// classifier still apply unchanged.
+	if target.Envelope.IsMention || target.ActiveThread {
+		policy.Cooldown = 0
+	}
+	return policy
 }

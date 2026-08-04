@@ -309,6 +309,7 @@
     .directive-sidebar { padding: 22px; border-right: 1px solid var(--border); background: color-mix(in srgb, var(--well) 55%, transparent); }
     .directive-editor { min-width: 0; padding: 24px 26px; }
     .directive-sidebar h2, .directive-editor h2 { margin-bottom: 4px; }
+    .directive-new-button { width: 100%; margin: 14px 0 0; }
     .directive-list { display: grid; gap: 7px; margin-top: 18px; }
     .directive-channel-button {
       display: block; width: 100%; margin: 0; padding: 11px 12px; text-align: left; border: 1px solid var(--border);
@@ -601,7 +602,8 @@
       <div class="directive-layout">
         <aside class="directive-sidebar">
           <h2>Configured channels</h2>
-          <p class="muted">Active directives currently shaping classifier and agent behavior.</p>
+          <p class="muted">Active directives currently shaping classifier and agent behavior. Create one for any available channel.</p>
+          <button type="button" id="newDirective" class="secondary-button directive-new-button">New directive</button>
           <div id="directiveOverview" class="directive-list" aria-live="polite"><div class="data-state">Loading directives…</div></div>
         </aside>
         <div class="directive-editor">
@@ -702,14 +704,14 @@
     const pageViews = {
       channels: {
         guidance: 'Change a channel\'s participation mode directly with its dropdown. Search by name, filter by mode, and open details for limits and membership metadata.',
-        empty: 'No conversations are known yet. Channels appear here once the Slack app is installed or the stub delivers its first event.',
+        empty: 'No usable Slack channels are known yet. Named public and private channels appear here once Slack discovery completes.',
         search: 'Find a channel…', filter: {key: 'participation_mode', label: 'mode'},
         columns: ['name', {key:'participation_mode', label:'Mode'}, {key:'context_history_mode', label:'Context'}, {key:'bot_is_member', label:'Tag joined'}, 'restricted', 'kill_switch', 'membership_refreshed_at'],
         summaries: rows => [
-          {label:'Known channels', value:rows.length, detail:'Visible to the installed Slack app'},
+          {label:'Known channels', value:rows.length, detail:'Usable named channels visible to the installed Slack app'},
           {label:'Can participate', value:rows.filter(row => ['assist','proactive'].includes(row.participation_mode) && row.enrolled && !row.kill_switch && (!row.participation_managed_by_membership || row.bot_is_member)).length, detail:'Joined assist/proactive channels passing safeguards'},
           {label:'Observe only', value:rows.filter(row => row.participation_mode === 'observe').length, detail:'Context only; no messages or reactions'},
-          {label:'Restricted', value:rows.filter(row => row.restricted).length, detail:'Private channels, DMs, and group DMs'}
+          {label:'Restricted', value:rows.filter(row => row.restricted).length, detail:'Private Slack channels'}
         ]
       },
       jobs: {
@@ -796,7 +798,7 @@
       },
       directives: {
         guidance:'Directives are channel-specific instructions assembled into both classifier and worker context.',
-        empty:'No channel directives exist yet. Create one in Slack with /tag-directive to shape behavior per channel.',
+        empty:'No channel directives exist yet. Create one here or use /tag-directive in Slack.',
         search:'Find a directive…', filter:{key:'state',label:'state'}, columns:['channel_id','state','revision_id','created_at','activated_at','actor_id'],
         summaries: rows => [
           {label:'Directive revisions', value:rows.length, detail:'All recorded revisions'},
@@ -900,7 +902,7 @@
     function toneFor(value) {
       const normalized = String(value ?? '').toLowerCase();
       if (['succeeded','approved','assist','proactive','active','enabled','reply_in_channel','reply_in_thread','react','completed','ok','delivered'].includes(normalized)) return 'good';
-      if (['queued','leased','running','pending','requested','observe','shadow','proposed','draft'].includes(normalized)) return 'warn';
+      if (['queued','leased','running','pending','requested','observe','shadow','proposed','draft','interrupted_retrying'].includes(normalized)) return 'warn';
       if (['failed','dead','cancelled','denied','expired','disabled','rejected'].includes(normalized)) return 'bad';
       return 'info';
     }
@@ -913,11 +915,7 @@
     }
     function conversationLabel(row) {
       if (row?.name) return String(row.name);
-      const id = String(row?.channel_id || '');
-      if (id.startsWith('D')) return 'Direct message';
-      if (id.startsWith('G')) return 'Private conversation';
-      if (id.startsWith('C')) return 'Unavailable Slack channel';
-      return 'Slack conversation';
+      return 'Slack channel';
     }
     function recordLabel(row) {
       if (page === 'channels') return conversationLabel(row);
@@ -1531,6 +1529,7 @@
         directiveEditorSummary.textContent = active ? `Last updated ${relativeTime(active.created_at)}${active.created_by ? ' by ' + active.created_by : ''}. Saving creates and activates a new revision.` : 'Create the instruction used by both classifier and full-agent work.';
         directivePrompt.value = active ? active.prompt : '';
         directivePrompt.disabled = !channelID; saveDirective.disabled = !channelID; resetDirective.disabled = !channelID;
+        saveDirective.textContent = active ? 'Save new revision' : 'Create and activate';
         updateDirectiveCharacters(); setDirectiveNotice('');
         directiveHistory.replaceChildren();
         const revisions = channelDirectiveHistory(channelID);
@@ -1577,6 +1576,13 @@
         }
       }
       directiveChannel.addEventListener('change', () => selectDirectiveChannel(directiveChannel.value));
+      newDirective.addEventListener('click', () => {
+        selectDirectiveChannel('');
+        directiveEditorTitle.textContent = 'Create a directive';
+        directiveEditorSummary.textContent = 'Choose a channel, then write the instruction used by both classifier and full-agent work.';
+        setDirectiveNotice('Choose a channel to begin.');
+        directiveChannel.focus();
+      });
       directivePrompt.addEventListener('input', updateDirectiveCharacters);
       resetDirective.addEventListener('click', renderDirectiveEditor);
       directiveForm.addEventListener('submit', async event => {

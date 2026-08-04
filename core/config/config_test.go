@@ -13,11 +13,14 @@ func TestDefaultConfigurationValid(t *testing.T) {
 	if err := Validate(&cfg); err != nil {
 		t.Fatalf("default configuration invalid: %v", err)
 	}
-	if cfg.Models.DefaultProfile != "chatgpt-luna-max" || cfg.Models.DefaultProvider != "openai" || cfg.Models.DefaultModel != "gpt-5.6-luna" || cfg.Models.DefaultVariant != "max" {
+	if cfg.Models.DefaultProfile != "chatgpt-sol-medium" || cfg.Models.DefaultProvider != "openai" || cfg.Models.DefaultModel != "gpt-5.6-sol" || cfg.Models.DefaultVariant != "medium" || cfg.Models.FastProfileBase != "chatgpt-luna" || cfg.Models.FastModel != "gpt-5.6-luna" {
 		t.Fatalf("unexpected default model configuration: %#v", cfg.Models)
 	}
 	if cfg.Classifier.MaxResponsesPerHour != 120 || cfg.Classifier.MaxConcurrentJobs != 8 {
 		t.Fatalf("unexpected default classifier admission bounds: %#v", cfg.Classifier)
+	}
+	if !cfg.Classifier.FloodProtectionEnabled || cfg.Classifier.FloodMaxMessages != 1000 || cfg.Classifier.FloodWindow != time.Hour {
+		t.Fatalf("unexpected default classifier flood protection: %#v", cfg.Classifier)
 	}
 	if cfg.Jobs.WorkerConcurrency != 8 {
 		t.Fatalf("unexpected default job worker concurrency: %#v", cfg.Jobs)
@@ -27,6 +30,31 @@ func TestDefaultConfigurationValid(t *testing.T) {
 	}
 	if cfg.Memory.Enabled || cfg.Memory.Model != "gpt-5.6-luna" || cfg.Memory.ReasoningEffort != "medium" {
 		t.Fatalf("unexpected default memory configuration: %#v", cfg.Memory)
+	}
+}
+
+func TestLoadClassifierFloodProtectionEnvironment(t *testing.T) {
+	t.Setenv("TAG__CLASSIFIER__FLOOD_PROTECTION_ENABLED", "true")
+	t.Setenv("TAG__CLASSIFIER__FLOOD_MAX_MESSAGES", "750")
+	t.Setenv("TAG__CLASSIFIER__FLOOD_WINDOW", "2h")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Classifier.FloodProtectionEnabled || cfg.Classifier.FloodMaxMessages != 750 || cfg.Classifier.FloodWindow != 2*time.Hour {
+		t.Fatalf("classifier flood environment did not map: %#v", cfg.Classifier)
+	}
+}
+
+func TestValidateClassifierFloodProtectionBounds(t *testing.T) {
+	cfg := DefaultConfiguration
+	cfg.Classifier.FloodMaxMessages = 0
+	if err := Validate(&cfg); err == nil {
+		t.Fatal("expected enabled flood protection without a positive limit to fail")
+	}
+	cfg.Classifier.FloodProtectionEnabled = false
+	if err := Validate(&cfg); err != nil {
+		t.Fatalf("disabled flood protection should ignore its bounds: %v", err)
 	}
 }
 

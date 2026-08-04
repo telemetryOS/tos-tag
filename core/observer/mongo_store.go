@@ -195,6 +195,7 @@ func (s *MongoStore) applyProjection(ctx context.Context, envelope types.SlackEn
 		"root_thread_ts":     bson.M{"$ifNull": bson.A{"$root_thread_ts", envelope.RootThreadTS()}},
 		"author_id":          bson.M{"$ifNull": bson.A{"$author_id", envelope.UserID}},
 		"bot_id":             bson.M{"$ifNull": bson.A{"$bot_id", envelope.BotID}},
+		"subtype":            choose(envelope.Subtype, "$subtype"),
 		"original_at":        bson.M{"$ifNull": bson.A{"$original_at", observation.SlackEventTime}},
 		"expires_at":         bson.M{"$ifNull": bson.A{"$expires_at", observation.SlackEventTime.Add(s.messageRetention)}},
 		"source_event_id":    choose(envelope.EventID, "$source_event_id"),

@@ -40,7 +40,7 @@ func TestBridgeFencesReadToolAndRequiresIndependentApprovalForWrite(t *testing.T
 
 	root := t.TempDir()
 	script := filepath.Join(root, "tool.sh")
-	if err := os.WriteFile(script, []byte("if [ \"$1\" = fail ]; then printf 'safe diagnostic' >&2; exit 7; fi\nprintf 'ok:%s' \"$1\"\n"), 0o700); err != nil {
+	if err := os.WriteFile(script, []byte("if [ \"$1\" = fail ]; then printf 'safe diagnostic' >&2; exit 7; fi\nif [ \"$1\" = failwiki ]; then printf 'wiki: put requires inline --body' >&2; exit 7; fi\nprintf 'ok:%s' \"$1\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	bundle := Bundle{Root: root, Manifest: Manifest{ID: "demo", Version: "v1", Script: "tool.sh", Operations: []Operation{{ID: "read", Risk: "read", TimeoutSeconds: 2, MaxOutputBytes: 1024}, {ID: "write", Risk: "write", TimeoutSeconds: 2, MaxOutputBytes: 1024}, {ID: "trusted-write", Risk: "write", Approval: ApprovalNever, TimeoutSeconds: 2, MaxOutputBytes: 1024}}}}
@@ -49,7 +49,9 @@ func TestBridgeFencesReadToolAndRequiresIndependentApprovalForWrite(t *testing.T
 		t.Fatal(err)
 	}
 	bundle.ScriptHash = digest(data)
-	registry := &Registry{bundles: map[string]Bundle{"demo": bundle}}
+	wikiBundle := bundle
+	wikiBundle.Manifest.ID = "telemetryos.wiki"
+	registry := &Registry{bundles: map[string]Bundle{"demo": bundle, "telemetryos.wiki": wikiBundle}}
 	secrets, err := keystore.New([]byte("01234567890123456789012345678901"))
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +66,7 @@ func TestBridgeFencesReadToolAndRequiresIndependentApprovalForWrite(t *testing.T
 		t.Fatal(err)
 	}
 	capability := "test-capability"
-	bridge.scopes[capability] = JobScope{OrganizationID: "org", WorkspaceID: "team", ChannelID: "channel", JobID: string(running.ID), AttemptID: "attempt", LeaseToken: running.Lease.Token, SteeringEpoch: running.SteeringEpoch, ExpiresAt: time.Now().Add(time.Minute), AllowedTools: []string{"demo"}}
+	bridge.scopes[capability] = JobScope{OrganizationID: "org", WorkspaceID: "team", ChannelID: "channel", JobID: string(running.ID), AttemptID: "attempt", LeaseToken: running.Lease.Token, SteeringEpoch: running.SteeringEpoch, ExpiresAt: time.Now().Add(time.Minute), AllowedTools: []string{"demo", "telemetryos.wiki"}}
 
 	status, body := bridgeCall(t, bridge, capability, bridgeRequest{ToolID: "demo", OperationID: "read", Arguments: []string{"one"}})
 	if status != http.StatusOK || !bytes.Contains(body, []byte("ok:one")) {
@@ -83,6 +85,25 @@ func TestBridgeFencesReadToolAndRequiresIndependentApprovalForWrite(t *testing.T
 	}
 	if !foundFailure {
 		t.Fatal("failed tool execution was not recorded with a content-free error code")
+	}
+
+	status, body = bridgeCall(t, bridge, capability, bridgeRequest{ToolID: "telemetryos.wiki", OperationID: "read", Arguments: []string{"get", "artifacts/guide"}})
+	if status != http.StatusBadRequest || !bytes.Contains(body, []byte(`"typed_wiki_request_required"`)) {
+		t.Fatalf("untyped Wiki request status=%d body=%s", status, body)
+	}
+
+	status, body = bridgeCall(t, bridge, capability, bridgeRequest{ToolID: "telemetryos.wiki", OperationID: "read", Arguments: []string{"failwiki"}, Wiki: &wikiAction{Operation: "get", PageReference: "artifacts/guide"}})
+	if status != http.StatusUnprocessableEntity || !bytes.Contains(body, []byte(`"validation_code":"wiki.cli.missing_body"`)) {
+		t.Fatalf("Wiki validation failure status=%d body=%s", status, body)
+	}
+	foundValidation := false
+	for _, receipt := range auditLog.List("org") {
+		if receipt.Type == "tool.execution.failed" && receipt.Metadata["validation_code"] == "wiki.cli.missing_body" {
+			foundValidation = true
+		}
+	}
+	if !foundValidation {
+		t.Fatal("Wiki validation failure did not persist its sanitized code")
 	}
 
 	status, body = bridgeCall(t, bridge, capability, bridgeRequest{ToolID: "demo", OperationID: "write", Arguments: []string{"two"}})
@@ -107,8 +128,33 @@ func TestBridgeFencesReadToolAndRequiresIndependentApprovalForWrite(t *testing.T
 	if status != http.StatusOK || !bytes.Contains(body, []byte("ok:three")) {
 		t.Fatalf("trusted write status=%d body=%s", status, body)
 	}
+	wikiSemantic := &wikiAction{Operation: "put", PageReference: "artifacts/guide", Title: "Guide", Body: "body", Format: "markdown"}
+	status, body = bridgeCall(t, bridge, capability, bridgeRequest{ToolID: "telemetryos.wiki", OperationID: "write", Arguments: []string{"two"}, Wiki: wikiSemantic})
+	if status != http.StatusConflict {
+		t.Fatalf("typed Wiki approval status=%d body=%s", status, body)
+	}
+	var wikiRequested struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	if err := json.Unmarshal(body, &wikiRequested); err != nil || wikiRequested.ApprovalID == "" {
+		t.Fatalf("typed Wiki approval response=%s err=%v", body, err)
+	}
+	pendingWiki, err := approvalStore.GetContext(ctx, "org", wikiRequested.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typed, ok := pendingWiki.Action.Arguments["wiki"].(wikiAction); !ok || typed.PageReference != "artifacts/guide" || typed.Operation != "put" {
+		t.Fatalf("typed Wiki action = %#v", pendingWiki.Action.Arguments)
+	}
+	if _, err := approvalStore.ApproveContext(ctx, "org", wikiRequested.ApprovalID, "human"); err != nil {
+		t.Fatal(err)
+	}
+	status, body = bridgeCall(t, bridge, capability, bridgeRequest{ToolID: "telemetryos.wiki", OperationID: "write", Arguments: []string{"two"}, ApprovalID: wikiRequested.ApprovalID, Wiki: wikiSemantic})
+	if status != http.StatusOK || !bytes.Contains(body, []byte("ok:two")) {
+		t.Fatalf("typed Wiki approval resume status=%d body=%s", status, body)
+	}
 	storedApprovals, err := approvalStore.List(ctx, "org")
-	if err != nil || len(storedApprovals) != 1 {
+	if err != nil || len(storedApprovals) != 2 {
 		t.Fatalf("trusted write created an approval: approvals=%d err=%v", len(storedApprovals), err)
 	}
 	var foundNeverPolicy bool

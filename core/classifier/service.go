@@ -87,6 +87,17 @@ func (s *Service) Decide(ctx context.Context, target Target, pack types.ContextP
 	return EnforceParticipation(Result{Predicted: predicted, Effective: predicted}, target, pack)
 }
 
+// RequiresProviderCall reports whether Decide would reach the configured
+// classifier implementation for this target. The pipeline uses it to apply the
+// durable flood budget only to messages that would otherwise consume a model
+// classification, while deterministic hard suppressions remain available.
+func (s *Service) RequiresProviderCall(target Target) bool {
+	if hardSuppression(target) != "" {
+		return false
+	}
+	return target.Mode != types.ModeObserve || s.shadow
+}
+
 // EnforceParticipation is the model-independent initiative boundary. It is
 // intentionally safe to call more than once: Service applies it after ambient
 // classification, and the pipeline applies it again immediately before
@@ -206,7 +217,7 @@ func (s *Service) predict(ctx context.Context, target Target, pack types.Context
 		predicted = sanitizeEvidenceReferences(predicted, pack)
 		predicted = enforceDirectReplyPlacement(predicted, target)
 		// Placement is part of the model-independent contract, so canonicalize it
-		// before validation. A provider can legitimately recommend strong/max work
+		// before validation. A provider can legitimately recommend strong work
 		// while initially choosing the channel; rejecting that otherwise useful
 		// recommendation would drop into the generic direct-mention fallback and
 		// lose the threaded Thinking Steps surface.
@@ -670,7 +681,7 @@ func hardSuppression(target Target) string {
 		return "suppress.deleted"
 	case target.Unsupported:
 		return "suppress.unsupported_subtype"
-	case target.Envelope.BotID != "":
+	case target.Envelope.IntegrationAuthored():
 		return "suppress.integration_message"
 	default:
 		return ""
@@ -729,6 +740,13 @@ func silent(reason string) types.ClassificationDecision {
 		ReasonCodes:     []string{reason},
 		DisclosureClass: types.DisclosureDestinationSafe,
 	}
+}
+
+// SilentResult constructs a model-independent, auditable no-output decision.
+// It is used by control-plane safety gates that run before classification.
+func SilentResult(reason string) Result {
+	decision := silent(reason)
+	return Result{Predicted: decision, Effective: decision}
 }
 
 // Suppress preserves the classifier prediction while applying an explainable

@@ -246,7 +246,7 @@ func TestCodexSlackOutputSchemaIncludesSafeAgentPresentationBlocks(t *testing.T)
 
 func TestCodexDynamicToolsRequireValidatedSkillNames(t *testing.T) {
 	tools := codexDynamicTools([]marketplace.SkillSnapshot{{Name: "product-knowledge"}, {Name: "wiki"}})
-	if len(tools) != 2 {
+	if len(tools) != 3 {
 		t.Fatalf("dynamic tools = %#v", tools)
 	}
 	for _, tool := range tools {
@@ -263,11 +263,26 @@ func TestCodexDynamicToolsRequireValidatedSkillNames(t *testing.T) {
 			t.Fatalf("%s skill schema = %#v", tool["name"], skillSchema)
 		}
 	}
+	var wikiTool map[string]any
+	for _, tool := range tools {
+		if tool["name"] == wikiDynamicTool {
+			wikiTool = tool
+			break
+		}
+	}
+	if wikiTool == nil {
+		t.Fatal("typed Wiki dynamic tool was not registered")
+	}
+	schema, _ := wikiTool["inputSchema"].(map[string]any)
+	properties, _ := schema["properties"].(map[string]any)
+	if properties["operation"] == nil || properties["page_reference"] == nil || properties["body"] == nil || properties["arguments"] != nil || properties["tool_id"] != nil {
+		t.Fatalf("typed Wiki schema = %#v", schema)
+	}
 }
 
 func TestPrepareToolInvocationValidatesSkillsAndStripsProgressMetadata(t *testing.T) {
 	session := &codexWorkerSession{allowedSkills: map[string]struct{}{"product-knowledge": {}, "wiki": {}}}
-	invocation, forwarded, err := session.prepareToolInvocation("call-1", "tos_tag_tool", json.RawMessage(`{"skill_names":["product-knowledge","wiki","wiki"],"tool_id":"telemetryos.wiki","operation_id":"read","arguments":["get","primer/node-mini"]}`))
+	invocation, forwarded, err := session.prepareToolInvocation("call-1", wikiDynamicTool, json.RawMessage(`{"skill_names":["product-knowledge","wiki","wiki"],"operation":"get","page_reference":"primer/node-mini"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,6 +294,9 @@ func TestPrepareToolInvocationValidatesSkillsAndStripsProgressMetadata(t *testin
 	}
 	if _, _, err := session.prepareToolInvocation("call-2", "tos_tag_tool", json.RawMessage(`{"skill_names":["untrusted-skill"],"tool_id":"telemetryos.wiki","operation_id":"read","arguments":[]}`)); err == nil {
 		t.Fatal("unavailable skill was accepted")
+	}
+	if _, _, err := session.prepareToolInvocation("call-3", "tos_tag_tool", json.RawMessage(`{"skill_names":["wiki"],"tool_id":"telemetryos.wiki","operation_id":"read","arguments":["get","primer/node-mini"]}`)); err == nil || !strings.Contains(err.Error(), "wiki.typed_interface_required") {
+		t.Fatalf("generic Wiki invocation error = %v", err)
 	}
 }
 
@@ -365,8 +383,7 @@ func TestCompletedToolOperationExposesOnlyToolIdentity(t *testing.T) {
 func TestWorkerCodexPublishesReviewedToolIdentityWithoutArguments(t *testing.T) {
 	activityFeed := activity.New(10)
 	session := &codexWorkerSession{activity: activityFeed, organizationID: "org", jobID: "job", attemptID: "attempt", threadID: "thread"}
-	arguments := json.RawMessage(`{"tool_id":"telemetryos.code","operation_id":"read","arguments":["versions","tos-tag","go"]}`)
-	session.publishToolResult("item/tool/call", "completed", "tos_tag_tool", arguments)
+	session.publishToolResult("item/tool/call", "completed", "tos_tag_tool", declaredToolInvocation{ToolID: "telemetryos.code", OperationID: "read", ResourceAction: "versions"})
 	records := activityFeed.Snapshot("org", 10)
 	if len(records) != 1 || records[0].Kind != "codex.tool" || records[0].Details["tool_id"] != "telemetryos.code" || records[0].Details["operation_id"] != "read" || records[0].Details["resource_action"] != "versions" {
 		t.Fatalf("tool activity = %#v", records)
@@ -374,6 +391,26 @@ func TestWorkerCodexPublishesReviewedToolIdentityWithoutArguments(t *testing.T) 
 	encoded, _ := json.Marshal(records[0])
 	if bytes.Contains(encoded, []byte("tos-tag")) {
 		t.Fatalf("tool activity leaked arguments: %s", encoded)
+	}
+}
+
+func TestWorkerCodexDescribesCorrectableWikiValidationAsInterruptedRetrying(t *testing.T) {
+	activityFeed := activity.New(10)
+	session := &codexWorkerSession{activity: activityFeed, organizationID: "org", jobID: "job", attemptID: "attempt", threadID: "thread"}
+	invocation := declaredToolInvocation{ToolID: "telemetryos.wiki", OperationID: "write", ResourceAction: "put"}
+	session.publishToolResult("item/tool/call", reviewedToolActivityStatus(false, "wiki.body.required"), wikiDynamicTool, invocation)
+	session.publishToolValidation("item/tool/call", "wiki.body.required", "write", "put")
+	records := activityFeed.Snapshot("org", 10)
+	if len(records) != 2 {
+		t.Fatalf("correctable Wiki activity = %#v", records)
+	}
+	for _, record := range records {
+		if record.Title != "Interrupted — retrying" || record.Level != "warning" || record.Details["status"] != "interrupted_retrying" {
+			t.Fatalf("correctable Wiki activity = %#v", records)
+		}
+	}
+	if reviewedToolActivityStatus(false, "") != "failed" || reviewedToolActivityStatus(true, "") != "completed" {
+		t.Fatal("terminal reviewed-tool statuses were changed")
 	}
 }
 

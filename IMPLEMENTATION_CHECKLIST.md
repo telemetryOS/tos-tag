@@ -25,6 +25,9 @@ Only mark an item complete when source and verification evidence exist.
 
 - [x] Use a direct stateless OpenAI Responses API call.
 - [x] Keep the classifier tool-free and independent from full-agent state.
+- [x] Enforce a Mongo-authoritative organization/workspace flood budget before
+  context construction and classifier calls; fail closed without reactions,
+  jobs, or output, and cover live messages plus classifier-gated heartbeats.
 - [x] Preserve `TAG__CLASSIFIER__OPENAI_API_KEY` as control-plane-only; it may
   serve stateless classifier and memory-curator calls but never Codex or tools.
 - [x] Choose silence, reaction, direct reply, channel/thread placement, model,
@@ -59,6 +62,9 @@ Only mark an item complete when source and verification evidence exist.
   admission, keep operator-created heartbeat triggers authorized, and pass the
   46-message deterministic and live provider matrices (`48/48` with
   infrastructure invariants) plus a zero-reply/zero-job `#tos-tag` canary.
+- [x] Require text-confirmed source mutation intent before applying the Linear
+  redirect, and keep ambient Agent Wiki report links silent (`49/49`
+  deterministic matrix with infrastructure invariants).
 - [x] Fall back conservatively on timeout or malformed output.
 
 ## 4. Durable jobs and concurrency
@@ -110,7 +116,11 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Load the complete `base` plugin from `tag-agent-skills`.
 - [x] Reject missing manifests, hash drift, and flat-name collisions.
 - [x] Exclude behavioral helper scripts and executable plugin surfaces.
-- [x] Register `tos_tag_tool` and `tos_tag_trigger` as App Server dynamic tools.
+- [x] Register `tos_tag_tool`, typed `tos_tag_wiki`, and `tos_tag_trigger` as
+  App Server dynamic tools.
+- [x] Reject generic Wiki argv, construct reviewed Wiki arguments in Go,
+  persist sanitized validation codes, and collapse self-corrected attempts into
+  one Slack progress step.
 - [x] Handle `item/tool/call` in the Go control plane.
 - [x] Keep attempt capabilities out of the Codex environment and prompt.
 - [x] Recheck lease, steering, expiry, tenant, channel, and allowlist on calls.
@@ -146,7 +156,9 @@ Only mark an item complete when source and verification evidence exist.
   gated, admin-risk worker operations are invalid, and all calls remain fully
   audited.
 - [x] Consume approvals once and resume a fresh fenced attempt.
-- [x] Implement `/tag-directive` modal load/save with revision and audit.
+- [x] Implement `/tag-directive` modal load/save for every authenticated
+  workspace user in an enrolled, enabled channel, plus explicit management-UI
+  creation, revision history, activation, and audit.
 - [x] Persist and reauthorize standard five-field cron routines with explicit
   IANA timezones while advancing legacy interval records safely.
 - [x] Persist classifier-gated cron heartbeat subscriptions and manage them in

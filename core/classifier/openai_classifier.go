@@ -125,7 +125,7 @@ func NewOpenAIClassifier(options OpenAIOptions) (*OpenAIClassifier, error) {
 }
 
 func (c *OpenAIClassifier) Decide(ctx context.Context, target Target, pack types.ContextPackRevision) (types.ClassificationDecision, error) {
-	profiles := advertisedProfiles(c.agentProfiles.Snapshot().Profiles)
+	profiles := advertisedProfiles(c.agentProfiles.Snapshot())
 	if len(profiles) == 0 {
 		return types.ClassificationDecision{}, classifierError("profiles", "no_agent_profiles", errors.New("no enabled agent model profiles"))
 	}
@@ -224,11 +224,13 @@ func (c *OpenAIClassifier) Decide(ctx context.Context, target Target, pack types
 	decision = withSourceWritePolicyCorrections(decision, target)
 	decision = withImplementationPlanningPolicyCorrections(decision, target, profiles)
 	decision = withReadOnlyCodeAnalysisPolicyCorrections(decision, target, profiles)
+	decision = withHighIntelligenceProfileCorrections(decision, target, profiles)
 	decision = withBriefMentionPolicyCorrections(decision, target, profiles)
 	decision = withAmbientPolicyCorrections(decision, target, pack, profiles)
 	decision = withCanonicalAgentProfile(decision, profiles)
 	decision = withBackgroundProfileFloor(decision, target, profiles)
 	decision = withDefaultReaction(decision, c.reactionEmojis)
+	decision = withConsistentAuditReasonCodes(decision, target)
 	if err := validateRecommendation(decision, profiles, c.reactionEmojis); err != nil {
 		return types.ClassificationDecision{}, classifierError("recommendation", recommendationErrorCode(err), err)
 	}
@@ -240,6 +242,29 @@ func (c *OpenAIClassifier) Decide(ctx context.Context, target Target, pack types
 	return decision, nil
 }
 
+func withConsistentAuditReasonCodes(decision types.ClassificationDecision, target Target) types.ClassificationDecision {
+	removed := false
+	decision.ReasonCodes = slices.DeleteFunc(decision.ReasonCodes, func(reason string) bool {
+		normalized := strings.NewReplacer("-", "_", ".", "_", " ", "_").Replace(strings.ToLower(strings.TrimSpace(reason)))
+		negativeMention := containsAny(normalized,
+			"no_direct_mention", "not_directed_to_agent", "not_likely_addressed", "no_likely_address",
+			"not_addressed_to_agent", "no_address_signal", "likely_addressed_false", "direct_mention_false",
+		)
+		positiveMention := !negativeMention && (normalized == "direct_mention" || strings.HasSuffix(normalized, "_direct_mention") || normalized == "likely_addressed_to_agent")
+		negativeThread := containsAny(normalized, "no_active_thread", "not_active_thread", "active_thread_false")
+		positiveThread := !negativeThread && (normalized == "active_thread" || strings.HasSuffix(normalized, "_active_thread") || normalized == "active_thread_true")
+		ambientMention := target.Envelope.IsMention && strings.HasPrefix(normalized, "ambient_")
+		contradicts := ambientMention || (target.Envelope.IsMention && negativeMention) || (!target.Envelope.IsMention && positiveMention) ||
+			(target.ActiveThread && negativeThread) || (!target.ActiveThread && positiveThread)
+		removed = removed || contradicts
+		return contradicts
+	})
+	if removed {
+		decision.ReasonCodes = appendUnique(decision.ReasonCodes, "policy.audit_reason_codes_corrected")
+	}
+	return decision
+}
+
 type advertisedAgentProfile struct {
 	ID              string `json:"id"`
 	Provider        string `json:"provider"`
@@ -248,14 +273,23 @@ type advertisedAgentProfile struct {
 	ReasoningEffort string `json:"reasoning_effort"`
 }
 
-func advertisedProfiles(profiles []types.ModelProfile) []advertisedAgentProfile {
-	result := make([]advertisedAgentProfile, 0, len(profiles))
-	for _, profile := range profiles {
+func advertisedProfiles(snapshot modelrouter.Snapshot) []advertisedAgentProfile {
+	canonical := make(map[string]advertisedAgentProfile, 3)
+	for _, profile := range snapshot.Profiles {
 		if !profile.Enabled {
 			continue
 		}
 		strength := modelStrength(profile)
-		result = append(result, advertisedAgentProfile{ID: profile.ID, Provider: profile.ProviderID, Model: profile.ModelID, Strength: strength, ReasoningEffort: profile.Variant})
+		candidate := advertisedAgentProfile{ID: profile.ID, Provider: profile.ProviderID, Model: profile.ModelID, Strength: strength, ReasoningEffort: profile.Variant}
+		if _, exists := canonical[strength]; !exists || profile.ID == snapshot.DeploymentDefault {
+			canonical[strength] = candidate
+		}
+	}
+	result := make([]advertisedAgentProfile, 0, len(canonical))
+	for _, strength := range []string{"light", "standard", "strong"} {
+		if profile, exists := canonical[strength]; exists {
+			result = append(result, profile)
+		}
 	}
 	return result
 }
@@ -517,7 +551,7 @@ For an unmistakably social message that needs no factual answer, tools, action, 
 
 For every non-silent action select exactly one allowed Slack reaction. Apply these meanings consistently: eyes acknowledges newly requested work; thinking_face marks a question or decision that needs consideration; white_check_mark marks a completed, confirmed, or immediately resolved acknowledgement; warning marks a non-urgent risk or degraded condition; rotating_light marks an active urgent incident; hammer_and_wrench marks implementation, repair, or build work; speech_balloon marks a conversational explanation or discussion. Select only from the allowed list and choose the closest semantic match.
 
-Every reply, background action, or approval request other than a validated direct_reply is executed by the full agent, so those outcomes must set requires_full_agent true and select exactly one available agent profile plus its advertised strength and reasoning effort. Route brief factual answers and simple transformations to an available light/low profile. Route comparisons, bounded plans, requested tables, structured formatting, and moderate analysis to an available standard/medium profile unless the underlying work itself is unusually difficult or consequential. Route deep multi-step analysis, incident or security work, extensive multi-tool research, high-consequence decisions, and genuinely document-sized synthesis or long-form expository work that will probably need an Agent Wiki artifact to an available strong/max profile. A start_background_job action must use at least standard/medium; use strong/max when it investigates an active production incident or security concern. In proactive mode, an explicit current failure, outage, or needs-attention statement is a high-confidence actionable signal; do not stay silent merely because it is not phrased as a question. Mechanical reformatting and formatting alone never justify max. Choose the least costly profile that safely fits; do not use max merely because it is the deployment default. Reason codes are compact audit labels and must agree with the immutable booleans: never claim a direct mention when direct_mention is false, never claim an active thread when active_thread is false, and never claim either is absent when its value is true. React-only and direct-reply decisions must set requires_full_agent false and leave the agent recommendation fields empty or none as required by the schema. Never invent profile IDs, evidence IDs, emoji names, or channel facts. Restricted-awareness sources may appear only in restricted_signal_ids and may never ground final prose. Sources with provenance agent_output_unverified are prior generated prose for continuity, not factual evidence, and must not justify confidence or releasable evidence. Do not use tools and do not reveal chain-of-thought.`
+Every reply, background action, or approval request other than a validated direct_reply is executed by the full agent, so those outcomes must set requires_full_agent true and select exactly one available agent profile plus its advertised strength and reasoning effort. Route brief factual answers and simple transformations to an available light/low profile. Route comparisons, bounded plans, requested tables, structured formatting, and moderate analysis to an available standard/medium profile unless the underlying work itself is unusually difficult or consequential. Route authoring durable documents, deep multi-step analysis, tricky debugging or root-cause analysis, incident or security work, complex use of multiple tools, high-consequence decisions, and genuinely document-sized synthesis or long-form expository work that will probably need an Agent Wiki artifact to the available strong profile. The strong profile is ChatGPT 5.6 Sol at medium reasoning effort: choose it for greater model intelligence, not merely for more reasoning effort. A start_background_job action must use at least standard/medium; use strong/medium when it investigates an active production incident or security concern. In proactive mode, an explicit current failure, outage, or needs-attention statement is a high-confidence actionable signal; do not stay silent merely because it is not phrased as a question. Mechanical reformatting and formatting alone never justify the strong profile. Choose the least costly profile that safely fits; do not use the strong profile merely because it is the deployment default. Reason codes are compact audit labels and must agree with the immutable booleans: never claim a direct mention when direct_mention is false, never claim an active thread when active_thread is false, and never claim either is absent when its value is true. React-only and direct-reply decisions must set requires_full_agent false and leave the agent recommendation fields empty or none as required by the schema. Never invent profile IDs, evidence IDs, emoji names, or channel facts. Restricted-awareness sources may appear only in restricted_signal_ids and may never ground final prose. Sources with provenance agent_output_unverified are prior generated prose for continuity, not factual evidence, and must not justify confidence or releasable evidence. Do not use tools and do not reveal chain-of-thought.`
 
 type responsesRequest struct {
 	Model           string             `json:"model"`
@@ -709,7 +743,18 @@ func withSourceWritePolicyCorrections(decision types.ClassificationDecision, tar
 		}
 		return decision
 	}
-	if !decision.SourceWriteRequested && !isObviousSourceWriteRequest(target.Envelope.Text) {
+	// The provider's source_write_requested flag is advisory. Confirm it against
+	// the user's actual text before replacing a classifier result with the Linear
+	// redirect. This prevents report titles and other declarative references such
+	// as "GitHub commit volume" from being treated as mutation requests.
+	if !isObviousSourceWriteRequest(target.Envelope.Text) {
+		if decision.SourceWriteRequested {
+			decision.SourceWriteRequested = false
+			decision.ReasonCodes = append(decision.ReasonCodes, "policy.unconfirmed_source_write_ignored")
+			if decision.DirectReply == sourceWriteRedirectReply {
+				decision.DirectReply = ""
+			}
+		}
 		return decision
 	}
 	outcome := types.OutcomeReplyInChannel
@@ -772,14 +817,25 @@ func isObviousSourceWriteRequest(text string) bool {
 	explicit := containsAny(lower,
 		"edit the code", "change the code", "modify the code", "update the code", "write the code",
 		"edit the source", "change the source", "modify the source", "patch the source",
-		"commit the change", "commit this", "push the change", "push this", "open a pull request", "open a pr",
-		"merge the change", "merge this", "deploy the change", "ship the change",
+		"commit the ", "commit this", "please commit ",
+		"push the ", "push this", "please push ", "open a pull request", "open a pr",
+		"merge the ", "merge this", "please merge ",
+		"deploy the ", "deploy this", "please deploy ", "ship the ", "ship this",
 	)
 	engineeringAction := containsAny(lower, "implement ", "refactor ", "patch ", "fix the bug", "fix this bug", "fix that bug", "fix the regression", "build the feature", "add support for ", "remove support for ")
 	// Do not use the loose prefix " pr" here: it also matches product words
 	// such as "Premium" and turns ordinary plan questions into write requests.
 	sourceSurface := containsAny(lower, " code", "codebase", " source", " repo", "repository", " pull request", " branch", " commit")
-	return explicit || engineeringAction || (sourceSurface && containsAny(lower, "edit", "change", "modify", "update", "write", "fix", "add", "remove", "rename", "delete", "commit", "push", "merge", "deploy"))
+	// tos-tag is itself a repository/source surface. Match the mutation verb and
+	// name together so a normal <@tos-tag> mention is not mistaken for a write.
+	namedRepoMutation := containsAny(lower,
+		"change tos-tag", "edit tos-tag", "modify tos-tag", "update tos-tag", "write tos-tag",
+		"fix tos-tag", "patch tos-tag", "refactor tos-tag", "add to tos-tag", "remove from tos-tag",
+	)
+	// Commit, push, merge, and deploy can also be nouns in report titles. They
+	// are handled only by the explicit request phrases above; do not let one noun
+	// satisfy both the source-surface and mutation-action sides of this check.
+	return explicit || engineeringAction || namedRepoMutation || (sourceSurface && containsAny(lower, "edit", "change", "modify", "update", "write", "fix", "add", "remove", "rename", "delete"))
 }
 
 func withReadOnlyCodeAnalysisPolicyCorrections(decision types.ClassificationDecision, target Target, profiles []advertisedAgentProfile) types.ClassificationDecision {
@@ -799,12 +855,39 @@ func withReadOnlyCodeAnalysisPolicyCorrections(decision types.ClassificationDeci
 	decision.AgentModelProfile = ""
 	if isSecuritySensitiveCodeAnalysis(target.Envelope.Text) {
 		decision.AgentModelStrength = "strong"
-		decision.AgentReasoningEffort = "max"
+		decision.AgentReasoningEffort = "medium"
 		decision.ResponseIntent = strings.TrimSpace(decision.ResponseIntent + " Inspect the relevant implementation with the reviewed read-only source capability before reaching security or privacy conclusions; distinguish source evidence from unverified Slack summaries.")
 	} else {
 		decision.AgentModelStrength = "standard"
 		decision.AgentReasoningEffort = "medium"
 	}
+	return withCanonicalAgentProfile(decision, profiles)
+}
+
+func withHighIntelligenceProfileCorrections(decision types.ClassificationDecision, target Target, profiles []advertisedAgentProfile) types.ClassificationDecision {
+	if !decision.RequiresFullAgent || !outcomeNeedsAgent(decision.Outcome) {
+		return decision
+	}
+	lower := strings.ToLower(target.Envelope.Text)
+	documentAuthoringIntent := containsAny(lower,
+		"write a ", "write the ", "write comprehensive", "author a ", "author the ", "author comprehensive",
+		"create a ", "create the ", "publish a ", "publish the ", "produce a ", "produce the ",
+		"draft a ", "draft the ", "update the ", "revise the ",
+	)
+	durableDocument := containsAny(lower, "architecture reference", "architecture document", "design document", "design doc", "operator runbook", "operational runbook", "durable documentation", "comprehensive document") &&
+		documentAuthoringIntent &&
+		!containsAny(lower, "short section", "brief section", "one sentence", "single sentence", "small edit", "minor edit", "append one")
+	trickyDebugging := containsAny(lower, "root cause", "root-cause", "race condition", "deadlock", "intermittent", "heisenbug", "privacy leak", "security boundary") &&
+		containsAny(lower, "debug", "investigate", "diagnose", "trace", "find", "determine", "review")
+	complexTools := containsAny(lower, "cross-reference", "cross reference", "correlate") &&
+		containsAny(lower, "logs", "traces", "telemetry", "source", "wiki", "linear", "documentation", "web")
+	if !durableDocument && !trickyDebugging && !complexTools {
+		return decision
+	}
+	decision.AgentModelProfile = ""
+	decision.AgentModelStrength = "strong"
+	decision.AgentReasoningEffort = "medium"
+	decision.ReasonCodes = appendUnique(decision.ReasonCodes, "policy.high_intelligence_profile")
 	return withCanonicalAgentProfile(decision, profiles)
 }
 

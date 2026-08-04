@@ -27,10 +27,18 @@ Current initiative constraints:
   public/private channels where Slack confirms Tag is a member; other
   user-authorized conversations remain observe-only. DMs and group DMs are
   never auto-enabled.
+- Keep the Mongo-authoritative organization/workspace flood gate ahead of
+  context construction and every direct classifier call, including heartbeat
+  gates. Exhaustion or gate-store failure is an auditable silent drop with no
+  reaction, worker, or Slack output. Keep its default window coarse (one hour)
+  and separate from per-channel response admission.
 - Treat a direct mention as a hard participation trigger, not a hard thread
   placement. Prefer an in-channel response for a brief, self-contained answer
   unlikely to continue; use a thread for deeper, multi-step, tool-heavy, narrow,
   or likely-to-continue work. Once a tos-tag thread is active, continue there.
+  Apply per-channel cooldown only to ambient chatter; never let it discard a
+  direct mention or a human continuation in an active Tag thread. Keep hourly
+  response budgets, concurrency limits, and the organization flood gate intact.
 - Use Slack Thinking Steps for admitted full-agent thread jobs as the progress
   surface. Reuse one transient current-action task card for every native or
   reviewed tool and dynamically declared validated skill, replacing it as work
@@ -58,13 +66,17 @@ Current initiative constraints:
   resolved destination-local context so conversational follow-ups still work,
   acknowledge them without decision admission, and emit no classifier, job,
   reaction, delivery, or activity-card work for the callback itself.
+- Treat every Slack-authenticated bot, app, workflow, or assistant message the
+  same way for loop prevention: retain it only as unverified destination-local
+  context, never classify it, react to it, or start/deliver work from it. This
+  applies even when another agent mentions Tag or posts in an active Tag thread.
 - Ambient alignment interventions may use recent destination-safe public
   reports to surface a material factual conflict when doing so prevents
   confusion or a bad operational decision. Attribute reports neutrally, never
   infer channel membership from recent participation, and never use another
   private channel, DM, or group DM for an intervention.
 - Keep short and medium results native to Slack. For genuinely long,
-  expository, document-shaped work, have the strong/max worker publish Markdown
+  expository, document-shaped work, have the strong Sol-medium worker publish Markdown
   under the Agent Wiki `artifacts` namespace and return a concise Slack synopsis
   plus the exact URL from the successful write. Treat roughly 20,000 visible
   characters as a soft planning signal, never fabricate a Wiki link, and fall
@@ -122,11 +134,12 @@ Current initiative constraints:
   against `core/config`, `Makefile`, manifests, and tool catalogs instead of
   copying older status text.
 
-Current local regression baseline (2026-08-02): direct classifier and ambient
+Current local regression baseline (2026-08-04): direct classifier and ambient
 silence/social placement, native Tables/Data Tables, presentation-only
 Cards/Carousels, approval/resume, Wiki and reviewed
 source access, three overlapping jobs on the eight-worker pool, private-context
-isolation, the deterministic 48-case eval, the opt-in live OpenAI 48-case eval,
+isolation, the deterministic 49-case eval, the latest opt-in live OpenAI
+48-case baseline (before the ambient Wiki report-link regression was added),
 and full `make verify` all passed. `make eval-live` must use only natural message
 text; evaluator outcomes, placement, reactions, model, and effort remain outside
 the provider input. Treat this as development evidence, not as authorization to
@@ -163,7 +176,8 @@ Bash helpers may live beside their owning skill in `tag-agent-skills`, but they
 are not included in behavioral snapshots and are never executed directly by
 Codex App Server. To make one usable, add a separately reviewed executable-tool
 manifest, pin the helper hash and exact argv/ENV contract, bind its scope, and
-invoke it only through the job-scoped `tos_tag_tool` capability gateway.
+invoke it only through the appropriate job-scoped capability gateway. Wiki
+page CRUD uses typed `tos_tag_wiki`; other catalog tools use `tos_tag_tool`.
 
 The reviewed runtime catalog is `tool-marketplace/`. It is deliberately
 separate from the behavioral skill repository. A tool bundle contains only
@@ -197,10 +211,10 @@ The reviewed catalog currently contains:
 - `telemetryos.mongo` (`read`, disabled by default pending the human-opened
   security-key session).
 
-Wiki content obtained through `telemetryos.code` must use the reviewed inline
-body argument. Disposable workers have no shared source filename; never invent
-`/workspace/...` paths. The exact body is committed by the Wiki execution audit
-receipt.
+Wiki content obtained through `telemetryos.code` must use the typed Wiki
+`body` field. Go constructs the reviewed inline body argument. Disposable
+workers have no shared source filename; never invent `/workspace/...` paths.
+The exact action is committed by the Wiki execution audit receipt.
 
 Behavioral skill presence is not tool authority. The current inventory is 14
 skills in `base`; use the checked-in plugin manifest as the source of truth and
