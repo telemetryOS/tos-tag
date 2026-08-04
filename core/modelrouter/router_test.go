@@ -70,6 +70,23 @@ func TestChannelDefaultIsNotAnExplicitOverride(t *testing.T) {
 	}
 }
 
+func TestMissingChannelDefaultFallsBackToDeploymentDefault(t *testing.T) {
+	router, err := New(profiles(), nil, nil, "default", "policy-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, trace, err := router.Resolve(context.Background(), types.ModelRouteContext{
+		OrganizationID: "org", ChannelID: "tos-tag", ChannelDefault: "retired-profile",
+		DataClasses: []string{"internal"}, Capabilities: []string{"structured"},
+	}, Constraints{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.ProfileID != "default" || trace.MatchedRule != "deployment_default" || len(trace.Rejected) != 0 {
+		t.Fatalf("stale channel default blocked deployment fallback: %#v %#v", resolved, trace)
+	}
+}
+
 func TestCompoundRuleRequiresEveryDeclaredScope(t *testing.T) {
 	router, _ := New(profiles(), []Rule{{ID: "product-review", OrganizationID: "org", ChannelID: "product", Phase: "review", ProfileID: "deep"}}, map[string]string{"org": "default"}, "default", "policy-1")
 	resolved, _, err := router.Resolve(context.Background(), types.ModelRouteContext{OrganizationID: "org", ChannelID: "support", Phase: "review", DataClasses: []string{"internal"}, Capabilities: []string{"structured"}}, Constraints{})

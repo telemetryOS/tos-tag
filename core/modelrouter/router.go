@@ -139,7 +139,12 @@ func (r *Router) candidates(route types.ModelRouteContext) ([]string, string) {
 		}
 		matches = append(matches, match{rule.ProfileID, rank, rule.Priority, rule.ID})
 	}
-	if route.ChannelDefault != "" {
+	// Channel defaults are operator-managed durable configuration and may outlive
+	// a profile catalog change. Treat a missing profile as stale configuration,
+	// not as an explicit override that blocks the deployment fallback. Valid but
+	// disabled/ineligible profiles still fail closed through the normal eligibility
+	// checks below.
+	if _, exists := r.profiles[route.ChannelDefault]; route.ChannelDefault != "" && exists {
 		matches = append(matches, match{profile: route.ChannelDefault, rank: 4, id: "channel_default"})
 	}
 	sort.Slice(matches, func(i, j int) bool {
