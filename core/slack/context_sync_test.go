@@ -198,14 +198,15 @@ func TestContextSyncCatchUpIncludesAuthorizedDirectMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	direct := slackapi.Channel{GroupConversation: slackapi.GroupConversation{Conversation: slackapi.Conversation{ID: "D-direct", IsIM: true, User: "U-human"}}}
-	api := &fakeContextSyncAPI{
+	userAPI := &fakeContextSyncAPI{}
+	botAPI := &fakeContextSyncAPI{
 		botChannels: []slackapi.Channel{direct},
 		history:     map[string][]slackapi.Message{"D-direct": {{Msg: slackapi.Msg{Timestamp: messageTS, User: "U-human", Text: "can you catch this up?"}}}},
 	}
 	syncer, err := newContextSyncerWithAPIs(ContextSyncOptions{
 		OrganizationID: "org", TeamID: "team", BotUserID: "U-tag", Lookback: 24 * time.Hour, Timeout: time.Second,
 		MaxChannels: 10, MaxMessages: 10, MessagesPerChannel: 10, StateStore: state,
-	}, api, api)
+	}, userAPI, botAPI)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,8 +224,41 @@ func TestContextSyncCatchUpIncludesAuthorizedDirectMessages(t *testing.T) {
 	if len(recovered) != 1 || recovered[0].ChannelKind != types.SlackChannelKindDirectMessage || recovered[0].IsMention {
 		t.Fatalf("recovered direct message = %#v", recovered)
 	}
-	if len(api.historyCalls) != 1 || api.historyCalls[0] != "D-direct" {
-		t.Fatalf("direct-message history calls = %v", api.historyCalls)
+	if len(botAPI.historyCalls) != 1 || botAPI.historyCalls[0] != "D-direct" || len(userAPI.historyCalls) != 0 {
+		t.Fatalf("direct-message history calls: bot=%v user=%v", botAPI.historyCalls, userAPI.historyCalls)
+	}
+}
+
+func TestContextSyncBootstrapUsesBotTokenForBotOnlyDirectMessage(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	messageTS := fmt.Sprintf("%d.%06d", now.Add(-time.Minute).Unix(), now.Add(-time.Minute).Nanosecond()/1_000)
+	direct := slackapi.Channel{GroupConversation: slackapi.GroupConversation{Conversation: slackapi.Conversation{ID: "D-bot", IsIM: true, User: "U-human"}}}
+	userAPI := &fakeContextSyncAPI{historyErrors: map[string]error{"D-bot": slackapi.SlackErrorResponse{Err: "channel_not_found"}}}
+	botAPI := &fakeContextSyncAPI{
+		botChannels: []slackapi.Channel{direct},
+		history:     map[string][]slackapi.Message{"D-bot": {{Msg: slackapi.Msg{Timestamp: messageTS, User: "U-human", Text: "bootstrap context"}}}},
+	}
+	syncer, err := newContextSyncerWithAPIs(ContextSyncOptions{
+		OrganizationID: "org", TeamID: "team", BotUserID: "U-tag", Lookback: 24 * time.Hour, Timeout: time.Second,
+		MaxChannels: 10, MaxMessages: 10, MessagesPerChannel: 10, StateStore: NewMemoryContextSyncStateStore(),
+	}, userAPI, botAPI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := syncer.Discover(context.Background(), func(context.Context, types.SlackContextChannel) (bool, error) { return true, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var imported []types.SlackEnvelope
+	stats, err := syncer.Backfill(context.Background(), run, func(_ context.Context, envelope types.SlackEnvelope) error {
+		imported = append(imported, envelope)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.MessagesImported != 1 || len(imported) != 1 || imported[0].ChannelID != "D-bot" || len(botAPI.historyCalls) != 1 || len(userAPI.historyCalls) != 0 {
+		t.Fatalf("bot-DM bootstrap: stats=%#v imported=%#v bot=%v user=%v", stats, imported, botAPI.historyCalls, userAPI.historyCalls)
 	}
 }
 

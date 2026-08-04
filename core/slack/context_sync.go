@@ -56,6 +56,7 @@ type ContextSyncRun struct {
 	stats           ContextSyncStats
 	channels        []slackapi.Channel
 	catchUpChannels []slackapi.Channel
+	botMembership   map[string]bool
 	cutoff          time.Time
 	syncThrough     time.Time
 }
@@ -70,6 +71,7 @@ type contextSyncAPI interface {
 }
 
 type botContextAPI interface {
+	contextSyncAPI
 	GetBotConversationsForUserContext(context.Context, *slackapi.GetConversationsForUserParameters) ([]slackapi.Channel, string, error)
 }
 
@@ -79,6 +81,18 @@ type slackBotContextClient struct {
 
 func (c slackBotContextClient) GetBotConversationsForUserContext(ctx context.Context, params *slackapi.GetConversationsForUserParameters) ([]slackapi.Channel, string, error) {
 	return c.client.GetConversationsForUserContext(ctx, params)
+}
+
+func (c slackBotContextClient) GetConversationsForUserContext(ctx context.Context, params *slackapi.GetConversationsForUserParameters) ([]slackapi.Channel, string, error) {
+	return c.client.GetConversationsForUserContext(ctx, params)
+}
+
+func (c slackBotContextClient) GetConversationHistoryContext(ctx context.Context, params *slackapi.GetConversationHistoryParameters) (*slackapi.GetConversationHistoryResponse, error) {
+	return c.client.GetConversationHistoryContext(ctx, params)
+}
+
+func (c slackBotContextClient) GetConversationRepliesContext(ctx context.Context, params *slackapi.GetConversationRepliesParameters) ([]slackapi.Message, bool, string, error) {
+	return c.client.GetConversationRepliesContext(ctx, params)
 }
 
 type contextChannelPage struct {
@@ -211,6 +225,7 @@ func (s *ContextSyncer) Discover(parent context.Context, register ContextChannel
 	}
 	run.channels = registeredChannels
 	run.catchUpChannels = catchUpChannels
+	run.botMembership = botMembership
 	states, err := s.options.StateStore.List(ctx, s.options.OrganizationID, s.options.TeamID)
 	if err != nil {
 		return run, err
@@ -285,7 +300,8 @@ func (s *ContextSyncer) CatchUp(parent context.Context, run *ContextSyncRun, rec
 		if after.Before(run.cutoff) {
 			after = run.cutoff
 		}
-		threadRecovered, threadsComplete, err := s.catchUpActiveThreads(ctx, channel, state, after, target, budget, recoverMessage)
+		useBotAPI := run.botMembership[channel.ID] && channel.IsIM
+		threadRecovered, threadsComplete, err := s.catchUpActiveThreads(ctx, channel, state, after, target, budget, useBotAPI, recoverMessage)
 		if err != nil {
 			return stats, fmt.Errorf("catch up active Slack threads in channel %s: %w", channel.ID, err)
 		}
@@ -296,7 +312,7 @@ func (s *ContextSyncer) CatchUp(parent context.Context, run *ContextSyncRun, rec
 			stats.ChannelsDeferred++
 			continue
 		}
-		recovered, complete, checkpoint, err := s.backfillChannel(ctx, channel, after, latest, budget, false, recoverMessage)
+		recovered, complete, checkpoint, err := s.backfillChannel(ctx, channel, after, latest, budget, false, useBotAPI, recoverMessage)
 		if err != nil {
 			if code, recoverable := recoverableContextChannelError(err); recoverable {
 				stats.ChannelsSkipped++
@@ -342,7 +358,7 @@ func (s *ContextSyncer) CatchUp(parent context.Context, run *ContextSyncRun, rec
 	return stats, nil
 }
 
-func (s *ContextSyncer) catchUpActiveThreads(ctx context.Context, channel slackapi.Channel, state models.SlackContextSyncState, after, through time.Time, budget int, recoverMessage ContextMessageHandler) (int, bool, error) {
+func (s *ContextSyncer) catchUpActiveThreads(ctx context.Context, channel slackapi.Channel, state models.SlackContextSyncState, after, through time.Time, budget int, useBotAPI bool, recoverMessage ContextMessageHandler) (int, bool, error) {
 	if s.options.ActiveThreadRoots == nil || budget <= 0 {
 		return 0, true, nil
 	}
@@ -366,7 +382,7 @@ func (s *ContextSyncer) catchUpActiveThreads(ctx context.Context, channel slacka
 		if imported >= budget {
 			return imported, false, nil
 		}
-		recovered, complete, checkpoint, threadErr := s.backfillActiveThread(ctx, channel, rootThreadTS, threadAfter, through, budget-imported, recoverMessage)
+		recovered, complete, checkpoint, threadErr := s.backfillActiveThread(ctx, channel, rootThreadTS, threadAfter, through, budget-imported, useBotAPI, recoverMessage)
 		if threadErr != nil {
 			if _, recoverable := recoverableContextThreadError(threadErr); recoverable {
 				if err := s.options.StateStore.CheckpointThreadCatchUp(ctx, s.options.OrganizationID, s.options.TeamID, channel.ID, state.CatchUpThrough, rootThreadTS, through); err != nil {
@@ -392,7 +408,7 @@ func (s *ContextSyncer) catchUpActiveThreads(ctx context.Context, channel slacka
 	return imported, true, nil
 }
 
-func (s *ContextSyncer) backfillActiveThread(ctx context.Context, channel slackapi.Channel, rootThreadTS string, after, through time.Time, budget int, recoverMessage ContextMessageHandler) (int, bool, time.Time, error) {
+func (s *ContextSyncer) backfillActiveThread(ctx context.Context, channel slackapi.Channel, rootThreadTS string, after, through time.Time, budget int, useBotAPI bool, recoverMessage ContextMessageHandler) (int, bool, time.Time, error) {
 	if budget <= 0 {
 		return 0, false, time.Time{}, nil
 	}
@@ -400,10 +416,14 @@ func (s *ContextSyncer) backfillActiveThread(ctx context.Context, channel slacka
 	imported := 0
 	latestImported := time.Time{}
 	cursor := ""
+	historyAPI := s.api
+	if useBotAPI {
+		historyAPI = s.botAPI
+	}
 	for imported < budget {
 		pageLimit := min(contextHistoryPageSize, budget-imported+1)
 		page, err := withSlackRateLimitRetry(ctx, s, "conversations.replies", func() (contextReplyPage, error) {
-			replies, hasMore, next, callErr := s.api.GetConversationRepliesContext(ctx, &slackapi.GetConversationRepliesParameters{
+			replies, hasMore, next, callErr := historyAPI.GetConversationRepliesContext(ctx, &slackapi.GetConversationRepliesParameters{
 				ChannelID: channel.ID, Timestamp: rootThreadTS, Cursor: cursor, Limit: pageLimit,
 				Oldest: slackHistoryTimestamp(after), Latest: slackHistoryTimestamp(through),
 			})
@@ -509,7 +529,7 @@ func (s *ContextSyncer) Backfill(parent context.Context, run *ContextSyncRun, im
 		channelsLeft := len(run.channels) - index
 		fairShare := (remaining + channelsLeft - 1) / channelsLeft
 		budget := min(s.options.MessagesPerChannel, fairShare)
-		imported, _, _, err := s.backfillChannel(ctx, channel, run.cutoff, run.syncThrough, budget, true, importMessage)
+		imported, _, _, err := s.backfillChannel(ctx, channel, run.cutoff, run.syncThrough, budget, true, run.botMembership[channel.ID] && channel.IsIM, importMessage)
 		if err != nil {
 			if code, recoverable := recoverableContextChannelError(err); recoverable {
 				stats.ChannelsSkipped++
@@ -584,7 +604,7 @@ func (s *ContextSyncer) listChannels(ctx context.Context) ([]slackapi.Channel, e
 	}
 }
 
-func (s *ContextSyncer) backfillChannel(ctx context.Context, channel slackapi.Channel, after, through time.Time, budget int, includeThreads bool, importMessage ContextMessageHandler) (int, bool, time.Time, error) {
+func (s *ContextSyncer) backfillChannel(ctx context.Context, channel slackapi.Channel, after, through time.Time, budget int, includeThreads, useBotAPI bool, importMessage ContextMessageHandler) (int, bool, time.Time, error) {
 	if budget <= 0 {
 		return 0, false, time.Time{}, nil
 	}
@@ -599,11 +619,15 @@ func (s *ContextSyncer) backfillChannel(ctx context.Context, channel slackapi.Ch
 	imported := 0
 	oldestRoot := time.Time{}
 	cursor := ""
+	historyAPI := s.api
+	if useBotAPI {
+		historyAPI = s.botAPI
+	}
 	rootsComplete := false
 	for imported < rootBudget {
 		pageLimit := min(contextHistoryPageSize, rootBudget-imported)
 		page, err := withSlackRateLimitRetry(ctx, s, "conversations.history", func() (*slackapi.GetConversationHistoryResponse, error) {
-			return s.api.GetConversationHistoryContext(ctx, &slackapi.GetConversationHistoryParameters{
+			return historyAPI.GetConversationHistoryContext(ctx, &slackapi.GetConversationHistoryParameters{
 				ChannelID: channel.ID, Cursor: cursor, Limit: pageLimit, Oldest: oldest, Latest: latest,
 			})
 		})
@@ -654,7 +678,7 @@ func (s *ContextSyncer) backfillChannel(ctx context.Context, channel slackapi.Ch
 		for imported < budget {
 			pageLimit := min(contextHistoryPageSize, budget-imported+1)
 			page, err := withSlackRateLimitRetry(ctx, s, "conversations.replies", func() (contextReplyPage, error) {
-				replies, hasMore, next, callErr := s.api.GetConversationRepliesContext(ctx, &slackapi.GetConversationRepliesParameters{
+				replies, hasMore, next, callErr := historyAPI.GetConversationRepliesContext(ctx, &slackapi.GetConversationRepliesParameters{
 					ChannelID: channel.ID, Timestamp: root.Timestamp, Cursor: replyCursor,
 					Limit: pageLimit, Oldest: oldest, Latest: latest,
 				})

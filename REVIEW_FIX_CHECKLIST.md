@@ -168,6 +168,7 @@ query fix), plus `F12`, `F14`, `F17`, `F27`, `F29`, `F33`, `F37`, `F42`,
 - [x] Normalize safe model-emitted GitHub-style links instead of failing an otherwise valid Slack result.
 - [x] Extend an interrupted catch-up to the latest startup boundary so restart loops cannot skip newer offline mentions.
 - [x] Limit actionable DM catch-up to bot-visible conversations and clear stale user-only DM cursors.
+- [x] Read bot-owned DM bootstrap and catch-up history with the bot token instead of the user token.
 - [x] Deterministically route multi-issue operational synthesis to a strong, evidence-grounded thread.
 - [x] Pass focused worker, pipeline, server, and deployment tests.
 - [ ] Commit, push, deploy, and restart the corrected Arch build.
