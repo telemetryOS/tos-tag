@@ -1,6 +1,6 @@
 # tos-tag implementation status
 
-Date: 2026-08-04
+Date: 2026-08-05
 Version: `0.1.0-dev`
 Scope: development Slack control plane, membership-managed assist with live
 regression traffic constrained to `#tos-tag`
@@ -8,9 +8,13 @@ regression traffic constrained to `#tos-tag`
 ## Current verdict
 
 The direct classifier, privacy-filtered context, durable jobs, Codex App Server
-worker, typed Slack output, Slack-native Thinking Steps, reviewed tools, Slack-native approval/resume,
+worker, typed Slack output, native Slack agent thread status, reviewed tools, Slack-native approval/resume,
 channel directives, source-linked durable memory, routines, triggers, logging,
 audit, and persistent container workspace are implemented.
+
+The native-status-only progress contract is covered by deterministic local
+tests. Live Slack validation of this replacement has not yet been rerun; the
+Thinking Steps evidence below is retained and labeled as historical.
 
 The full-agent runtime is now exclusively Codex App Server. The previous agent
 runtime, its adapter, provider proxy, dependency, config variables, container
@@ -93,19 +97,27 @@ commands, tests, and active documentation have been removed.
   used capability categories; classifier-only
   replies remain unadorned.
 - Durable delivery reconciliation and special-mention rejection.
-- Immediate classifier reactions plus grace-delayed Slack Thinking Steps for
-  full-agent thread jobs that remain active, with a best-effort transient native
-  thread status, plan-mode display, durable stream timestamps,
-  one rotating current-action card for validated skills and every
-  native or reviewed tool call, same-message finalization, and ordinary-delivery
-  fallback. Intentional reaction-only/direct classifier outcomes remain outside
-  the stream path.
+- Immediate classifier reactions plus native assistant thread status for every
+  full-agent thread job. Generic lifecycle messages rotate while the worker
+  starts, every native or reviewed tool call receives a safe tool-specific
+  update, long-running work refreshes the current status, and ordinary durable
+  delivery clears it. New work creates no plan-mode stream, task-card pills, or
+  progress-message timestamp. Intentional reaction-only/direct classifier
+  outcomes remain outside the status path.
+- One best-effort, control-plane-owned `assistant.threads.setTitle` update for
+  each newly created one-to-one DM full-agent session, with bounded sanitization,
+  likely-secret fallback, DM-only transport validation, duplicate suppression,
+  content-free logging, and cosmetic failure behavior.
 - Slack-native exact-action approval and fresh-worker resume.
 - `/tag-directive` Slack modal available to every authenticated workspace user
   for an enrolled, enabled channel, plus management-UI creation, revisioned
   Mongo persistence, and audit.
 - Read-only `/tag-status` command with an ephemeral native Block Kit table for
   mode, active directive, availability, bot membership, and channel scope.
+- `/tag-automations` ephemeral channel list and audited Slack modal editor for
+  direct routines and classifier-gated schedules. Repository identity,
+  scheduler advancement, and job idempotency are channel-scoped; startup
+  backfills legacy scope from sessions and disables unresolved rows.
 - Standard five-field cron routines and classifier-gated heartbeat trigger
   subscriptions with explicit IANA timezones, legacy interval compatibility,
   and a combined management Automation view/editor.
@@ -115,6 +127,12 @@ commands, tests, and active documentation have been removed.
 - Reviewed Linear, Wiki, OTel, privacy-filtered Analytics, DLA, optional Mongo,
   and bounded source-code helper bundles with encrypted environment bindings
   where required.
+- Reviewed `telemetryos.linear/intake` authority for explicitly requested
+  bug/feature workflows: creation, evidence comments, feature normalization,
+  and the immediate suitability follow-up execute without a redundant approval,
+  while generic Linear writes remain exact-action approval-gated. Create and
+  update content verification uses a fresh Linear issue read-back with narrow
+  newline normalization instead of trusting the mutation payload.
 - Wiki inline-body publication for source-derived documents, with the complete
   body committed in the audit receipt. Wiki capability is page CRUD only:
   read/write authoring is trusted without per-action approval, recoverable page
@@ -133,6 +151,10 @@ commands, tests, and active documentation have been removed.
 - The injected `telemetryos-documentation` skill reads the live public
   `llms.txt` index for discovery, then fetches an exact indexed guide or API
   reference page and supplies its human documentation link.
+- Indefinite normalized Slack-message persistence with no message TTL; startup
+  removes the retired `message_expiry` index, while a separately configurable
+  30-day-default context lookback bounds prompt inclusion and source-valid
+  derived state.
 - Correlated redacted file logging, usage records, audit chains, TTL cleanup,
   and an activity-first management UI. Its organization-scoped SSE feed pairs
   bounded public Slack excerpts with classifier outcomes and shows payload-free
@@ -157,7 +179,7 @@ commands, tests, and active documentation have been removed.
 Current migration evidence:
 
 - full verification components: pass, including all Go packages, the race
-  detector, vet, security scans, and the expanded `54/54` deterministic
+  detector, vet, security scans, and the expanded `55/55` deterministic
   behavioral eval;
 - latest opt-in direct OpenAI classifier baseline: `48/48`, with `38` real provider calls
   and approximately `1.84s` mean case
@@ -208,7 +230,7 @@ Current migration evidence:
   `Appreciate the clear matrix, Tag!` in `4.00s`, selected a
   `white_check_mark` reaction and direct `You're welcome!` thread reply, and no
   Codex job was enqueued;
-- live Slack Thinking Steps finalization: pass. A natural product follow-up in
+- historical live Slack Thinking Steps finalization before native-status-only progress: pass. A natural product follow-up in
   `#tos-tag` opened a timeline in `480ms`, showed safe Agent Wiki milestones,
   and finalized the validated Block Kit answer in the same Slack message
   (`1785706647.008769`) without a fallback post. The classifier took `2.61s`;
@@ -221,8 +243,8 @@ Current migration evidence:
 - previous user-authorized context sync: `378` conversations discovered, `527`
   bounded messages imported, and `1` inaccessible conversation skipped without
   failing the sync. The current policy additionally reconciles bot membership:
-  joined public/private channels derive assist, other conversations stay
-  observe-only, and private/DM context remains destination-local;
+  joined public/private channels and one-to-one DMs derive assist, other
+  conversations stay observe-only, and private/DM context remains destination-local;
 - 2026-08-03 offline direct-message recovery: pass. With the prior `#tos-tag`
   watermark at 03:25 UTC, startup recovered the human `@tag` question posted at
   15:49 UTC while the runtime was unavailable, classified it, ran one max-effort
@@ -238,11 +260,11 @@ Current migration evidence:
   record or provider call;
 - 2026-08-03 live acknowledgement and rendering matrix: pass after one fix.
   Natural `#tos-tag` probes covered classifier-only social reply, irrelevant
-  silence, source-write redirection, light/low in-channel work, standard/medium
+  silence, the then-current source-write redirection, light/low in-channel work, standard/medium
   product retrieval, native table delivery, destination-local privacy refusal,
   reaction-only acknowledgement, and the then-current strong/max operational routing. The
   observed emoji set was `white_check_mark`, `speech_balloon`, `thinking_face`,
-  `warning`, `rotating_light`, and `eyes`. Threaded work opened Thinking Steps
+  `warning`, `rotating_light`, and `eyes`. Under the prior progress implementation, threaded work opened Thinking Steps
   roughly one second after classification. A malformed product-comparison table first
   failed with `table_row_shape`; model-boundary row normalization was added,
   and the natural retry completed as `mrkdwn_text + table + mrkdwn_text` with

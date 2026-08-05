@@ -138,7 +138,7 @@ func (j *Janitor) sweep(ctx context.Context, now time.Time) (int64, int64, error
 			return derived, 0, err
 		}
 	}
-	collections := []string{models.CollectionObservations, models.CollectionMessages, models.CollectionContextPacks, models.CollectionSituationFacts, models.CollectionRestrictedSignals, models.CollectionSummaries, models.CollectionJobs, models.CollectionDeliveries}
+	collections := []string{models.CollectionObservations, models.CollectionContextPacks, models.CollectionSituationFacts, models.CollectionRestrictedSignals, models.CollectionSummaries, models.CollectionJobs, models.CollectionDeliveries}
 	var sources int64
 	for _, collection := range collections {
 		result, err := j.db.Collection(collection).DeleteMany(ctx, bson.M{"expires_at": bson.M{"$lte": now}})

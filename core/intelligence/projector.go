@@ -33,11 +33,18 @@ type Projector interface {
 }
 
 type Mongo struct {
-	db  *database.Database
-	now func() time.Time
+	db              *database.Database
+	contextLookback time.Duration
+	now             func() time.Time
 }
 
-func NewMongo(db *database.Database) *Mongo { return &Mongo{db: db, now: time.Now} }
+func NewMongo(db *database.Database, contextLookback ...time.Duration) *Mongo {
+	lookback := 30 * 24 * time.Hour
+	if len(contextLookback) > 0 && contextLookback[0] > 0 {
+		lookback = contextLookback[0]
+	}
+	return &Mongo{db: db, contextLookback: lookback, now: time.Now}
+}
 
 // Recall returns only destination-safe organization facts. Restricted signals
 // intentionally have no equivalent recall path outside their source channel.
@@ -111,25 +118,26 @@ func (p *Mongo) Project(ctx context.Context, observation models.Observation) (Re
 		return p.advance(ctx, observation, nil)
 	}
 	var message models.ChannelMessage
-	err = p.db.Collection(models.CollectionMessages).FindOne(ctx, bson.M{"organization_id": observation.OrganizationID, "team_id": observation.TeamID, "channel_id": observation.ChannelID, "message_ts": messageTS, "deleted": false, "expires_at": bson.M{"$gt": p.now().UTC()}}).Decode(&message)
+	err = p.db.Collection(models.CollectionMessages).FindOne(ctx, bson.M{"organization_id": observation.OrganizationID, "team_id": observation.TeamID, "channel_id": observation.ChannelID, "message_ts": messageTS, "deleted": false}).Decode(&message)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return p.advance(ctx, observation, nil)
 	}
 	if err != nil {
 		return Result{}, err
 	}
-	if !isIncident(message.Text) {
+	now := p.now().UTC()
+	sourceExpiresAt := message.OriginalAt.Add(p.contextLookback)
+	if !sourceExpiresAt.After(now) || !isIncident(message.Text) {
 		return p.advance(ctx, observation, nil)
 	}
-	now := p.now().UTC()
 	var derivedID string
 	if message.Restricted {
-		doc := models.RestrictedSignal{PublicID: types.NewID("signal"), OrganizationID: observation.OrganizationID, Kind: "active_incident", Active: true, SourceID: observation.PublicID, ChannelID: observation.ChannelID, MessageTS: messageTS, CreatedAt: now, ExpiresAt: message.ExpiresAt}
+		doc := models.RestrictedSignal{PublicID: types.NewID("signal"), OrganizationID: observation.OrganizationID, Kind: "active_incident", Active: true, SourceID: observation.PublicID, ChannelID: observation.ChannelID, MessageTS: messageTS, CreatedAt: now, ExpiresAt: sourceExpiresAt}
 		var saved models.RestrictedSignal
-		err = p.db.Collection(models.CollectionRestrictedSignals).FindOneAndUpdate(ctx, bson.M{"organization_id": observation.OrganizationID, "channel_id": observation.ChannelID, "message_ts": messageTS, "kind": doc.Kind}, bson.M{"$set": bson.M{"active": true, "source_id": observation.PublicID, "expires_at": message.ExpiresAt}, "$setOnInsert": bson.M{"public_id": doc.PublicID, "organization_id": doc.OrganizationID, "kind": doc.Kind, "channel_id": doc.ChannelID, "message_ts": doc.MessageTS, "created_at": doc.CreatedAt}}, options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)).Decode(&saved)
+		err = p.db.Collection(models.CollectionRestrictedSignals).FindOneAndUpdate(ctx, bson.M{"organization_id": observation.OrganizationID, "channel_id": observation.ChannelID, "message_ts": messageTS, "kind": doc.Kind}, bson.M{"$set": bson.M{"active": true, "source_id": observation.PublicID, "expires_at": sourceExpiresAt}, "$setOnInsert": bson.M{"public_id": doc.PublicID, "organization_id": doc.OrganizationID, "kind": doc.Kind, "channel_id": doc.ChannelID, "message_ts": doc.MessageTS, "created_at": doc.CreatedAt}}, options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)).Decode(&saved)
 		derivedID = saved.PublicID
 	} else {
-		doc := models.SituationFact{PublicID: types.NewID("fact"), OrganizationID: observation.OrganizationID, Kind: "active_incident", Status: "active", Summary: safeSummary(message.Text), SourceIDs: []string{observation.PublicID}, ChannelID: observation.ChannelID, MessageTS: messageTS, SourceExpiresAt: message.ExpiresAt, UpdatedAt: now, ExpiresAt: message.ExpiresAt}
+		doc := models.SituationFact{PublicID: types.NewID("fact"), OrganizationID: observation.OrganizationID, Kind: "active_incident", Status: "active", Summary: safeSummary(message.Text), SourceIDs: []string{observation.PublicID}, ChannelID: observation.ChannelID, MessageTS: messageTS, SourceExpiresAt: sourceExpiresAt, UpdatedAt: now, ExpiresAt: sourceExpiresAt}
 		var saved models.SituationFact
 		err = p.db.Collection(models.CollectionSituationFacts).FindOneAndUpdate(ctx, bson.M{"organization_id": observation.OrganizationID, "channel_id": observation.ChannelID, "message_ts": messageTS, "kind": doc.Kind}, bson.M{"$set": doc}, options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)).Decode(&saved)
 		derivedID = saved.PublicID
@@ -137,7 +145,7 @@ func (p *Mongo) Project(ctx context.Context, observation models.Observation) (Re
 	if err != nil {
 		return Result{}, err
 	}
-	link := models.SourceDerivation{OrganizationID: observation.OrganizationID, SourceID: observation.PublicID, DerivedCollection: models.CollectionSituationFacts, DerivedID: derivedID, CreatedAt: now, ExpiresAt: message.ExpiresAt}
+	link := models.SourceDerivation{OrganizationID: observation.OrganizationID, SourceID: observation.PublicID, DerivedCollection: models.CollectionSituationFacts, DerivedID: derivedID, CreatedAt: now, ExpiresAt: sourceExpiresAt}
 	if message.Restricted {
 		link.DerivedCollection = models.CollectionRestrictedSignals
 	}

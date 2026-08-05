@@ -31,12 +31,8 @@ func (s *MongoStore) PutContext(ctx context.Context, subscription Subscription) 
 	after := options.After
 	var saved Subscription
 	err = s.db.Collection(models.CollectionEventSubscriptions).FindOneAndUpdate(ctx,
-		bson.M{"organization_id": subscription.OrganizationID, "public_id": subscription.ID, "$or": bson.A{
-			bson.M{"workspace_id": subscription.WorkspaceID, "channel_id": subscription.ChannelID},
-			bson.M{"workspace_id": bson.M{"$exists": false}, "channel_id": bson.M{"$exists": false}},
-		}},
+		subscriptionScope(subscription.OrganizationID, subscription.WorkspaceID, subscription.ChannelID, subscription.ID),
 		bson.M{"$set": bson.M{
-			"workspace_id": subscription.WorkspaceID, "channel_id": subscription.ChannelID,
 			"root_thread_ts": subscription.RootThreadTS, "session_id": subscription.SessionID,
 			"generation": subscription.Generation, "owner_id": subscription.OwnerID,
 			"kind": subscription.Kind, "instruction": subscription.Instruction,
@@ -44,7 +40,7 @@ func (s *MongoStore) PutContext(ctx context.Context, subscription Subscription) 
 			"interval": subscription.Interval, "next_run": subscription.NextRun,
 			"classifier_gate": subscription.ClassifierGate, "min_confidence": subscription.MinConfidence,
 			"enabled": subscription.Enabled, "updated_at": now,
-		}, "$setOnInsert": bson.M{"organization_id": subscription.OrganizationID, "public_id": subscription.ID, "created_at": now}, "$inc": bson.M{"version": 1}},
+		}, "$setOnInsert": bson.M{"organization_id": subscription.OrganizationID, "workspace_id": subscription.WorkspaceID, "channel_id": subscription.ChannelID, "public_id": subscription.ID, "created_at": now}, "$inc": bson.M{"version": 1}},
 		options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(after)).Decode(&saved)
 	if mongo.IsDuplicateKeyError(err) {
 		return Subscription{}, ErrScopeConflict
@@ -52,13 +48,42 @@ func (s *MongoStore) PutContext(ctx context.Context, subscription Subscription) 
 	return saved, err
 }
 
-func (s *MongoStore) GetContext(ctx context.Context, organizationID, id string) (Subscription, error) {
+func (s *MongoStore) UpdateContext(ctx context.Context, subscription Subscription, expectedVersion int64) (Subscription, error) {
+	now := s.now().UTC()
+	var err error
+	subscription, err = Normalize(subscription, now)
+	if err != nil {
+		return Subscription{}, err
+	}
+	filter := subscriptionScope(subscription.OrganizationID, subscription.WorkspaceID, subscription.ChannelID, subscription.ID)
+	filter["version"] = expectedVersion
+	var saved Subscription
+	err = s.db.Collection(models.CollectionEventSubscriptions).FindOneAndUpdate(ctx, filter, bson.M{"$set": bson.M{
+		"root_thread_ts": subscription.RootThreadTS, "session_id": subscription.SessionID,
+		"generation": subscription.Generation, "owner_id": subscription.OwnerID,
+		"kind": subscription.Kind, "instruction": subscription.Instruction,
+		"cron": subscription.Cron, "timezone": subscription.Timezone,
+		"interval": subscription.Interval, "next_run": subscription.NextRun,
+		"classifier_gate": subscription.ClassifierGate, "min_confidence": subscription.MinConfidence,
+		"enabled": subscription.Enabled, "updated_at": now,
+	}, "$inc": bson.M{"version": 1}}, options.FindOneAndUpdate().SetReturnDocument(options.After)).Decode(&saved)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return Subscription{}, ErrUpdateConflict
+	}
+	return saved, err
+}
+
+func (s *MongoStore) GetContext(ctx context.Context, organizationID, workspaceID, channelID, id string) (Subscription, error) {
 	var value Subscription
-	err := s.db.Collection(models.CollectionEventSubscriptions).FindOne(ctx, bson.M{"organization_id": organizationID, "public_id": id}).Decode(&value)
+	err := s.db.Collection(models.CollectionEventSubscriptions).FindOne(ctx, subscriptionScope(organizationID, workspaceID, channelID, id)).Decode(&value)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return Subscription{}, errors.New("trigger subscription not found")
 	}
 	return value, err
+}
+
+func (s *MongoStore) ListChannel(ctx context.Context, organizationID, workspaceID, channelID string) ([]Subscription, error) {
+	return s.find(ctx, bson.M{"organization_id": organizationID, "workspace_id": workspaceID, "channel_id": channelID}, 0)
 }
 
 func (s *MongoStore) List(ctx context.Context, organizationID string) ([]Subscription, error) {
@@ -87,8 +112,8 @@ func (s *MongoStore) find(ctx context.Context, filter bson.M, limit int) ([]Subs
 	return values, err
 }
 
-func (s *MongoStore) AdvanceContext(ctx context.Context, organizationID, id string, from time.Time) error {
-	current, err := s.GetContext(ctx, organizationID, id)
+func (s *MongoStore) AdvanceContext(ctx context.Context, organizationID, workspaceID, channelID, id string, from time.Time) error {
+	current, err := s.GetContext(ctx, organizationID, workspaceID, channelID, id)
 	if err != nil {
 		return err
 	}
@@ -97,13 +122,19 @@ func (s *MongoStore) AdvanceContext(ctx context.Context, organizationID, id stri
 		return err
 	}
 	next := spec.Advance(current.NextRun, from)
+	filter := subscriptionScope(organizationID, workspaceID, channelID, id)
+	filter["version"] = current.Version
 	result, err := s.db.Collection(models.CollectionEventSubscriptions).UpdateOne(ctx,
-		bson.M{"organization_id": organizationID, "public_id": id, "version": current.Version},
+		filter,
 		bson.M{"$set": bson.M{"next_run": next, "updated_at": s.now().UTC()}, "$inc": bson.M{"version": 1}})
 	if err == nil && result.ModifiedCount != 1 {
 		return errors.New("trigger subscription advance conflict")
 	}
 	return err
+}
+
+func subscriptionScope(organizationID, workspaceID, channelID, id string) bson.M {
+	return bson.M{"organization_id": organizationID, "workspace_id": workspaceID, "channel_id": channelID, "public_id": id}
 }
 
 var _ Repository = (*MongoStore)(nil)

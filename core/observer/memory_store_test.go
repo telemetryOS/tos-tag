@@ -68,7 +68,7 @@ func TestOutputReservationIsIdempotentForOneAttemptAndExclusiveAcrossAttempts(t 
 	}
 }
 
-func TestEditAndDeleteDoNotRenewExpiry(t *testing.T) {
+func TestEditAndDeleteKeepMessageDurable(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	clock := now
 	store := NewMemoryStore(30*24*time.Hour, func() time.Time { return clock })
@@ -91,8 +91,8 @@ func TestEditAndDeleteDoNotRenewExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Text != "updated" || !updated.ExpiresAt.Equal(original.ExpiresAt) {
-		t.Fatalf("edit renewed or failed projection: original=%#v updated=%#v", original, updated)
+	if updated.Text != "updated" || !original.ExpiresAt.IsZero() || !updated.ExpiresAt.IsZero() {
+		t.Fatalf("edit added expiry or failed projection: original=%#v updated=%#v", original, updated)
 	}
 
 	deleteEvent := edit
@@ -105,7 +105,7 @@ func TestEditAndDeleteDoNotRenewExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !deleted.Deleted || deleted.Text != "" || !deleted.ExpiresAt.Equal(original.ExpiresAt) {
+	if !deleted.Deleted || deleted.Text != "" || !deleted.ExpiresAt.IsZero() {
 		t.Fatalf("bad deleted projection: %#v", deleted)
 	}
 }
@@ -139,7 +139,7 @@ func TestRedeliveredOriginalCannotUndoDelete(t *testing.T) {
 	}
 }
 
-func TestRecentEnforcesExpiryAndAuthorizedChannels(t *testing.T) {
+func TestRecentEnforcesLookbackAndAuthorizedChannelsWithoutExpiringMessages(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	clock := now
 	store := NewMemoryStore(24*time.Hour, func() time.Time { return clock })
@@ -154,11 +154,11 @@ func TestRecentEnforcesExpiryAndAuthorizedChannels(t *testing.T) {
 		t.Fatalf("expected current message, got %d", len(got))
 	}
 	clock = now.Add(24*time.Hour + time.Second)
-	if got, _ := store.Recent(context.Background(), "org-1", []string{"channel-1"}, now.Add(-time.Hour), 10); len(got) != 0 {
-		t.Fatalf("expired message leaked %d results", len(got))
+	if got, _ := store.Recent(context.Background(), "org-1", []string{"channel-1"}, clock.Add(-time.Hour), 10); len(got) != 0 {
+		t.Fatalf("message outside requested lookback leaked %d results", len(got))
 	}
-	if _, err := store.CurrentMessage(context.Background(), "org-1", "team-1", "channel-1", "100.1"); !errors.Is(err, ErrMessageNotFound) {
-		t.Fatalf("got %v, want not found", err)
+	if _, err := store.CurrentMessage(context.Background(), "org-1", "team-1", "channel-1", "100.1"); err != nil {
+		t.Fatalf("durable message disappeared: %v", err)
 	}
 }
 

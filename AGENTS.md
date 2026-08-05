@@ -25,8 +25,8 @@ Current initiative constraints:
   conversations `observe`, automatic membership participation disabled, and
   Codex/tools disabled. The approved local deployment may derive `assist` for
   public/private channels where Slack confirms Tag is a member; other
-  user-authorized conversations remain observe-only. DMs and group DMs are
-  never auto-enabled.
+  user-authorized conversations remain observe-only. One-to-one DMs are
+  auto-enabled in `assist`; group DMs are never enabled.
 - Keep the Mongo-authoritative organization/workspace flood gate ahead of
   context construction and every direct classifier call, including heartbeat
   gates. Exhaustion or gate-store failure is an auditable silent drop with no
@@ -42,27 +42,35 @@ Current initiative constraints:
   it discard a direct mention or a human continuation in an active Tag thread.
   Keep hourly response budgets, concurrency limits, and the organization flood
   gate intact.
+- Treat every human turn in a one-to-one DM as a hard
+  participation trigger. The classifier may answer directly or escalate to the
+  full agent, but `silent` and reaction-only recommendations must become a
+  visible destination-safe DM reply while retaining the existing hard safety
+  suppressions.
+- Give each newly created one-to-one DM full-agent session one best-effort
+  Slack title through `assistant.threads.setTitle` after the job is durably
+  enqueued. Derive it in the Go control plane from a bounded sanitized form of
+  the initial human request; never title channels or group DMs, let a worker set
+  it, log the title text, or let title failure affect the job.
 - Use the immediate classifier-selected reaction as the acknowledgement for
-  admitted answer work. Start Slack Thinking Steps only when a full-agent
-  thread job remains active after the configured progress grace period, so
-  quick answers do not flash Slack's generic `Thinking...` placeholder. For
-  work that outlives the grace period, set Slack's transient native thread
-  status before opening a plan-mode stream; keep status failure cosmetic and
-  continue delivery. Reuse
-  one transient current-action task card for every native or
-  reviewed tool and dynamically declared validated skill, replacing it as work
-  advances instead of accumulating completed cards. Keep titles to safe operational facts from reviewed control-plane
-  events; never expose chain-of-thought, model deltas, raw tool arguments/output,
-  credentials, or private context. When answer work is
+  admitted answer work. Immediately set Slack's transient native thread status
+  for every full-agent thread job, rotate generic lifecycle messages while the
+  agent starts, and replace the status with an allowlisted tool-specific label
+  for every native or reviewed tool call. Refresh the current status during
+  long-running work so Slack's two-minute timeout does not hide it. Never open
+  a plan-mode progress stream or create in-thread task cards. Status failure is
+  cosmetic and cannot block the final durable reply. Never expose
+  chain-of-thought, model deltas, raw tool arguments/output, credentials, or
+  private context. When answer work is
   admitted, immediately apply the classifier-selected emoji to the source
   message as an acknowledgement; preserve reactions for intentional
   reaction-only and lightweight classifier outcomes, and keep background and
   approval outcomes reaction-free.
-  Slack requires a stream `thread_ts`; do not force brief in-channel answers
+  Slack requires a status `thread_ts`; do not force brief in-channel answers
   into threads solely to obtain a progress surface.
 - Treat a strong/high-effort full-agent recommendation as substantial work and
   correct it to a thread unless the requester explicitly requires in-channel
-  placement. This keeps long-running synthesis on the Thinking Steps surface.
+  placement. This keeps long-running synthesis on a focused status-bearing thread.
 - Treat the full-agent model/effort/token/latency/activity footer as control-plane-owned.
   Capture provider-reported turn usage and a compact allowlisted summary of
   successfully used capabilities, append one final context block, and
@@ -75,10 +83,12 @@ Current initiative constraints:
   resolved destination-local context so conversational follow-ups still work,
   acknowledge them without decision admission, and emit no classifier, job,
   reaction, delivery, or activity-card work for the callback itself.
-- Treat every Slack-authenticated bot, app, workflow, or assistant message the
-  same way for loop prevention: retain it only as unverified destination-local
-  context, never classify it, react to it, or start/deliver work from it. This
-  applies even when another agent mentions Tag or posts in an active Tag thread.
+- Treat every Slack-authenticated bot, app, workflow, or assistant message as
+  unverified destination-local context by default. The only work-producing
+  exception is an exact bot identity trusted in that destination's durable
+  channel policy. Manage those identities through the channel administration
+  surface, keep the grant limited to new messages, and never admit edits,
+  membership events, arbitrary bots, or wider destinations.
 - Ambient alignment interventions may use recent destination-safe public
   reports to surface a material factual conflict when doing so prevents
   confusion or a bad operational decision. Attribute reports neutrally, never
@@ -125,6 +135,9 @@ Current initiative constraints:
   replay first-time history as work, and
   proactively pace each Web API history method rather than using HTTP 429
   responses as the normal scheduler.
+- Retain normalized Slack messages indefinitely without a Mongo TTL index.
+  Bound prompt inclusion separately with the configurable context-pack
+  lookback, defaulting to 30 days; persistence alone never grants context use.
 - Channel policy may set `context_history_mode=session_only` for noisy test
   destinations. Such a destination skips history import and offline catch-up,
   queries only its own messages observed after the current process started,
@@ -137,6 +150,10 @@ Current initiative constraints:
   and classifier-gated trigger subscriptions. Keep legacy fixed intervals
   readable until migrated, and surface schedules through the combined
   operator-facing Automation page rather than raw routine/trigger tables.
+- Keep automation identity channel-scoped across indexes, repositories,
+  scheduler advancement, idempotency keys, tools, management APIs, and Slack.
+  `/tag-automations` may list and edit only the invoking channel; existing
+  records may never be moved to another channel by an edit.
 - Keep `README.md`, `architecture.md`, `IMPLEMENTATION_STATUS.md`,
   `IMPLEMENTATION_CHECKLIST.md`, `SECURITY.md`, `runtime.env.example`, and the
   container guide synchronized with current code. Verify names and defaults
@@ -147,7 +164,7 @@ Current local regression baseline (2026-08-04): direct classifier and ambient
 silence/social placement, native Tables/Data Tables, presentation-only
 Cards/Carousels, approval/resume, Wiki and reviewed
 source access, three overlapping jobs on the eight-worker pool, private-context
-isolation, the deterministic 54-case eval, the latest opt-in live OpenAI
+isolation, the deterministic 55-case eval, the latest opt-in live OpenAI
 48-case baseline (before the ambient Wiki report-link regression was added),
 and full `make verify` all passed. `make eval-live` must use only natural message
 text; evaluator outcomes, placement, reactions, model, and effort remain outside
@@ -212,7 +229,10 @@ The reviewed catalog currently contains:
 - `telemetryos.product-docs` (`read` only, no approval): fixed-host HTTPS reads
   of the public documentation index/pages and corporate `llms-full.txt`; no
   arbitrary URLs, redirects, headers, methods, credentials, or shell;
-- `telemetryos.linear` (`read`, `write`);
+- `telemetryos.linear` (`read`, approval-free bounded `intake`, and
+  approval-gated generic `write`): `intake` is limited to an explicitly
+  requested bug/feature create, evidence comment, feature normalization, and
+  its suitability follow-up;
 - `telemetryos.wiki` (`read`, `write`, `delete`; page CRUD only): ordinary page
   reads/writes execute without per-action approval, recoverable page soft-delete
   always requires approval, and namespace/assets/publish-file/cascading-move/
@@ -265,10 +285,11 @@ drafting. Use the relevant human page URL from that source for customer links.
 TelemetryOS source access is permanently read-only. Enforce that invariant when
 loading a reviewed code bundle and again immediately before execution; never
 add or approve an edit, patch, commit, push, merge, deploy, or generic shell
-operation. Classify source-mutation requests for a brief control-plane redirect
-to a Linear bug for broken existing behavior or a Linear feature for new or
-changed behavior. Use the `code-change-intake` skill only after explicit issue
-creation intent; normal reviewed Linear approval still applies.
+operation. Silently suppress source-mutation requests: no Slack reply,
+reaction, worker, or approval flow. Use the `code-change-intake` skill only
+after explicit Linear issue-creation intent; use the bounded reviewed Linear
+`intake` operation so the explicit bug/feature request completes without a
+second approval. Generic Linear mutations remain approval-gated.
 
 For local setup, run `make sync-tool-env`. The script copies only the known
 Linear, Wiki, SigNoz, DLA, and optional Site Analytics variables from the current shell or

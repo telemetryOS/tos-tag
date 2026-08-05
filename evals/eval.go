@@ -29,7 +29,7 @@ type Fixture struct {
 	WantRestrictedSafeBlock bool
 	WantDirectReply         bool
 	WantFullAgent           bool
-	WantSourceWriteRedirect bool
+	WantSourceWriteSilent   bool
 	WantProductRetrieval    bool
 	ForbidSourceRedirect    bool
 }
@@ -116,7 +116,7 @@ func Run() (Score, error) {
 		if fixture.WantFullAgent && (!result.Predicted.RequiresFullAgent || result.Predicted.DirectReply != "") {
 			passed = false
 		}
-		if fixture.WantSourceWriteRedirect && (!result.Predicted.SourceWriteRequested || !strings.Contains(result.Predicted.DirectReply, "Linear bug") || !strings.Contains(result.Predicted.DirectReply, "Linear feature")) {
+		if fixture.WantSourceWriteSilent && (!result.Predicted.SourceWriteRequested || result.Predicted.Outcome != types.OutcomeSilent || result.Predicted.DirectReply != "" || result.Predicted.Reaction != "" || result.Predicted.RequiresFullAgent) {
 			passed = false
 		}
 		if fixture.WantProductRetrieval && (!result.Predicted.ProductRetrievalRequired || !result.Predicted.RequiresFullAgent) {
@@ -267,6 +267,7 @@ func Fixtures() []Fixture {
 	productPlanTransition := base("What actually changes when an account moves from Premium to Enterprise?")
 	premiumTrialQuestion := base("What is the premium trial about")
 	teamReportsUpdate := base("Team reports refreshed August 4:\n\n[Linear ENG velocity — 7/30/60/90](https://agentwiki.telemetryos.com/pages/linear) — fresh through August 4\n[GitHub commit volume — 7/30/60/90](https://agentwiki.telemetryos.com/pages/github) — fresh through August 4")
+	telemetryCodeConcept := base("TelemetryCode — concept summary (still in ideation). We are considering an AI-delivered application build and managed-service line. Nothing here is approved or committed. Fixed prices and managed adoption are part of the proposal, with a runtime verification gate rather than code review alone. Feedback welcome; this is ideation, not a launch plan.")
 	sourceWriteMention := base("<@tos-tag> Please implement a fix for the login regression in Gateway-Service.")
 	sourceWriteMention.Envelope.IsMention = true
 	wikiPageEdit := base("Add a short validation section to the Agent Wiki architecture reference you just published.")
@@ -320,7 +321,8 @@ func Fixtures() []Fixture {
 		{Name: "ambient_product_plan_transition_not_source_write", Target: productPlanTransition, Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeReplyInThread}, LiveEffective: []types.ClassificationOutcome{types.OutcomeReplyInThread}, WantLiveReactions: []string{"thinking_face"}, WantLiveRoutes: []LiveRoute{{Strength: "standard", Effort: "medium"}}, WantFullAgent: true, WantProductRetrieval: true, ForbidSourceRedirect: true},
 		{Name: "ambient_premium_trial_requires_product_retrieval", Target: premiumTrialQuestion, Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeReplyInChannel}, LiveEffective: []types.ClassificationOutcome{types.OutcomeReplyInChannel}, WantLiveReactions: []string{"thinking_face"}, WantLiveRoutes: []LiveRoute{{Strength: "standard", Effort: "medium"}}, WantFullAgent: true, WantProductRetrieval: true},
 		{Name: "ambient_team_report_links_silent", Target: teamReportsUpdate, Pack: pack(), WantPredicted: types.OutcomeSilent, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeSilent}, LiveEffective: []types.ClassificationOutcome{types.OutcomeSilent}, ForbidSourceRedirect: true},
-		{Name: "mentioned_source_write_redirects_to_linear", Target: sourceWriteMention, Pack: pack(), WantPredicted: types.OutcomeReplyInChannel, WantEffective: types.OutcomeReplyInChannel, LivePredicted: []types.ClassificationOutcome{types.OutcomeReplyInChannel}, LiveEffective: []types.ClassificationOutcome{types.OutcomeReplyInChannel}, WantLiveReactions: []string{"speech_balloon", "eyes"}, WantDirectReply: true, WantSourceWriteRedirect: true},
+		{Name: "ambient_telemetrycode_concept_silent", Target: telemetryCodeConcept, Pack: pack(), WantPredicted: types.OutcomeSilent, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeSilent}, LiveEffective: []types.ClassificationOutcome{types.OutcomeSilent}, ForbidSourceRedirect: true},
+		{Name: "mentioned_source_write_silent", Target: sourceWriteMention, Pack: pack(), WantPredicted: types.OutcomeSilent, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeSilent}, LiveEffective: []types.ClassificationOutcome{types.OutcomeSilent}, WantSourceWriteSilent: true},
 		{Name: "wiki_page_crud_not_source_write", Target: wikiPageEdit, Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeReplyInThread, LivePredicted: []types.ClassificationOutcome{types.OutcomeReplyInThread}, LiveEffective: []types.ClassificationOutcome{types.OutcomeReplyInThread}, WantLiveReactions: []string{"eyes", "thinking_face"}, WantLiveRoutes: []LiveRoute{{Strength: "standard", Effort: "medium"}}, WantFullAgent: true, ForbidSourceRedirect: true},
 		{Name: "wiki_page_crud_body_mentions_source_write", Target: wikiPageEditWithSourceText, Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeReplyInThread, LivePredicted: []types.ClassificationOutcome{types.OutcomeReplyInThread}, LiveEffective: []types.ClassificationOutcome{types.OutcomeReplyInThread}, WantLiveReactions: []string{"eyes", "thinking_face"}, WantLiveRoutes: []LiveRoute{{Strength: "standard", Effort: "medium"}}, WantFullAgent: true, ForbidSourceRedirect: true},
 		{Name: "mentioned_code_review_remains_read_only_analysis", Target: codeReviewMention, Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeReplyInThread, LivePredicted: []types.ClassificationOutcome{types.OutcomeReplyInThread}, LiveEffective: []types.ClassificationOutcome{types.OutcomeReplyInThread}, WantLiveReactions: []string{"thinking_face", "speech_balloon", "eyes", "hammer_and_wrench"}, WantLiveRoutes: []LiveRoute{{Strength: "standard", Effort: "medium"}, {Strength: "strong", Effort: "medium"}}, WantFullAgent: true, ForbidSourceRedirect: true},

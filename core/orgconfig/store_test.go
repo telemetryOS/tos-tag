@@ -107,7 +107,7 @@ func TestUpsertContextChannelPreservesOperatorPolicyAndNeverUnrestricts(t *testi
 		OrganizationID: "org", TeamID: "team", ChannelID: "tos-tag", Name: "old",
 		Enrolled: false, Restricted: true, ParticipationMode: types.ModeProactive,
 		KillSwitch: true, Cooldown: time.Minute, MaxResponsesPerHour: 2, MaxConcurrentJobs: 3,
-		DefaultModelProfile: "custom", ContextHistoryMode: types.ContextHistorySessionOnly, ApproverUserIDs: []string{"U_OPERATOR"}, MembershipRevision: "old", MembershipRefreshedAt: now.Add(-time.Hour),
+		DefaultModelProfile: "custom", ContextHistoryMode: types.ContextHistorySessionOnly, ApproverUserIDs: []string{"U_OPERATOR"}, TrustedIntegrationBotIDs: []string{"BDEPLOYMENTS"}, MembershipRevision: "old", MembershipRefreshedAt: now.Add(-time.Hour),
 	}
 	if _, err := store.PutChannel(context.Background(), existing); err != nil {
 		t.Fatal(err)
@@ -130,6 +130,9 @@ func TestUpsertContextChannelPreservesOperatorPolicyAndNeverUnrestricts(t *testi
 	}
 	if !refreshed.BotMembershipKnown || !refreshed.BotIsMember {
 		t.Fatalf("bot membership metadata was not refreshed: %#v", refreshed)
+	}
+	if len(refreshed.TrustedIntegrationBotIDs) != 1 || refreshed.TrustedIntegrationBotIDs[0] != "BDEPLOYMENTS" {
+		t.Fatalf("context refresh changed trusted integration policy: %#v", refreshed)
 	}
 }
 
@@ -179,5 +182,20 @@ func TestChannelPolicyRejectsDuplicateApprovers(t *testing.T) {
 	err := ValidateChannel(ChannelPolicy{OrganizationID: "o", TeamID: "t", ChannelID: "c", ParticipationMode: types.ModeObserve, ApproverUserIDs: []string{"U1", "U1"}, MembershipRevision: "m", MembershipRefreshedAt: time.Now(), MaxResponsesPerHour: 1, MaxConcurrentJobs: 1})
 	if err == nil {
 		t.Fatal("duplicate approvers accepted")
+	}
+}
+
+func TestChannelPolicyRejectsInvalidTrustedIntegrationBotIDs(t *testing.T) {
+	for name, botIDs := range map[string][]string{
+		"wrong kind":       {"UDEPLOYMENTS"},
+		"unsafe character": {"BDEPLOY-MENTS"},
+		"duplicate":        {"BDEPLOYMENTS", "BDEPLOYMENTS"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateChannel(ChannelPolicy{OrganizationID: "o", TeamID: "t", ChannelID: "c", ParticipationMode: types.ModeObserve, TrustedIntegrationBotIDs: botIDs, MembershipRevision: "m", MembershipRefreshedAt: time.Now(), MaxResponsesPerHour: 1, MaxConcurrentJobs: 1})
+			if err == nil {
+				t.Fatalf("invalid trusted integration bot IDs accepted: %#v", botIDs)
+			}
+		})
 	}
 }

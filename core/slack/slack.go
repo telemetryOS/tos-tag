@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/telemetryos/tos-tag/core/automations"
 	"github.com/telemetryos/tos-tag/types"
 )
 
@@ -87,6 +88,10 @@ type ModeChangeResult struct {
 
 type ModeChangeHandler func(context.Context, ModeChangeRequest) (ModeChangeResult, error)
 
+type AutomationListHandler func(context.Context, automations.Scope) ([]automations.Task, error)
+type AutomationLoadHandler func(context.Context, automations.Scope, automations.Kind, string) (automations.Task, error)
+type AutomationSaveHandler func(context.Context, automations.SaveRequest) (automations.Task, error)
+
 type Ingress interface {
 	Start(context.Context, Handler) error
 	Stop(context.Context) error
@@ -95,6 +100,6 @@ type Ingress interface {
 type Delivery interface {
 	Send(context.Context, types.SlackDeliveryRequest) (types.SlackDeliveryResult, error)
 	React(context.Context, types.SlackReactionRequest) (types.SlackReactionResult, error)
-	StartProgress(context.Context, types.SlackProgressStartRequest) (types.SlackProgressResult, error)
-	UpdateProgress(context.Context, types.SlackProgressUpdateRequest) (types.SlackProgressResult, error)
+	SetAgentStatus(context.Context, types.SlackAgentStatusRequest) (types.SlackAgentStatusResult, error)
+	SetThreadTitle(context.Context, types.SlackThreadTitleRequest) (types.SlackThreadTitleResult, error)
 }

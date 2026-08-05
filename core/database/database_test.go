@@ -59,6 +59,9 @@ func TestRequiredTTLIndexesAreAbsolute(t *testing.T) {
 		}
 		resolved := resolvedIndexOptions(t, spec.Model.Options)
 		if resolved.ExpireAfterSeconds != nil {
+			if spec.Collection == models.CollectionMessages {
+				t.Fatal("normalized messages must not have a TTL index")
+			}
 			ttlCount++
 			if got := *resolved.ExpireAfterSeconds; got != 0 {
 				t.Fatalf("TTL index %s is relative: %d", spec.Collection, got)
@@ -66,7 +69,37 @@ func TestRequiredTTLIndexesAreAbsolute(t *testing.T) {
 		}
 	}
 	if ttlCount < 3 {
-		t.Fatalf("expected observation, message, and context TTL indexes, got %d", ttlCount)
+		t.Fatalf("expected multiple operational TTL indexes, got %d", ttlCount)
+	}
+	obsolete := ObsoleteIndexes()
+	if len(obsolete) != 3 || obsolete[0].Collection != models.CollectionMessages || obsolete[0].Name != "message_expiry" {
+		t.Fatalf("obsolete index migrations = %#v", obsolete)
+	}
+}
+
+func TestAutomationIndexesAreChannelScoped(t *testing.T) {
+	want := map[string]bool{"routine_channel_public_unique": false, "event_subscription_channel_public_unique": false}
+	for _, spec := range RequiredIndexes() {
+		if spec.Model.Options == nil {
+			continue
+		}
+		resolved := resolvedIndexOptions(t, spec.Model.Options)
+		if resolved.Name == nil {
+			continue
+		}
+		if _, ok := want[*resolved.Name]; !ok {
+			continue
+		}
+		keys, ok := spec.Model.Keys.(bson.D)
+		if !ok || len(keys) != 4 || keys[1].Key != "workspace_id" || keys[2].Key != "channel_id" || keys[3].Key != "public_id" {
+			t.Fatalf("automation index %s keys=%#v", *resolved.Name, spec.Model.Keys)
+		}
+		want[*resolved.Name] = true
+	}
+	for name, found := range want {
+		if !found {
+			t.Fatalf("channel-scoped automation index %s missing", name)
+		}
 	}
 }
 

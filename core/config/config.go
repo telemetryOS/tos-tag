@@ -70,20 +70,23 @@ type SlackConfig struct {
 
 type RetentionConfig struct {
 	RawEnvelope time.Duration `config:"rawEnvelope"`
-	Messages    time.Duration `config:"messages"`
-	Prompt      time.Duration `config:"prompt"`
-	Sweep       time.Duration `config:"sweep"`
+	// Messages remains only so a retired TTL setting fails explicitly.
+	// Normalized messages are durable and do not expire.
+	Messages time.Duration `config:"messages"`
+	Prompt   time.Duration `config:"prompt"`
+	Sweep    time.Duration `config:"sweep"`
 }
 
 type ContextPackConfig struct {
-	MaxTokens int `config:"maxTokens"`
-	System    int `config:"system"`
-	Thread    int `config:"thread"`
-	Channel   int `config:"channel"`
-	RecentOrg int `config:"recentOrg"`
-	Evidence  int `config:"evidence"`
-	Situation int `config:"situation"`
-	Headroom  int `config:"headroom"`
+	Lookback  time.Duration `config:"lookback"`
+	MaxTokens int           `config:"maxTokens"`
+	System    int           `config:"system"`
+	Thread    int           `config:"thread"`
+	Channel   int           `config:"channel"`
+	RecentOrg int           `config:"recentOrg"`
+	Evidence  int           `config:"evidence"`
+	Situation int           `config:"situation"`
+	Headroom  int           `config:"headroom"`
 }
 
 func (c ContextPackConfig) PartitionTotal() int {
@@ -128,7 +131,6 @@ type MemoryConfig struct {
 type JobsConfig struct {
 	Lease             time.Duration `config:"lease"`
 	Poll              time.Duration `config:"poll"`
-	ProgressDelay     time.Duration `config:"progressDelay"`
 	MaxAttempts       int           `config:"maxAttempts"`
 	WorkerConcurrency int           `config:"workerConcurrency"`
 }
@@ -222,11 +224,11 @@ var DefaultConfiguration = Config{
 	},
 	Retention: RetentionConfig{
 		RawEnvelope: 24 * time.Hour,
-		Messages:    30 * 24 * time.Hour,
 		Prompt:      24 * time.Hour,
 		Sweep:       time.Minute,
 	},
 	ContextPacks: ContextPackConfig{
+		Lookback:  30 * 24 * time.Hour,
 		MaxTokens: 100_000,
 		System:    8_000,
 		Thread:    20_000,
@@ -269,7 +271,6 @@ var DefaultConfiguration = Config{
 	Jobs: JobsConfig{
 		Lease:             30 * time.Second,
 		Poll:              250 * time.Millisecond,
-		ProgressDelay:     8 * time.Second,
 		MaxAttempts:       3,
 		WorkerConcurrency: 8,
 	},
@@ -418,13 +419,6 @@ func applyClassifierEnvironment(cfg *ClassifierConfig) error {
 }
 
 func applyJobsEnvironment(cfg *JobsConfig) error {
-	if raw, ok := os.LookupEnv("TAG__JOBS__PROGRESS_DELAY"); ok {
-		value, err := time.ParseDuration(strings.TrimSpace(raw))
-		if err != nil {
-			return fmt.Errorf("TAG__JOBS__PROGRESS_DELAY must be a duration: %w", err)
-		}
-		cfg.ProgressDelay = value
-	}
 	if raw, ok := os.LookupEnv("TAG__JOBS__WORKER_CONCURRENCY"); ok {
 		value, err := strconv.Atoi(strings.TrimSpace(raw))
 		if err != nil {
@@ -501,9 +495,6 @@ func Validate(cfg *Config) error {
 	if cfg.Slack.ContextSyncLookback <= 0 || cfg.Slack.ContextSyncTimeout <= 0 || cfg.Slack.ContextSyncRefresh <= 0 || cfg.Slack.ContextSyncRequestInterval < 0 || cfg.Slack.ContextSyncMaxChannels <= 0 || cfg.Slack.ContextSyncMaxMessages <= 0 || cfg.Slack.ContextSyncMessagesPerChannel <= 0 {
 		return fmt.Errorf("Slack context-sync bounds must be positive")
 	}
-	if cfg.Slack.ContextSyncLookback > cfg.Retention.Messages {
-		return fmt.Errorf("Slack context-sync lookback cannot exceed message retention")
-	}
 	if cfg.Slack.ContextSyncEnabled {
 		if cfg.Slack.Mode != "socket_mode" || !cfg.Slack.LiveEnabled {
 			return fmt.Errorf("Slack context sync requires explicitly enabled socket_mode")
@@ -525,13 +516,13 @@ func Validate(cfg *Config) error {
 		}
 		seenOutputChannels[channelID] = struct{}{}
 	}
-	if cfg.Retention.RawEnvelope <= 0 || cfg.Retention.Messages <= 0 || cfg.Retention.Prompt <= 0 || cfg.Retention.Sweep <= 0 {
+	if cfg.Retention.RawEnvelope <= 0 || cfg.Retention.Prompt <= 0 || cfg.Retention.Sweep <= 0 {
 		return fmt.Errorf("retention durations must be positive")
 	}
-	if cfg.Retention.RawEnvelope > cfg.Retention.Messages || cfg.Retention.Prompt > cfg.Retention.Messages {
-		return fmt.Errorf("raw envelope and prompt retention cannot exceed message retention")
+	if cfg.Retention.Messages != 0 {
+		return fmt.Errorf("retention.messages is retired; normalized messages are retained indefinitely and contextPacks.lookback controls context inclusion")
 	}
-	if cfg.ContextPacks.MaxTokens <= 0 || cfg.ContextPacks.PartitionTotal() != cfg.ContextPacks.MaxTokens {
+	if cfg.ContextPacks.Lookback <= 0 || cfg.ContextPacks.MaxTokens <= 0 || cfg.ContextPacks.PartitionTotal() != cfg.ContextPacks.MaxTokens {
 		return fmt.Errorf("context pack partitions must exactly equal maxTokens")
 	}
 	if cfg.Classifier.Mode != "shadow" && cfg.Classifier.Mode != "live" {
@@ -540,8 +531,8 @@ func Validate(cfg *Config) error {
 	if cfg.Classifier.AssistThreshold < 0 || cfg.Classifier.AssistThreshold > 1 || cfg.Classifier.ChannelReplyThreshold < cfg.Classifier.AssistThreshold || cfg.Classifier.ChannelReplyThreshold > 1 {
 		return fmt.Errorf("invalid classifier thresholds")
 	}
-	if cfg.Classifier.MaxResponsesPerHour <= 0 || cfg.Classifier.MaxConcurrentJobs <= 0 || cfg.Jobs.Lease <= 0 || cfg.Jobs.Poll <= 0 || cfg.Jobs.ProgressDelay <= 0 || cfg.Jobs.ProgressDelay > time.Minute || cfg.Jobs.MaxAttempts <= 0 || cfg.Jobs.WorkerConcurrency <= 0 || cfg.Jobs.WorkerConcurrency > 64 {
-		return fmt.Errorf("classifier and job bounds must be positive, progress delay must not exceed one minute, and worker concurrency must not exceed 64")
+	if cfg.Classifier.MaxResponsesPerHour <= 0 || cfg.Classifier.MaxConcurrentJobs <= 0 || cfg.Jobs.Lease <= 0 || cfg.Jobs.Poll <= 0 || cfg.Jobs.MaxAttempts <= 0 || cfg.Jobs.WorkerConcurrency <= 0 || cfg.Jobs.WorkerConcurrency > 64 {
+		return fmt.Errorf("classifier and job bounds must be positive and worker concurrency must not exceed 64")
 	}
 	if cfg.Classifier.FloodProtectionEnabled && (cfg.Classifier.FloodMaxMessages <= 0 || cfg.Classifier.FloodWindow <= 0) {
 		return fmt.Errorf("enabled classifier flood protection requires a positive message limit and window")
@@ -565,7 +556,7 @@ func Validate(cfg *Config) error {
 		if cfg.Memory.Model != "gpt-5.6-luna" {
 			return fmt.Errorf("memory curation must use gpt-5.6-luna")
 		}
-		if cfg.Memory.Timeout <= 0 || cfg.Memory.Interval <= 0 || cfg.Memory.Lookback <= 0 || cfg.Memory.Lookback > cfg.Retention.Messages || cfg.Memory.MinMessages < 2 || cfg.Memory.MaxMessages < cfg.Memory.MinMessages || cfg.Memory.MaxScopesPerRun <= 0 || cfg.Memory.MaxOutputTokens <= 0 || cfg.Memory.MinConfidence < 0 || cfg.Memory.MinConfidence > 1 {
+		if cfg.Memory.Timeout <= 0 || cfg.Memory.Interval <= 0 || cfg.Memory.Lookback <= 0 || cfg.Memory.Lookback > cfg.ContextPacks.Lookback || cfg.Memory.MinMessages < 2 || cfg.Memory.MaxMessages < cfg.Memory.MinMessages || cfg.Memory.MaxScopesPerRun <= 0 || cfg.Memory.MaxOutputTokens <= 0 || cfg.Memory.MinConfidence < 0 || cfg.Memory.MinConfidence > 1 {
 			return fmt.Errorf("invalid memory curation bounds")
 		}
 	}
@@ -677,7 +668,6 @@ func (c *Config) RedactedStatus() map[string]any {
 		"classifier_mode":                     c.Classifier.Mode,
 		"classifier_provider":                 c.Classifier.Provider,
 		"classifier_model":                    c.Classifier.Model,
-		"jobs_progress_delay":                 c.Jobs.ProgressDelay.String(),
 		"classifier_reasoning_effort":         c.Classifier.ReasoningEffort,
 		"classifier_max_responses_hour":       c.Classifier.MaxResponsesPerHour,
 		"classifier_max_concurrent_jobs":      c.Classifier.MaxConcurrentJobs,
@@ -692,7 +682,9 @@ func (c *Config) RedactedStatus() map[string]any {
 		"job_worker_concurrency":              c.Jobs.WorkerConcurrency,
 		"auth_enabled":                        c.Auth.Enabled,
 		"log_file_enabled":                    c.Logging.FilePath != "",
-		"message_retention":                   c.Retention.Messages.String(),
+		"raw_observation_retention":           c.Retention.RawEnvelope.String(),
+		"message_retention":                   "indefinite",
+		"context_lookback":                    c.ContextPacks.Lookback.String(),
 		"context_max_tokens":                  c.ContextPacks.MaxTokens,
 		"codex_app_server_enabled":            c.Codex.Enabled,
 		"codex_web_search_mode":               c.Codex.WebSearchMode,

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -91,7 +92,7 @@ func (s *Service) Decide(ctx context.Context, target Target, pack types.ContextP
 		return Result{Predicted: decision, Effective: decision}
 	}
 	predicted := s.predict(ctx, target, pack)
-	if target.Envelope.IsMention || target.ActiveThread || predicted.Outcome == types.OutcomeSilent {
+	if target.Envelope.IsMention || isDirectMessageTarget(target) || target.ActiveThread || predicted.Outcome == types.OutcomeSilent {
 		return Result{Predicted: predicted, Effective: predicted}
 	}
 	if s.shadow {
@@ -130,7 +131,7 @@ func assistInitiativeAuthorized(target Target, pack types.ContextPackRevision, d
 	if thirdPartyAddressedTurn(target) {
 		return false
 	}
-	if target.Envelope.IsMention || target.ActiveThread || target.AuthorizedTrigger || explicitlyAddressesTag(target.Envelope.Text) {
+	if target.Envelope.IsMention || isDirectMessageTarget(target) || target.ActiveThread || target.AuthorizedTrigger || explicitlyAddressesTag(target.Envelope.Text) {
 		return true
 	}
 	question := looksLikeQuestion(target.Envelope.Text)
@@ -252,7 +253,14 @@ func (s *Service) predict(ctx context.Context, target Target, pack types.Context
 		predicted, err := s.classifier.Decide(ctx, target, pack)
 		predicted = sanitizeEvidenceReferences(predicted, pack)
 		predicted = enforceDirectReplyPlacement(predicted, target)
-		if err == nil && validateDecision(predicted, pack) == nil && predicted.Outcome != types.OutcomeSilent && predicted.Outcome != types.OutcomeReact {
+		validationErr := validateDecision(predicted, pack)
+		if err == nil && validationErr == nil && isSourceWriteSilentDecision(predicted) {
+			if isDirectMessageTarget(target) {
+				return directMessageSourceWriteFallback(true)
+			}
+			return predicted
+		}
+		if err == nil && validationErr == nil && predicted.Outcome != types.OutcomeSilent && predicted.Outcome != types.OutcomeReact {
 			if predicted.DirectReply != "" {
 				if predicted.Confidence >= s.assistThreshold && validateDirectReplyForTarget(predicted, target, pack) == nil {
 					return predicted
@@ -283,7 +291,8 @@ func (s *Service) predict(ctx context.Context, target Target, pack types.Context
 			Reaction:          "eyes",
 		}
 	}
-	if target.Envelope.IsMention {
+	if target.Envelope.IsMention || isDirectMessageTarget(target) {
+		directMessage := isDirectMessageTarget(target)
 		predicted, err := s.classifier.Decide(ctx, target, pack)
 		predicted = sanitizeEvidenceReferences(predicted, pack)
 		predicted = enforceDirectReplyPlacement(predicted, target)
@@ -291,9 +300,17 @@ func (s *Service) predict(ctx context.Context, target Target, pack types.Context
 		// before validation. A provider can legitimately recommend strong work
 		// while initially choosing the channel; rejecting that otherwise useful
 		// recommendation would drop into the generic direct-mention fallback and
-		// lose the threaded Thinking Steps surface.
-		predicted = enforceDirectMentionPlacement(predicted, target.Envelope.Text)
+		// lose the focused thread and its native agent status surface.
+		if target.Envelope.IsMention {
+			predicted = enforceDirectMentionPlacement(predicted, target.Envelope.Text)
+		}
 		validationErr := validateDecision(predicted, pack)
+		if err == nil && validationErr == nil && isSourceWriteSilentDecision(predicted) {
+			if directMessage {
+				return directMessageSourceWriteFallback(false)
+			}
+			return predicted
+		}
 		// A direct mention is already a hard participation trigger. The ambient
 		// confidence threshold must not discard an otherwise valid placement and
 		// model-routing recommendation, or simple mentioned questions fall back to
@@ -303,10 +320,25 @@ func (s *Service) predict(ctx context.Context, target Target, pack types.Context
 				return predicted
 			}
 		}
-		if isDirectSocialCandidate(target.Envelope.Text) {
+		if isDirectSocialCandidate(target.Envelope.Text) || (directMessage && isDirectMessageSocialCandidate(target.Envelope.Text)) {
 			return directSocialFallback(target.Envelope.Text, false)
 		}
+		if directMessage && !looksLikeQuestion(target.Envelope.Text) && !looksLikeExplicitRequest(target.Envelope.Text) {
+			fallback := directMessageReplyFallback()
+			switch {
+			case err != nil:
+				fallback.ReasonCodes = append(fallback.ReasonCodes, "classifier.provider_error_fallback")
+			case validationErr != nil:
+				fallback.ReasonCodes = append(fallback.ReasonCodes, decisionValidationReason(validationErr))
+			default:
+				fallback.ReasonCodes = append(fallback.ReasonCodes, "classifier.non_action_fallback")
+			}
+			return fallback
+		}
 		fallback := directMentionFallback(target.Envelope.Text)
+		if directMessage {
+			fallback = directMessageAgentFallback(target.Envelope.Text)
+		}
 		switch {
 		case err != nil:
 			fallback.ReasonCodes = append(fallback.ReasonCodes, "classifier.provider_error_fallback")
@@ -445,7 +477,23 @@ func directMentionFallback(text string) types.ClassificationDecision {
 	}
 }
 
+func directMessageAgentFallback(text string) types.ClassificationDecision {
+	fallback := directMentionFallback(text)
+	for index, reason := range fallback.ReasonCodes {
+		fallback.ReasonCodes[index] = strings.Replace(reason, "direct_mention", "direct_message", 1)
+	}
+	if fallback.Outcome == types.OutcomeReplyInChannel {
+		fallback.ResponseIntent = "give a brief self-contained answer in the direct message"
+	} else if fallback.Outcome == types.OutcomeReplyInThread {
+		fallback.ResponseIntent = "respond to the direct-message request in a focused thread"
+	}
+	return fallback
+}
+
 func enforceDirectMentionPlacement(decision types.ClassificationDecision, text string) types.ClassificationDecision {
+	if decision.SourceWriteRequested {
+		return decision
+	}
 	if requested, reason, ok := requestedReplyPlacement(text); ok {
 		if decision.Outcome != requested {
 			decision.Outcome = requested
@@ -456,16 +504,13 @@ func enforceDirectMentionPlacement(decision types.ClassificationDecision, text s
 	// A strong/high-effort recommendation means the classifier expects
 	// substantial work rather than a brief self-contained channel answer. Keep
 	// that work in a thread so it has a focused conversation surface and Slack
-	// can show Thinking Steps while the worker runs. An explicit channel request
+	// can show native agent status while the worker runs. An explicit channel request
 	// was already honored above.
 	if substantialAgentRecommendation(decision) && (decision.Outcome == types.OutcomeReplyInChannel || decision.Outcome == types.OutcomeReplyInThread) {
 		if decision.Outcome != types.OutcomeReplyInThread {
 			decision.Outcome = types.OutcomeReplyInThread
 			decision.ReasonCodes = append(decision.ReasonCodes, "policy.substantial_agent_thread")
 		}
-		return decision
-	}
-	if decision.SourceWriteRequested {
 		return decision
 	}
 	if decision.ProductRetrievalRequired {
@@ -613,6 +658,51 @@ func isDirectSocialCandidate(text string) bool {
 	}
 }
 
+func isDirectMessageSocialCandidate(text string) bool {
+	if isDirectSocialCandidate(text) {
+		return true
+	}
+	normalized := normalizedSocialText(text)
+	if len(strings.Fields(normalized)) > 6 {
+		return false
+	}
+	return strings.HasPrefix(normalized, "how are you ") || strings.HasPrefix(normalized, "how's it going ")
+}
+
+const directMessageClarificationReply = "I'm here—what would you like me to help with?"
+
+const directMessageSourceWriteReply = "I can't make source-code changes from Slack, but I can help investigate or plan the work."
+
+func directMessageReplyFallback() types.ClassificationDecision {
+	return types.ClassificationDecision{
+		Outcome:            types.OutcomeReplyInChannel,
+		Confidence:         1,
+		ReasonCodes:        []string{"policy.direct_message_reply_fallback"},
+		ResponseIntent:     "acknowledge the direct message and ask what help is wanted",
+		DirectReply:        directMessageClarificationReply,
+		DisclosureClass:    types.DisclosureDestinationSafe,
+		Reaction:           "speech_balloon",
+		AgentModelStrength: "none",
+	}
+}
+
+func directMessageSourceWriteFallback(threaded bool) types.ClassificationDecision {
+	outcome := types.OutcomeReplyInChannel
+	if threaded {
+		outcome = types.OutcomeReplyInThread
+	}
+	return types.ClassificationDecision{
+		Outcome:            outcome,
+		Confidence:         1,
+		ReasonCodes:        []string{"policy.source_write_dm_reply"},
+		ResponseIntent:     "decline source changes from Slack and offer safe assistance",
+		DirectReply:        directMessageSourceWriteReply,
+		DisclosureClass:    types.DisclosureDestinationSafe,
+		Reaction:           "speech_balloon",
+		AgentModelStrength: "none",
+	}
+}
+
 func directSocialFallback(text string, activeThread bool) types.ClassificationDecision {
 	normalized := normalizedSocialText(text)
 	reply := "Happy to help!"
@@ -707,9 +797,9 @@ func validateDirectReplyForTarget(decision types.ClassificationDecision, target 
 	if decision.DirectReply == "" {
 		return errors.New("direct reply is empty")
 	}
-	policyRedirect := decision.SourceWriteRequested && decision.DirectReply == sourceWriteRedirectReply
 	boundedClarification := likelyConversationallyAddressedToAgent(target, pack) && isMissingLocationWeatherQuestion(target.Envelope.Text) && decision.DirectReply == weatherLocationClarificationReply
-	if !policyRedirect && !boundedClarification && !isDirectSocialCandidate(target.Envelope.Text) {
+	directMessageFallback := isDirectMessageTarget(target) && decision.DirectReply == directMessageClarificationReply
+	if !boundedClarification && !directMessageFallback && !isDirectSocialCandidate(target.Envelope.Text) && !(isDirectMessageTarget(target) && isDirectMessageSocialCandidate(target.Envelope.Text)) {
 		return errors.New("target is not an allowlisted direct-reply message")
 	}
 	if decision.RequiresFullAgent || len(decision.ReleasableEvidenceIDs) != 0 || len(decision.RestrictedSignalIDs) != 0 {
@@ -725,6 +815,14 @@ func validateDirectReplyForTarget(decision types.ClassificationDecision, target 
 		return errors.New("top-level direct reply did not stay in channel")
 	}
 	return validateDirectReplyText(decision.DirectReply)
+}
+
+func isDirectMessageTarget(target Target) bool {
+	return target.Envelope.ChannelKind == types.SlackChannelKindDirectMessage || strings.HasPrefix(target.Envelope.ChannelID, "D")
+}
+
+func isSourceWriteSilentDecision(decision types.ClassificationDecision) bool {
+	return decision.Outcome == types.OutcomeSilent && decision.SourceWriteRequested && slices.Contains(decision.ReasonCodes, "policy.source_write_silent")
 }
 
 func validateDirectReplyText(reply string) error {
@@ -754,7 +852,7 @@ func hardSuppression(target Target) string {
 		return "suppress.ambient_link_only"
 	case target.Unsupported:
 		return "suppress.unsupported_subtype"
-	case target.Envelope.IntegrationAuthored():
+	case target.Envelope.IntegrationAuthored() && !target.AuthorizedTrigger:
 		return "suppress.integration_message"
 	case thirdPartyAddressedTurn(target):
 		return "suppress.third_party_address"

@@ -218,6 +218,10 @@ func TestReviewedToolWrappersRejectBoundaryOverrides(t *testing.T) {
 		want      string
 	}{
 		{name: "linear read cannot write", tool: "linear", operation: "read", args: []string{"create"}, want: "not permitted"},
+		{name: "linear intake cannot change state", tool: "linear", operation: "intake", args: []string{"set-state"}, want: "not permitted"},
+		{name: "linear intake create requires issue type", tool: "linear", operation: "intake", args: []string{"create", "--title", "Title", "--description", "Body"}, want: "requires a Bug or Feature label"},
+		{name: "linear intake cannot assign", tool: "linear", operation: "intake", args: []string{"update", "--issue", "ENG-1234", "--assign-me"}, want: "not permitted"},
+		{name: "linear intake restricts labels", tool: "linear", operation: "intake", args: []string{"update", "--issue", "ENG-1234", "--add-label", "Needs QA"}, want: "label 'Needs QA' is not permitted"},
 		{name: "wiki read cannot write", tool: "wiki", operation: "read", args: []string{"put"}, want: "not permitted"},
 		{name: "wiki cannot inspect namespaces", tool: "wiki", operation: "read", args: []string{"ns", "ls"}, want: "not permitted"},
 		{name: "wiki cannot inspect activity", tool: "wiki", operation: "read", args: []string{"activity"}, want: "not permitted"},

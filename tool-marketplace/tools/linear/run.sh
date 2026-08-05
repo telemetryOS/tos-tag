@@ -141,12 +141,77 @@ case "${TOS_TAG_OPERATION_ID:-}" in
     case "$cmd" in get|comments|whoami|mine|list|search|history|members|download) ;;
       *) die "command '$cmd' is not permitted by the read operation" ;;
     esac ;;
+  intake)
+    case "$cmd" in create|comment|update) ;;
+      *) die "command '$cmd' is not permitted by the intake operation" ;;
+    esac ;;
   write)
     case "$cmd" in set-state|comment|update|start|create|upload) ;;
       *) die "command '$cmd' is not permitted by the write operation" ;;
     esac ;;
-  *) die "TOS_TAG_OPERATION_ID must be read or write" ;;
+  *) die "TOS_TAG_OPERATION_ID must be read, intake, or write" ;;
 esac
+
+# The approval-free intake operation is intentionally narrower than generic
+# Linear write authority. It supports only explicit bug/feature creation,
+# evidence comments, feature normalization, and the suitability label/comment
+# follow-up owned by those workflows. Assignment, state, priority changes on
+# existing issues, file access/uploads, and arbitrary label mutations remain on
+# the approval-gated write operation.
+if [ "${TOS_TAG_OPERATION_ID:-}" = intake ]; then
+  intake_args=("$@")
+  case "$cmd" in
+    create)
+      intake_type=""
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --title|--description)
+            [ "$#" -ge 2 ] || die "$1 needs a value"
+            shift 2 ;;
+          --priority)
+            [ "$#" -ge 2 ] || die "--priority needs a value"
+            case "$2" in 2|3) ;; *) die "intake create priority must be High (2) or Medium (3)" ;; esac
+            shift 2 ;;
+          --label)
+            [ "$#" -ge 2 ] || die "--label needs a value"
+            case "$2" in
+              Bug|Feature)
+                [ -z "$intake_type" ] || [ "$intake_type" = "$2" ] || die "intake create cannot combine Bug and Feature labels"
+                intake_type="$2" ;;
+            esac
+            shift 2 ;;
+          *) die "argument '$1' is not permitted by the intake create operation" ;;
+        esac
+      done
+      [ -n "$intake_type" ] || die "intake create requires a Bug or Feature label" ;;
+    comment)
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --issue|--body)
+            [ "$#" -ge 2 ] || die "$1 needs a value"
+            shift 2 ;;
+          *) die "argument '$1' is not permitted by the intake comment operation" ;;
+        esac
+      done ;;
+    update)
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --issue|--description|--comment)
+            [ "$#" -ge 2 ] || die "$1 needs a value"
+            shift 2 ;;
+          --add-label|--remove-label)
+            [ "$#" -ge 2 ] || die "$1 needs a value"
+            case "$2" in
+              Bug|Feature|agent-suitable|agent-unsuitable) ;;
+              *) die "label '$2' is not permitted by the intake update operation" ;;
+            esac
+            shift 2 ;;
+          *) die "argument '$1' is not permitted by the intake update operation" ;;
+        esac
+      done ;;
+  esac
+  set -- "${intake_args[@]}"
+fi
 case "$cmd" in
   get|comments|whoami|mine|list|search|history|members|set-state|comment|update|start|create|upload|download) ;;
   *) die "usage: linear.sh get/comments/search/... | comment --issue ENG-1234 (--body <text> | --body-file <path>) | update --issue ENG-1234 [--title <text>] [--description <text>] [--comment <text>] [...] | create --title <text> (--description <text> | --description-file <path>) [...]" ;;
@@ -778,6 +843,14 @@ update|start)
                 "$(jq -n --arg id "$ISSUE_UUID" --argjson i "$input" '{id:$id, input:$i}')")" || exit $?
     ok="$(jq -r '.data.issueUpdate.success // false' <<<"$resp")"
     [ "$ok" = "true" ] || reject "issueUpdate returned success=false"
+    verify_resp="$resp"
+    if [ -n "$TITLE_FILE" ] || [ -n "$TITLE" ] || [ -n "$DESC_FILE" ] || [ -n "$DESCRIPTION" ]; then
+      # The mutation payload can be stale or Markdown-normalized. Verify
+      # durable content with a separate read that escapes mutation request
+      # data-loader state.
+      verify_resp="$(gql 'query VerifyUpdatedIssue($id: String!){ issue(id: $id){ identifier title description state { id } labelIds } }' \
+                    "$(jq -n --arg id "$ISSUE_UUID" '{id:$id}')")" || exit $?
+    fi
     if [ -n "$STATE_ID" ]; then
       applied="$(jq -r '.data.issueUpdate.issue.state.id // "?"' <<<"$resp")"
       sname="$(jq -r '.data.issueUpdate.issue.state.name // "?"' <<<"$resp")"
@@ -789,14 +862,21 @@ update|start)
       [ "$applied_assignee" = "$ASSIGNEE_UUID" ] || reject "assignee did not take (now $applied_assignee)"
     fi
     if [ -n "$TITLE_FILE" ] || [ -n "$TITLE" ]; then
-      if jq -e --argjson expected "$TITLE_JSON" '.data.issueUpdate.issue.title == $expected' <<<"$resp" >/dev/null; then
+      if jq -e --argjson expected "$TITLE_JSON" '(.data.issue.title // .data.issueUpdate.issue.title) == $expected' <<<"$verify_resp" >/dev/null; then
         out="$out TITLE_APPLIED=1 TITLE_CHARS=$TITLE_CHARS"
       else
         out="$out TITLE_APPLIED=0 TITLE_CHARS=$TITLE_CHARS"; verify_error="title"
       fi
     fi
     if [ -n "$DESC_FILE" ] || [ -n "$DESCRIPTION" ]; then
-      if jq -e --argjson expected "$DESCRIPTION_JSON" '.data.issueUpdate.issue.description == $expected' <<<"$resp" >/dev/null; then
+      if jq -e --argjson expected "$DESCRIPTION_JSON" '
+        def canonical_description:
+          if . == null then null
+          else gsub("\r\n"; "\n") | gsub("\r"; "\n") | sub("\n+$"; "")
+          end;
+        ((.data.issue.description // .data.issueUpdate.issue.description) | canonical_description)
+          == ($expected | canonical_description)
+      ' <<<"$verify_resp" >/dev/null; then
         out="$out DESCRIPTION_APPLIED=1 DESCRIPTION_CHARS=$DESCRIPTION_CHARS"
       else
         out="$out DESCRIPTION_APPLIED=0 DESCRIPTION_CHARS=$DESCRIPTION_CHARS"; verify_error="${verify_error:+$verify_error/}description"
@@ -804,7 +884,7 @@ update|start)
     fi
     if [ -n "$TITLE_FILE" ] || [ -n "$TITLE" ] || [ -n "$DESC_FILE" ] || [ -n "$DESCRIPTION" ]; then
       if [ -z "$STATE_ID" ]; then
-        applied_state="$(jq -r '.data.issueUpdate.issue.state.id // empty' <<<"$resp")"
+        applied_state="$(jq -r '.data.issue.state.id // .data.issueUpdate.issue.state.id // empty' <<<"$verify_resp")"
         if [ "$applied_state" = "$ISSUE_STATE_ID" ]; then
           out="$out STATE_PRESERVED=1"
         else
@@ -812,7 +892,7 @@ update|start)
         fi
       fi
       if [ -z "$ADD_LABEL" ] && [ -z "$REMOVE_LABEL" ]; then
-        applied_labels="$(jq -c '.data.issueUpdate.issue.labelIds // [] | sort' <<<"$resp")"
+        applied_labels="$(jq -c '(.data.issue.labelIds // .data.issueUpdate.issue.labelIds // []) | sort' <<<"$verify_resp")"
         expected_labels="$(jq -c 'sort' <<<"$ISSUE_LABEL_IDS")"
         if [ "$applied_labels" = "$expected_labels" ]; then
           out="$out LABELS_PRESERVED=1"
@@ -901,25 +981,36 @@ create)
   key="$(jq -r '.data.issueCreate.issue.identifier // empty' <<<"$resp")"
   url="$(jq -r '.data.issueCreate.issue.url // empty' <<<"$resp")"
   [ "$ok" = "true" ] && [ -n "$key" ] || reject "issueCreate returned success=$ok"
-  applied="$(jq -r '.data.issueCreate.issue.state.id // "?"' <<<"$resp")"
-  sname="$(jq -r '.data.issueCreate.issue.state.name // "?"' <<<"$resp")"
+  if ! verify_resp="$(gql 'query VerifyCreatedIssue($id: String!){ issue(id: $id){ identifier title description parent { id identifier } state { id name } labelIds labels { nodes { name } } } }' \
+                    "$(jq -n --arg id "$key" '{id:$id}')")"; then
+    echo "ISSUE=$key URL=$url"
+    reject "created $key but fresh read-back failed"
+  fi
+  applied="$(jq -r '.data.issue.state.id // "?"' <<<"$verify_resp")"
+  sname="$(jq -r '.data.issue.state.name // "?"' <<<"$verify_resp")"
   title_chars="$(jq -n --arg t "$TITLE" '$t | length')"
   description_chars="$(jq -r '.description | length' <<<"$input")"
   title_applied=0; description_applied=0; parent_applied=0; verify_error=""
-  if jq -e --arg t "$TITLE" '.data.issueCreate.issue.title == $t' <<<"$resp" >/dev/null; then title_applied=1; else verify_error="title"; fi
+  if jq -e --arg t "$TITLE" '.data.issue.title == $t' <<<"$verify_resp" >/dev/null; then title_applied=1; else verify_error="title"; fi
   expected_description="$(jq -c '.description' <<<"$input")"
-  if jq -e --argjson expected "$expected_description" '.data.issueCreate.issue.description == $expected' <<<"$resp" >/dev/null; then description_applied=1; else verify_error="${verify_error:+$verify_error/}description"; fi
-  actual_parent_id="$(jq -r '.data.issueCreate.issue.parent.id // "none"' <<<"$resp")"
-  actual_parent_key="$(jq -r '.data.issueCreate.issue.parent.identifier // "none"' <<<"$resp")"
+  if jq -e --argjson expected "$expected_description" '
+    def canonical_description:
+      if . == null then null
+      else gsub("\r\n"; "\n") | gsub("\r"; "\n") | sub("\n+$"; "")
+      end;
+    (.data.issue.description | canonical_description) == ($expected | canonical_description)
+  ' <<<"$verify_resp" >/dev/null; then description_applied=1; else verify_error="${verify_error:+$verify_error/}description"; fi
+  actual_parent_id="$(jq -r '.data.issue.parent.id // "none"' <<<"$verify_resp")"
+  actual_parent_key="$(jq -r '.data.issue.parent.identifier // "none"' <<<"$verify_resp")"
   expected_parent_id="${PARENT_UUID:-none}"
   expected_parent_key="${PARENT_IDENTIFIER:-none}"
   if [ "$actual_parent_id" = "$expected_parent_id" ] && [ "$actual_parent_key" = "$expected_parent_key" ]; then parent_applied=1; else verify_error="${verify_error:+$verify_error/}parent"; fi
   out="ISSUE=$key URL=$url STATE_APPLIED=$applied PRIORITY=$PRIORITY TITLE_APPLIED=$title_applied TITLE_CHARS=$title_chars DESCRIPTION_APPLIED=$description_applied DESCRIPTION_CHARS=$description_chars PARENT_APPLIED=$parent_applied PARENT=$actual_parent_key PARENT_ID=$actual_parent_id"
   if [ "$LABEL_IDS" != '[]' ]; then
     expected_labels="$(jq -c 'sort' <<<"$LABEL_IDS")"
-    actual_labels="$(jq -c '.data.issueCreate.issue.labelIds // [] | sort' <<<"$resp")"
+    actual_labels="$(jq -c '.data.issue.labelIds // [] | sort' <<<"$verify_resp")"
     if [ "$expected_labels" = "$actual_labels" ]; then labels_applied=1; else labels_applied=0; verify_error="${verify_error:+$verify_error/}labels"; fi
-    names="$(jq -r '[.data.issueCreate.issue.labels.nodes[].name] | join(",")' <<<"$resp")"
+    names="$(jq -r '[.data.issue.labels.nodes[].name] | join(",")' <<<"$verify_resp")"
     out="$out LABELS_APPLIED=$labels_applied LABELS=$names"
   else
     out="$out STATE_NAME=$sname"

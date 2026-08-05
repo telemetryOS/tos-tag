@@ -14,27 +14,27 @@ import (
 type MemoryStore struct {
 	mu sync.RWMutex
 
-	now              func() time.Time
-	messageRetention time.Duration
-	observations     map[string]models.Observation
-	byPublic         map[string]string
-	messages         map[string]models.ChannelMessage
-	channelSeq       map[string]int64
-	organizationSeq  map[string]int64
+	now                  func() time.Time
+	observationRetention time.Duration
+	observations         map[string]models.Observation
+	byPublic             map[string]string
+	messages             map[string]models.ChannelMessage
+	channelSeq           map[string]int64
+	organizationSeq      map[string]int64
 }
 
-func NewMemoryStore(messageRetention time.Duration, now func() time.Time) *MemoryStore {
+func NewMemoryStore(observationRetention time.Duration, now func() time.Time) *MemoryStore {
 	if now == nil {
 		now = time.Now
 	}
 	return &MemoryStore{
-		now:              now,
-		messageRetention: messageRetention,
-		observations:     make(map[string]models.Observation),
-		byPublic:         make(map[string]string),
-		messages:         make(map[string]models.ChannelMessage),
-		channelSeq:       make(map[string]int64),
-		organizationSeq:  make(map[string]int64),
+		now:                  now,
+		observationRetention: observationRetention,
+		observations:         make(map[string]models.Observation),
+		byPublic:             make(map[string]string),
+		messages:             make(map[string]models.ChannelMessage),
+		channelSeq:           make(map[string]int64),
+		organizationSeq:      make(map[string]int64),
 	}
 }
 
@@ -88,7 +88,7 @@ func (s *MemoryStore) accept(envelope types.SlackEnvelope, scopeState, decisionS
 		IsMention:               envelope.IsMention,
 		OriginTag:               envelope.OriginTag,
 		CreatedAt:               now,
-		ExpiresAt:               at.Add(s.messageRetention),
+		ExpiresAt:               at.Add(s.observationRetention),
 		Version:                 1,
 	}
 	s.observations[dedupeKey] = observation
@@ -200,7 +200,6 @@ func (s *MemoryStore) applyProjection(envelope types.SlackEnvelope, observation 
 		ProjectionVersion: 1,
 		OriginalAt:        originalAt,
 		UpdatedAt:         now,
-		ExpiresAt:         originalAt.Add(s.messageRetention),
 	}
 }
 
@@ -237,12 +236,11 @@ func (s *MemoryStore) Recent(_ context.Context, organizationID string, channelID
 	for _, id := range channelIDs {
 		allowed[id] = struct{}{}
 	}
-	now := s.now().UTC()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]models.ChannelMessage, 0, limit)
 	for _, message := range s.messages {
-		if message.OrganizationID != organizationID || message.Deleted || !message.ExpiresAt.After(now) || message.OriginalAt.Before(since) {
+		if message.OrganizationID != organizationID || message.Deleted || message.OriginalAt.Before(since) {
 			continue
 		}
 		if _, ok := allowed[message.ChannelID]; !ok {
@@ -266,7 +264,7 @@ func (s *MemoryStore) CurrentMessage(_ context.Context, organizationID, teamID, 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	message, ok := s.messages[messageKey(organizationID, teamID, channelID, messageTS)]
-	if !ok || !message.ExpiresAt.After(s.now().UTC()) {
+	if !ok {
 		return models.ChannelMessage{}, ErrMessageNotFound
 	}
 	return message, nil

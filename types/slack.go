@@ -20,6 +20,10 @@ const (
 const (
 	SlackMessageSubtypeBotMessage         = "bot_message"
 	SlackMessageSubtypeAssistantAppThread = "assistant_app_thread"
+	SlackMessageSubtypeChannelJoin        = "channel_join"
+	SlackMessageSubtypeChannelLeave       = "channel_leave"
+	SlackMessageSubtypeGroupJoin          = "group_join"
+	SlackMessageSubtypeGroupLeave         = "group_leave"
 )
 
 // SlackChannelKindGroupDM identifies multi-party direct messages (Slack
@@ -28,8 +32,8 @@ const (
 const SlackChannelKindGroupDM = "mpim"
 
 // SlackChannelKindDirectMessage identifies one-to-one direct messages (Slack
-// channel_type "im"). Unlike group DMs, explicitly enrolled DMs are valid
-// destinations and a human message is inherently addressed to Tag.
+// channel_type "im"). Unlike group DMs, DMs are automatically enrolled as
+// assist destinations and a human message is inherently addressed to Tag.
 const SlackChannelKindDirectMessage = "im"
 
 type SlackEnvelope struct {
@@ -75,6 +79,18 @@ func IsSlackIntegrationMessage(botID, subtype string) bool {
 	}
 	switch subtype {
 	case SlackMessageSubtypeBotMessage, SlackMessageSubtypeAssistantAppThread:
+		return true
+	default:
+		return false
+	}
+}
+
+// MembershipEvent reports Slack's non-conversational join/leave messages.
+// They are useful as local channel context, but must never become classifier
+// input or an invocation grant—even when nearby context describes an incident.
+func (e SlackEnvelope) MembershipEvent() bool {
+	switch e.Subtype {
+	case SlackMessageSubtypeChannelJoin, SlackMessageSubtypeChannelLeave, SlackMessageSubtypeGroupJoin, SlackMessageSubtypeGroupLeave:
 		return true
 	default:
 		return false

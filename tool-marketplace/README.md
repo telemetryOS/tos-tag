@@ -16,8 +16,8 @@ line reads while rejecting arbitrary remotes/branches, traversal, symlinks,
 runtime environment files, credential ledgers, and private tool state. It
 deliberately provides neither a generic shell nor a source-write operation.
 The loader and executor both reject the bundle unless every operation remains
-exactly `read` risk. Source-mutation intent is routed to Linear bug/feature
-intake and cannot be converted into an approval.
+exactly `read` risk. Source-mutation intent is silently suppressed before
+worker admission and cannot be converted into a response or approval.
 
 ## Catalog
 
@@ -25,7 +25,7 @@ intake and cannot be converted into an approval.
 | --- | --- | --- | --- |
 | `telemetryos.code` | `read` | Risk-based | Aion inventory, owner-only snapshot/index/model paths, and GitHub CLI credential-store path; none are worker-visible |
 | `telemetryos.product-docs` | `read` | Never | None; fixed public TelemetryOS HTTPS sources only |
-| `telemetryos.linear` | `read`, `write` | Risk-based | `LINEAR_API_KEY` |
+| `telemetryos.linear` | `read`, `intake`, `write` | Never for bounded bug/feature intake; risk-based otherwise | `LINEAR_API_KEY` |
 | `telemetryos.wiki` | `read`, `write`, `delete` | Never for read/write; always for recoverable page soft-delete | `WIKI_URL`, `WIKI_TOKEN` |
 | `telemetryos.otel` | `read` | Risk-based | `SIGNOZ_URL`, `SIGNOZ_API_KEY` |
 | `telemetryos.analytics` | `read` | Never | `TELEMETRYOS_ANALYTICS_URL` (validated public origin), `SITE_ANALYTICS_TOKEN` |
@@ -35,10 +35,16 @@ intake and cannot be converted into an approval.
 Every operation runs only when the current job capability permits it. Omitted
 approval policy is risk-based, so `write` and `destructive` normally require a
 durable, single-use exact-action Slack approval. Admin-risk worker operations
-are rejected. The reviewed Wiki bundle explicitly declares `approval: never`
-for page read/write authoring and `approval: always` for recoverable page
-soft-delete. Namespace, asset, publish-file, cascading move, activity, generic
-undo, and admin calls are not declared and are rejected. All permitted calls still produce
+are rejected. The reviewed Linear bundle declares `approval: never` only for
+its `intake` operation, whose wrapper permits bounded bug/feature creation,
+evidence comments, feature normalization, and suitability follow-up; generic
+Linear `write` remains risk-based. Linear title and description writes use a
+separate issue read-back, with only line endings and trailing description
+newlines normalized, so stale mutation payloads cannot produce false failures.
+The reviewed Wiki bundle explicitly declares
+`approval: never` for page read/write authoring and `approval: always` for
+recoverable page soft-delete. Namespace, asset, publish-file, cascading move,
+activity, generic undo, and admin calls are not declared and are rejected. All permitted calls still produce
 requested/completed audit receipts and retain every other gateway constraint.
 Tool selection is also constrained by
 the configured tool-ID allowlist and by each injected skill's declared

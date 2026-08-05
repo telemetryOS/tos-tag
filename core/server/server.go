@@ -624,7 +624,7 @@ func (s *Server) putChannel(w http.ResponseWriter, r *http.Request) {
 	if !decodeMutation(w, r, s.csrf, &policy) {
 		return
 	}
-	if !s.auditMutation(w, r, policy.OrganizationID, policy.ChannelID, "channel_policy.put", "admin", map[string]any{"team_id": policy.TeamID, "enrolled": policy.Enrolled, "restricted": policy.Restricted, "kill_switch": policy.KillSwitch, "history_mode": string(policy.ContextHistoryMode), "participation_mode": string(policy.ParticipationMode), "participation_managed_by_membership": policy.ParticipationManagedByMembership}) {
+	if !s.auditMutation(w, r, policy.OrganizationID, policy.ChannelID, "channel_policy.put", "admin", map[string]any{"team_id": policy.TeamID, "enrolled": policy.Enrolled, "restricted": policy.Restricted, "kill_switch": policy.KillSwitch, "history_mode": string(policy.ContextHistoryMode), "participation_mode": string(policy.ParticipationMode), "participation_managed_by_membership": policy.ParticipationManagedByMembership, "trusted_integration_bot_count": len(policy.TrustedIntegrationBotIDs)}) {
 		return
 	}
 	saved, err := s.deps.Organizations.PutChannel(r.Context(), policy)

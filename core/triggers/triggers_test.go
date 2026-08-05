@@ -43,7 +43,7 @@ func TestHeartbeatGateControlsIdempotentJobAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	values, _ := queue.List(context.Background())
-	if len(values) != 1 || values[0].Kind != "heartbeat" || values[0].IdempotencyKey != "trigger/heartbeat/2026-07-31T13:00:00Z" {
+	if len(values) != 1 || values[0].Kind != "heartbeat" || values[0].IdempotencyKey != "trigger/channel/heartbeat/2026-07-31T13:00:00Z" {
 		t.Fatalf("heartbeat job = %#v", values)
 	}
 }
@@ -82,7 +82,7 @@ func TestHeartbeatFailsSilentOnClassifierOrAuthorizationError(t *testing.T) {
 	}
 }
 
-func TestStoreRejectsCrossChannelSubscriptionOverwrite(t *testing.T) {
+func TestStoreKeepsSameNamedSubscriptionsChannelScoped(t *testing.T) {
 	now := time.Now().UTC()
 	store := NewStore(func() time.Time { return now })
 	original := testSubscription(now)
@@ -91,12 +91,15 @@ func TestStoreRejectsCrossChannelSubscriptionOverwrite(t *testing.T) {
 	}
 	conflicting := original
 	conflicting.ChannelID = "other-channel"
-	if _, err := store.PutContext(context.Background(), conflicting); !errors.Is(err, ErrScopeConflict) {
-		t.Fatalf("cross-channel overwrite error = %v", err)
+	if _, err := store.PutContext(context.Background(), conflicting); err != nil {
+		t.Fatalf("second channel save error = %v", err)
 	}
-	stored, _ := store.GetContext(context.Background(), original.OrganizationID, original.ID)
+	stored, _ := store.GetContext(context.Background(), original.OrganizationID, original.WorkspaceID, original.ChannelID, original.ID)
 	if stored.ChannelID != original.ChannelID {
 		t.Fatalf("cross-channel overwrite changed owner: %#v", stored)
+	}
+	if values, err := store.ListChannel(context.Background(), original.OrganizationID, original.WorkspaceID, conflicting.ChannelID); err != nil || len(values) != 1 {
+		t.Fatalf("second channel subscriptions=%#v err=%v", values, err)
 	}
 }
 
@@ -110,10 +113,10 @@ func TestCronHeartbeatAdvancesInConfiguredTimezone(t *testing.T) {
 	if _, err := store.PutContext(context.Background(), subscription); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AdvanceContext(context.Background(), subscription.OrganizationID, subscription.ID, now); err != nil {
+	if err := store.AdvanceContext(context.Background(), subscription.OrganizationID, subscription.WorkspaceID, subscription.ChannelID, subscription.ID, now); err != nil {
 		t.Fatal(err)
 	}
-	stored, err := store.GetContext(context.Background(), subscription.OrganizationID, subscription.ID)
+	stored, err := store.GetContext(context.Background(), subscription.OrganizationID, subscription.WorkspaceID, subscription.ChannelID, subscription.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

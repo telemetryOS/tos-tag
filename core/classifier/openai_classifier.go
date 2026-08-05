@@ -138,6 +138,7 @@ func (c *OpenAIClassifier) Decide(ctx context.Context, target Target, pack types
 		DestinationChannelID:                target.Envelope.ChannelID,
 		Mode:                                target.Mode,
 		DirectMention:                       target.Envelope.IsMention,
+		DirectMessage:                       isDirectMessageTarget(target),
 		ActiveThread:                        target.ActiveThread,
 		Sources:                             pack.Sources,
 		DestinationRecentParticipantIDs:     recentParticipantIDs,
@@ -321,6 +322,7 @@ type classifierInput struct {
 	DestinationChannelID                string                   `json:"destination_channel_id,omitempty"`
 	Mode                                types.ParticipationMode  `json:"mode"`
 	DirectMention                       bool                     `json:"direct_mention"`
+	DirectMessage                       bool                     `json:"direct_message"`
 	ActiveThread                        bool                     `json:"active_thread"`
 	Sources                             []types.ContextSource    `json:"sources"`
 	DestinationRecentParticipantIDs     []string                 `json:"destination_recent_participant_ids,omitempty"`
@@ -539,15 +541,15 @@ func isMissingLocationWeatherQuestion(text string) bool {
 	return true
 }
 
-const classifierInstructions = `You are tos-tag's stateless, tool-free Slack classifier. Using only the immutable input, decide whether to remain silent, react only, answer in the current thread, answer in the channel, start background agent work, or request approval. Choose the least disruptive placement. A direct mention is a hard participation trigger but not automatically a thread: choose reply_in_channel when the expected answer is brief, self-contained, useful to the channel, and unlikely to invite follow-up; choose reply_in_thread when the answer itself is likely to become a deeper dive, needs multiple explanatory steps, code, a table, an artifact, concerns a narrow side topic, or is likely to continue as a conversation. Internal retrieval or tool use alone does not force a thread: judge placement by the expected final Slack message. A requested table, structured report, code sample, artifact, research result, multi-part comparison, implementation plan, migration plan, or question asking what would need to change is not a brief answer and must use reply_in_thread with at least standard/medium routing even when it can be self-contained. Honor an explicit request to reply in the channel or in a thread. When active_thread is true, keep any substantive response in that thread. For ambient messages, default to silent on ambiguity, repetition, or an already-answered question.
+const classifierInstructions = `You are tos-tag's stateless, tool-free Slack classifier. Using only the immutable input, decide whether to remain silent, react only, answer in the current thread, answer in the channel, start background agent work, or request approval. Choose the least disruptive placement. A direct mention is a hard participation trigger but not automatically a thread: choose reply_in_channel when the expected answer is brief, self-contained, useful to the channel, and unlikely to invite follow-up; choose reply_in_thread when the answer itself is likely to become a deeper dive, needs multiple explanatory steps, code, a table, an artifact, concerns a narrow side topic, or is likely to continue as a conversation. When direct_message is true, the human is speaking one-to-one with Tag: never choose silent or react_only for that human turn. Reply directly for social conversation or escalate substantive work to the full agent using the normal placement and model-routing rules. Internal retrieval or tool use alone does not force a thread: judge placement by the expected final Slack message. A requested table, structured report, code sample, artifact, research result, multi-part comparison, implementation plan, migration plan, or question asking what would need to change is not a brief answer and must use reply_in_thread with at least standard/medium routing even when it can be self-contained. Honor an explicit request to reply in the channel or in a thread. When active_thread is true, keep any substantive response in that thread. For ambient messages, default to silent on ambiguity, repetition, or an already-answered question.
 
 likely_addressed_to_agent is a deterministic conversational signal, not a direct mention: it is true only when the current author is the sole recent human participant represented in destination context and the immediately preceding destination message came from Tag. Treat a clear question or imperative request with this signal as likely directed to Tag even when it omits a mention. conversation_focus is a short chronological view of the latest destination-local human and Tag turns; use it before the larger source set to resolve conversational pronouns and short follow-ups. In an active thread, conversation_focus contains only thread-partition turns: do not reinterpret a short thread follow-up using an unrelated channel or other-thread message from the larger source set. When a question such as "are we using it?" has one clear referent in the immediately preceding Tag turn, answer the underlying question instead of asking what "it" means or merely describing the referent. A time-proximate follow-up such as "Take a look at the OpenAI pricing page" continues the same conversation: admit full-agent retrieval of the named public source, and do not ask the user to provide a URL when that authoritative source is readily discoverable with web search. When a short active-thread message answers a Tag clarification, compose it with the earlier unresolved human request and answer that composed request. Do not claim the channel has only one human member; recent context is not a complete membership roster. If such a weather or forecast question omits the location needed to answer, reply directly in the channel with one short location clarification rather than staying silent or starting a worker.
 
 An active Tag thread is a strong continuation signal, not permission to intrude on a turn addressed to another person. A human-authored thread reply that begins with another Slack user mention and neither mentions nor explicitly addresses Tag is a human-to-human handoff and is deterministically suppressed before this classifier. Mentions later in a request, such as "summarize this for <@U123>", remain valid requested recipients and do not suppress Tag.
 
-Set source_write_requested true when the message asks tos-tag to edit, implement, fix, patch, refactor, commit, push, merge, deploy, or otherwise mutate TelemetryOS source code or a TelemetryOS repository. Set it false for read-only investigation, code explanation or review, code samples or pseudocode, Linear issue CRUD, Wiki page CRUD, Slack configuration, and non-source actions. Requested Wiki page text may itself mention code, source writes, source-write redirection, regressions, or implementation; those are document contents, not source-mutation instructions. Source access is permanently read-only: a source-write request must receive only the control-plane redirect to create a Linear bug for broken existing behavior or a Linear feature for new or changed behavior. Do not propose or recommend a source mutation workflow.
+Set source_write_requested true when the message asks tos-tag to edit, implement, fix, patch, refactor, commit, push, merge, deploy, or otherwise mutate TelemetryOS source code or a TelemetryOS repository. Set it false for read-only investigation, code explanation or review, code samples or pseudocode, Linear issue CRUD, Wiki page CRUD, Slack configuration, and non-source actions. Requested Wiki page text may itself mention code, source writes, source-write suppression, regressions, or implementation; those are document contents, not source-mutation instructions. Source access is permanently read-only: a source-write request must be silent, with no direct reply, reaction, worker, or approval flow. Do not propose, recommend, or redirect to a source mutation workflow.
 
-Set authoritative_product_retrieval_required true for any question or requested claim about a named TelemetryOS product, hardware model, plan, trial, pricing tier, feature, limit, compatibility rule, setup procedure, API, security/compliance property, or positioning. Also set it true for every request to create or revise TelemetryOS marketing copy, including campaigns, landing pages, sales collateral, customer announcements, social posts, headlines, taglines, and CTAs; the worker must use the marketing-messaging skill and retrieve the full corporate source before drafting. This includes apparently simple questions such as what the Premium Trial is about. Set it false for generic technology questions, social messages, source-write redirects, and questions whose complete authoritative excerpt is already supplied in the current message. When true, admit a full agent and require it to retrieve the Agent Wiki Primer and/or official TelemetryOS product documentation before answering; Slack context and generic model memory are not authoritative product evidence. Authoritative retrieval alone does not force a thread: a short definitional what-is product, plan, or trial question and another simple factual product answer that should fit in one short message belong in the channel, while a comparison, table, caveated explanation, or likely follow-up belongs in a thread. Product retrieval requires at least standard/medium routing in either placement because the worker must reliably use the knowledge tools and fetch full authoritative content.
+Set authoritative_product_retrieval_required true for any question or requested claim about a named TelemetryOS product, hardware model, plan, trial, pricing tier, feature, limit, compatibility rule, setup procedure, API, security/compliance property, or positioning. Also set it true for every request to create or revise TelemetryOS marketing copy, including campaigns, landing pages, sales collateral, customer announcements, social posts, headlines, taglines, and CTAs; the worker must use the marketing-messaging skill and retrieve the full corporate source before drafting. This includes apparently simple questions such as what the Premium Trial is about. Set it false for generic technology questions, social messages, source-write requests, and questions whose complete authoritative excerpt is already supplied in the current message. When true, admit a full agent and require it to retrieve the Agent Wiki Primer and/or official TelemetryOS product documentation before answering; Slack context and generic model memory are not authoritative product evidence. Authoritative retrieval alone does not force a thread: a short definitional what-is product, plan, or trial question and another simple factual product answer that should fit in one short message belong in the channel, while a comparison, table, caveated explanation, or likely follow-up belongs in a thread. Product retrieval requires at least standard/medium routing in either placement because the worker must reliably use the knowledge tools and fetch full authoritative content.
 
 Use destination-safe sources when they materially resolve the current message, and list every source used in releasable_evidence_ids. Leave releasable_evidence_ids empty when the full agent must retrieve the answer from product knowledge, the Wiki, public documentation, or the web; source IDs are only for exact immutable context sources supplied in the input. A clear unresolved comparison about the organization's products, billing plans, pricing tiers, or device tiers in assist mode is useful ambient work even without a direct mention: admit a full agent so it can retrieve authoritative knowledge, using a thread and standard/medium routing. Do not generalize this rule to every ambient factual question. A clear operational-status question with current destination-safe incident evidence requires an answer rather than react-only; prefer a thread when the status is likely to need supporting detail or follow-up. Never answer from restricted-awareness-only material. Participation mode controls initiative: assist may answer a clear unresolved ambient question when useful, but it must not start full-agent work merely because an unmentioned top-level declarative status says that something failed, is unavailable, or needs attention. The likely_addressed_to_agent signal authorizes a clear question or request, not a bare declaration. Proactive may react to or answer a clear actionable failure, risk, or incident signal; mention and observe restrictions are enforced independently by the admission service. Prefer react-only for a top-level ambient, non-urgent metric or risk observation that asks for no work and needs no explanation. In particular, an elevated metric explicitly described as stable or steady with no errors or failures should normally receive only warning, not a reply or worker job, unless it is marked urgent, critical, paging, failing, or needing attention.
 
@@ -711,9 +713,7 @@ func withDefaultReaction(decision types.ClassificationDecision, reactions []stri
 		return decision
 	}
 	preferred := []string{"speech_balloon", "eyes"}
-	if decision.SourceWriteRequested {
-		preferred = []string{"speech_balloon", "eyes"}
-	} else if decision.DirectReply != "" {
+	if decision.DirectReply != "" {
 		preferred = []string{"white_check_mark", "speech_balloon"}
 	} else if decision.Outcome == types.OutcomeStartBackgroundJob || decision.Outcome == types.OutcomeEscalateForApproval {
 		preferred = []string{"eyes", "thinking_face"}
@@ -739,8 +739,6 @@ func withPolicyReactionAllowlist(decision types.ClassificationDecision, provider
 	return decision
 }
 
-const sourceWriteRedirectReply = "TelemetryOS source is read-only here. Please file broken existing behavior as a Linear bug and new or changed behavior as a Linear feature, or ask me to create the issue for you."
-
 func withSourceWritePolicyCorrections(decision types.ClassificationDecision, target Target) types.ClassificationDecision {
 	if isObviousWikiPageCRUDRequest(target.Envelope.Text) && !isExplicitSeparateSourceMutationRequest(target.Envelope.Text) {
 		decision.Outcome = types.OutcomeReplyInThread
@@ -759,33 +757,25 @@ func withSourceWritePolicyCorrections(decision types.ClassificationDecision, tar
 		return decision
 	}
 	// The provider's source_write_requested flag is advisory. Confirm it against
-	// the user's actual text before replacing a classifier result with the Linear
-	// redirect. This prevents report titles and other declarative references such
-	// as "GitHub commit volume" from being treated as mutation requests.
+	// the user's actual text before suppressing the classifier result. This
+	// prevents report titles and other declarative references from being treated
+	// as mutation requests.
 	if !isObviousSourceWriteRequest(target.Envelope.Text) {
 		if decision.SourceWriteRequested {
 			decision.SourceWriteRequested = false
 			decision.ReasonCodes = append(decision.ReasonCodes, "policy.unconfirmed_source_write_ignored")
-			if decision.DirectReply == sourceWriteRedirectReply {
-				decision.DirectReply = ""
-			}
+			decision.DirectReply = ""
 		}
 		return decision
 	}
-	outcome := types.OutcomeReplyInChannel
-	if target.ActiveThread {
-		outcome = types.OutcomeReplyInThread
-	}
 	return types.ClassificationDecision{
-		Outcome:                  outcome,
+		Outcome:                  types.OutcomeSilent,
 		Confidence:               max(decision.Confidence, 0.99),
-		ReasonCodes:              append(decision.ReasonCodes, "policy.source_write_to_linear"),
-		ResponseIntent:           "direct the requester to Linear issue intake because TelemetryOS source access is read-only",
-		DirectReply:              sourceWriteRedirectReply,
+		ReasonCodes:              append(decision.ReasonCodes, "policy.source_write_silent"),
+		ResponseIntent:           "silently suppress the source-write request",
 		SourceWriteRequested:     true,
 		ProductRetrievalRequired: false,
 		DisclosureClass:          types.DisclosureDestinationSafe,
-		Reaction:                 "speech_balloon",
 		AgentModelStrength:       "none",
 	}
 }
@@ -838,9 +828,9 @@ func isObviousSourceWriteRequest(text string) bool {
 		"deploy the ", "deploy this", "please deploy ", "ship the ", "ship this",
 	)
 	engineeringAction := containsAny(lower, "implement ", "refactor ", "patch ", "fix the bug", "fix this bug", "fix that bug", "fix the regression", "build the feature", "add support for ", "remove support for ")
-	// Match source nouns as whole words. Loose prefixes such as " repo" and
-	// " pr" also match ordinary status-report words such as "reports" and
-	// product names such as "Premium".
+	// Match source nouns and nearby mutation verbs as whole words. Loose
+	// substring matching turns words such as "adoption" into "add" and can make
+	// an ordinary concept post mentioning "code review" look like a code change.
 	sourceSurface := containsAnyWholeWord(lower, "code", "codebase", "source", "sources", "repo", "repos", "repository", "repositories", "branch", "branches", "commit") || strings.Contains(lower, "pull request")
 	// tos-tag is itself a repository/source surface. Match the mutation verb and
 	// name together so a normal <@tos-tag> mention is not mistaken for a write.
@@ -851,7 +841,27 @@ func isObviousSourceWriteRequest(text string) bool {
 	// Commit, push, merge, and deploy can also be nouns in report titles. They
 	// are handled only by the explicit request phrases above; do not let one noun
 	// satisfy both the source-surface and mutation-action sides of this check.
-	return explicit || engineeringAction || namedRepoMutation || (sourceSurface && containsAny(lower, "edit", "change", "modify", "update", "write", "fix", "add", "remove", "rename", "delete"))
+	return explicit || engineeringAction || namedRepoMutation || (sourceSurface && hasNearbySourceMutationAction(lower))
+}
+
+func hasNearbySourceMutationAction(text string) bool {
+	tokens := strings.FieldsFunc(text, func(character rune) bool {
+		return !unicode.IsLetter(character) && !unicode.IsNumber(character)
+	})
+	actions := []string{"edit", "change", "modify", "update", "write", "fix", "add", "remove", "rename", "delete"}
+	surfaces := []string{"code", "codebase", "source", "sources", "repo", "repos", "repository", "repositories", "branch", "branches", "commit"}
+	for index, token := range tokens {
+		if !slices.Contains(actions, token) {
+			continue
+		}
+		start, end := max(0, index-4), min(len(tokens), index+5)
+		for _, nearby := range tokens[start:end] {
+			if slices.Contains(surfaces, nearby) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func containsAnyWholeWord(text string, words ...string) bool {
@@ -985,7 +995,7 @@ func withImplementationPlanningPolicyCorrections(decision types.ClassificationDe
 	decision.Outcome = types.OutcomeReplyInThread
 	decision.Confidence = max(decision.Confidence, 0.99)
 	decision.ReasonCodes = slices.DeleteFunc(decision.ReasonCodes, func(reason string) bool {
-		return reason == "policy.source_write_to_linear"
+		return reason == "policy.source_write_silent"
 	})
 	decision.ReasonCodes = appendUnique(decision.ReasonCodes, "policy.implementation_plan_thread")
 	decision.ResponseIntent = "provide a bounded implementation plan without modifying source; explain the required changes, safety constraints, and verification"
@@ -1213,7 +1223,7 @@ func withAddressedSocialPolicyCorrections(decision types.ClassificationDecision,
 }
 
 func withAmbientPolicyCorrections(decision types.ClassificationDecision, target Target, pack types.ContextPackRevision, profiles []advertisedAgentProfile) types.ClassificationDecision {
-	if decision.DirectReply != "" || target.Envelope.IsMention || target.ActiveThread {
+	if decision.DirectReply != "" || target.Envelope.IsMention || isDirectMessageTarget(target) || target.ActiveThread {
 		return decision
 	}
 	if target.Mode == types.ModeAssist && isUndirectedAmbientQuestion(target.Envelope.Text) && !decision.ProductRetrievalRequired && len(decision.ReleasableEvidenceIDs) == 0 && len(decision.RestrictedSignalIDs) == 0 {

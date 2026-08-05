@@ -40,11 +40,28 @@ func TestAdvanceIsTenantScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AdvanceContext(context.Background(), "org-b", "shared", now); err == nil {
+	if err := store.AdvanceContext(context.Background(), "org-b", "w", "c", "shared", now); err == nil {
 		t.Fatal("cross-tenant routine advance succeeded")
 	}
 	due, err := store.DueContext(context.Background(), now, 10)
 	if err != nil || len(due) != 1 {
 		t.Fatalf("routine was changed across tenant boundary: due=%#v err=%v", due, err)
+	}
+}
+
+func TestRoutineIdentityIsChannelScoped(t *testing.T) {
+	now := time.Now().UTC()
+	store := NewStore()
+	base := Routine{ID: "daily", OrganizationID: "org", WorkspaceID: "team", ChannelID: "alerts", SessionID: "s1", Generation: 1, OwnerID: "user", Input: "brief", Interval: time.Hour, NextRun: now, Enabled: true}
+	if _, err := store.Put(base); err != nil {
+		t.Fatal(err)
+	}
+	other := base
+	other.ChannelID, other.SessionID = "operations", "s2"
+	if _, err := store.Put(other); err != nil {
+		t.Fatal(err)
+	}
+	if values, err := store.ListChannel(context.Background(), "org", "team", "alerts"); err != nil || len(values) != 1 || values[0].ChannelID != "alerts" {
+		t.Fatalf("alerts routines=%#v err=%v", values, err)
 	}
 }

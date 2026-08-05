@@ -17,21 +17,23 @@ The explicitly approved local development deployment may observe all
 user-authorized conversations and bootstrap bounded history once. Durable,
 content-free per-conversation completion state prevents full replay on restart.
 Completed bot-joined channels receive bounded post-watermark repair; ambient
-history remains resolved context and only human direct mentions can become
-pending decisions. First-time history and
+history remains resolved context and only human direct mentions or one-to-one
+DMs can become pending decisions. First-time history and
 observe-only conversations never gain output authority from catch-up. Newly discovered
 conversations begin observe-only; public/private channels become assist only
 after an independent bot-token inventory or membership event confirms Tag has
 joined. Leaving reverts the channel to observe before further execution or
-delivery. DMs and group DMs are never auto-enabled, and an optional exact-ID
-output allowlist can narrow joined-channel authority. This local authority does
+delivery. One-to-one DMs are auto-enabled in assist mode, group DMs remain
+disabled, and an optional exact-ID output allowlist can narrow authority. This local authority does
 not become a tracked default or production authorization.
 
-Slack-authenticated bot, app, workflow, and assistant messages are retained
-only as unverified destination-local context. They bypass classification,
-reactions, agent admission, and delivery even when they mention Tag or post in
-an active Tag thread. Offline recovery applies the same human-author check, and
-classifier suppression protects any older pending integration records.
+Slack-authenticated bot, app, workflow, and assistant messages are retained as
+unverified destination-local context and bypass work by default. The sole
+exception is an exact bot identity trusted through the destination's durable
+channel policy; it admits only new matching messages as classifier-gated
+triggers. Edits, join/leave messages, unmatched bots, and offline recovery
+remain context-only, and classifier suppression protects pending integration
+records without the exact grant.
 
 An operator may set a channel to `session_only` context history. That mode
 fails closed against prior-session Slack history, cross-channel context,
@@ -46,6 +48,11 @@ the minimum live operational records needed for delivery safety and audit.
   it.
 - Tenant and scope predicates are required before data retrieval.
 - Ambient observations cannot authorize writes.
+- Slack agent thread titles are control-plane-owned cosmetic writes limited to
+  newly created one-to-one DM full-agent sessions. Their bounded deterministic
+  source removes Slack markup, URLs, code, controls, and likely secrets; logs
+  retain only content-free identifiers and length, and title failure cannot
+  affect job execution or delivery.
 - Public cross-channel context may inform classification when policy allows;
   private channels, DMs, and group DMs are destination-local before and after
   the content query. Do not reveal even content-free awareness of another
@@ -75,8 +82,8 @@ the minimum live operational records needed for delivery safety and audit.
   they contain source.
 - The code bundle is rejected at load and execution unless every operation is
   exactly `read` risk. Source edits, patches, commits, pushes, merges, and
-  deploys have no worker approval path; the classifier redirects them to
-  Linear bug or feature intake.
+  deploys have no worker approval path; the classifier silently suppresses
+  them before worker admission.
 - `telemetryos.product-docs` remains a deterministic fixed-host reader: it
   constructs HTTPS GETs only for TelemetryOS docs/corporate hosts, rejects
   redirects and arbitrary URLs, has no credential environment, and returns
@@ -137,8 +144,12 @@ If approval is omitted, the conservative risk-based default applies: `write`
 and `destructive` suspend and require an independent exact-action Slack
 approval. Admin-risk worker operations are rejected at manifest load and denied
 again by the executor. Only source-reviewed manifests can opt out. Agent Wiki
-page read/write operations are the current explicit `never` exception; the
-separately typed recoverable page soft-delete always requires approval.
+page read/write operations are an explicit `never` exception. The other is
+`telemetryos.linear/intake`: the harness requires validated bug/feature and
+Linear-management skills, while the reviewed helper permits only bounded issue
+creation, evidence comments, feature normalization, and suitability labels and
+comments. Generic Linear writes remain approval-gated. The separately typed
+recoverable Wiki page soft-delete always requires approval.
 Namespace, asset, publish-file, cascading move, activity, generic undo, and
 admin Wiki operations are unavailable. All permitted calls remain constrained
 by job-scoped capabilities, the selected tool/version/operation, exact argv,
@@ -162,11 +173,21 @@ cannot authorize a fabricated artifact link.
 Correlate observations, classifier decisions, deliveries, jobs, tool calls,
 approvals, triggers, and routines without logging raw Slack envelopes, message
 text, prompts, model/provider bodies, secrets, tool credentials, lease tokens,
-or unbounded results. Keep owner-readable JSONL diagnostics outside Git, retain
-durable audit receipts in MongoDB, and honor TTL/source deletion across derived
-messages, context packs, prompts, and delivery state.
+or unbounded results. Keep owner-readable JSONL diagnostics outside Git and
+retain durable audit receipts in MongoDB. Normalized Slack messages are retained
+indefinitely without a TTL index; the separately configured context lookback,
+30 days by default, limits which messages may enter a newly assembled prompt.
+Raw observations, context packs, prompts, delivery state, and derived records
+continue to honor their own TTL or source-validity boundaries.
 
-Generated memory expires no later than its retained sources. Operator
+Automation identity includes organization, workspace, channel, and stable
+name. `/tag-automations` list/load/save paths reauthorize that exact channel,
+and edits cannot move an existing task. Only configured channel approvers can
+open or save the edit modal. Startup recovers missing legacy scope only from
+the task's durable session; an unresolved task is disabled before the scheduler
+starts.
+
+Generated memory expires no later than its sources' context-validity boundary. Operator
 correction pins a reviewed record; forgetting erases its summary, facts, model
 metadata, and source IDs while retaining only a content-free source hash and
 scope tombstone to prevent immediate relearning. Memory API mutations require

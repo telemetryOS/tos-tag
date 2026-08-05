@@ -23,6 +23,11 @@ type IndexSpec struct {
 	Model      mongo.IndexModel
 }
 
+type ObsoleteIndex struct {
+	Collection string
+	Name       string
+}
+
 type Database struct {
 	cfg    *config.Config
 	logger *blackbox.Logger
@@ -49,6 +54,10 @@ func (d *Database) Connect(ctx context.Context) error {
 		return fmt.Errorf("ping: %w", err)
 	}
 	d.client = client
+	if err := d.MigrateChannelAutomations(ctx); err != nil {
+		_ = d.Disconnect(context.Background())
+		return fmt.Errorf("migrate channel automations: %w", err)
+	}
 	if err := d.EnsureIndexes(ctx); err != nil {
 		_ = d.Disconnect(context.Background())
 		return fmt.Errorf("ensure indexes: %w", err)
@@ -90,6 +99,11 @@ func (d *Database) Collection(name string) *mongo.Collection {
 func (d *Database) EnsureIndexes(ctx context.Context) error {
 	indexCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	for _, spec := range ObsoleteIndexes() {
+		if err := d.Collection(spec.Collection).Indexes().DropOne(indexCtx, spec.Name); err != nil && !isMissingIndex(err) {
+			return fmt.Errorf("drop obsolete index %s/%s: %w", spec.Collection, spec.Name, err)
+		}
+	}
 	for _, spec := range RequiredIndexes() {
 		if _, err := d.Collection(spec.Collection).Indexes().CreateOne(indexCtx, spec.Model); err != nil && !isIndexOptionsConflict(err) {
 			return fmt.Errorf("%s: %w", spec.Collection, err)
@@ -97,6 +111,77 @@ func (d *Database) EnsureIndexes(ctx context.Context) error {
 	}
 	if d.logger != nil {
 		d.logger.Debugf("indexes ensured on %s", d.cfg.Mongo.Database)
+	}
+	return nil
+}
+
+func ObsoleteIndexes() []ObsoleteIndex {
+	return []ObsoleteIndex{
+		{Collection: models.CollectionMessages, Name: "message_expiry"},
+		{Collection: models.CollectionRoutines, Name: "routine_public_unique"},
+		{Collection: models.CollectionEventSubscriptions, Name: "event_subscription_public_unique"},
+	}
+}
+
+// MigrateChannelAutomations backfills the immutable Slack destination on
+// legacy routine/subscription rows from their durable session. Rows whose
+// destination cannot be reconstructed are disabled rather than left runnable
+// without a channel boundary.
+func (d *Database) MigrateChannelAutomations(ctx context.Context) error {
+	if d.DB() == nil {
+		return errors.New("mongo client not connected")
+	}
+	for _, collection := range []string{models.CollectionRoutines, models.CollectionEventSubscriptions} {
+		if err := d.migrateChannelAutomationCollection(ctx, collection); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *Database) migrateChannelAutomationCollection(ctx context.Context, collection string) error {
+	filter := bson.M{"$or": bson.A{
+		bson.M{"workspace_id": bson.M{"$exists": false}}, bson.M{"workspace_id": ""},
+		bson.M{"channel_id": bson.M{"$exists": false}}, bson.M{"channel_id": ""},
+	}}
+	cursor, err := d.Collection(collection).Find(ctx, filter, options.Find().SetProjection(bson.M{"organization_id": 1, "session_id": 1}))
+	if err != nil {
+		return fmt.Errorf("list legacy %s: %w", collection, err)
+	}
+	defer cursor.Close(ctx)
+	var migrated, disabled int
+	for cursor.Next(ctx) {
+		var record struct {
+			ID             bson.ObjectID `bson:"_id"`
+			OrganizationID string        `bson:"organization_id"`
+			SessionID      string        `bson:"session_id"`
+		}
+		if err := cursor.Decode(&record); err != nil {
+			return fmt.Errorf("decode legacy %s: %w", collection, err)
+		}
+		var session models.Session
+		sessionErr := d.Collection(models.CollectionSessions).FindOne(ctx, bson.M{"organization_id": record.OrganizationID, "public_id": record.SessionID}).Decode(&session)
+		if sessionErr != nil || session.TeamID == "" || session.ChannelID == "" {
+			if sessionErr != nil && !errors.Is(sessionErr, mongo.ErrNoDocuments) {
+				return fmt.Errorf("resolve %s session: %w", collection, sessionErr)
+			}
+			if _, err := d.Collection(collection).UpdateOne(ctx, bson.M{"_id": record.ID}, bson.M{"$set": bson.M{"enabled": false, "channel_scope_migration_status": "unresolved", "updated_at": time.Now().UTC()}}); err != nil {
+				return fmt.Errorf("disable unresolved %s: %w", collection, err)
+			}
+			disabled++
+			continue
+		}
+		update := bson.M{"workspace_id": session.TeamID, "channel_id": session.ChannelID, "channel_scope_migration_status": "migrated", "updated_at": time.Now().UTC()}
+		if _, err := d.Collection(collection).UpdateOne(ctx, bson.M{"_id": record.ID}, bson.M{"$set": update}); err != nil {
+			return fmt.Errorf("backfill %s channel scope: %w", collection, err)
+		}
+		migrated++
+	}
+	if err := cursor.Err(); err != nil {
+		return fmt.Errorf("iterate legacy %s: %w", collection, err)
+	}
+	if d.logger != nil && (migrated > 0 || disabled > 0) {
+		d.logger.WithCtx(blackbox.Ctx{"collection": collection, "migrated_count": migrated, "disabled_count": disabled}).Info("channel automation migration completed")
 	}
 	return nil
 }
@@ -123,7 +208,6 @@ func RequiredIndexes() []IndexSpec {
 		{models.CollectionMessages, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "team_id", Value: 1}, {Key: "channel_id", Value: 1}, {Key: "message_ts", Value: 1}}, Options: unique("message_projection_unique")}},
 		{models.CollectionMessages, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "channel_id", Value: 1}, {Key: "original_at", Value: -1}}, Options: named("message_recent")}},
 		{models.CollectionMessages, mongo.IndexModel{Keys: bson.D{{Key: "text", Value: "text"}}, Options: named("message_text")}},
-		{models.CollectionMessages, mongo.IndexModel{Keys: bson.D{{Key: "expires_at", Value: 1}}, Options: ttl("message_expiry")}},
 		{models.CollectionChannelCounters, mongo.IndexModel{Keys: bson.D{{Key: "_id", Value: 1}}, Options: named("channel_counter")}},
 		{models.CollectionOrganizationCounts, mongo.IndexModel{Keys: bson.D{{Key: "_id", Value: 1}}, Options: named("organization_counter")}},
 		{models.CollectionDecisions, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "observation_id", Value: 1}, {Key: "decision_revision", Value: 1}}, Options: unique("decision_revision_unique")}},
@@ -181,11 +265,16 @@ func RequiredIndexes() []IndexSpec {
 		{models.CollectionApprovals, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "public_id", Value: 1}}, Options: unique("approval_public_unique")}},
 		{models.CollectionApprovals, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "expires_at", Value: 1}}, Options: named("approval_pending")}},
 		{models.CollectionApprovals, mongo.IndexModel{Keys: bson.D{{Key: "cleanup_at", Value: 1}}, Options: ttl("approval_cleanup")}},
-		{models.CollectionRoutines, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "public_id", Value: 1}}, Options: unique("routine_public_unique")}},
+		{models.CollectionRoutines, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "workspace_id", Value: 1}, {Key: "channel_id", Value: 1}, {Key: "public_id", Value: 1}}, Options: unique("routine_channel_public_unique")}},
 		{models.CollectionRoutines, mongo.IndexModel{Keys: bson.D{{Key: "enabled", Value: 1}, {Key: "next_run", Value: 1}}, Options: named("routine_due")}},
-		{models.CollectionEventSubscriptions, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "public_id", Value: 1}}, Options: unique("event_subscription_public_unique")}},
+		{models.CollectionEventSubscriptions, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "workspace_id", Value: 1}, {Key: "channel_id", Value: 1}, {Key: "public_id", Value: 1}}, Options: unique("event_subscription_channel_public_unique")}},
 		{models.CollectionEventSubscriptions, mongo.IndexModel{Keys: bson.D{{Key: "enabled", Value: 1}, {Key: "next_run", Value: 1}}, Options: named("event_subscription_due")}},
 	}
+}
+
+func isMissingIndex(err error) bool {
+	var commandErr mongo.CommandError
+	return errors.As(err, &commandErr) && (commandErr.Code == 26 || commandErr.Code == 27)
 }
 
 func isIndexOptionsConflict(err error) bool {

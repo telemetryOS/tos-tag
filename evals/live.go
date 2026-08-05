@@ -124,9 +124,9 @@ func RunLive(ctx context.Context, cfg config.Config) (Score, error) {
 			passed = false
 			failures = append(failures, "full_agent_contract_failed")
 		}
-		if fixture.WantSourceWriteRedirect && (!result.Predicted.SourceWriteRequested || !strings.Contains(result.Predicted.DirectReply, "Linear bug") || !strings.Contains(result.Predicted.DirectReply, "Linear feature")) {
+		if fixture.WantSourceWriteSilent && (!result.Predicted.SourceWriteRequested || result.Predicted.Outcome != types.OutcomeSilent || result.Predicted.DirectReply != "" || result.Predicted.Reaction != "" || result.Predicted.RequiresFullAgent) {
 			passed = false
-			failures = append(failures, "source_write_redirect_contract_failed")
+			failures = append(failures, "source_write_silent_contract_failed")
 		}
 		if fixture.WantProductRetrieval && (!result.Predicted.ProductRetrievalRequired || !result.Predicted.RequiresFullAgent) {
 			passed = false

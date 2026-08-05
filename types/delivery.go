@@ -164,53 +164,34 @@ type SlackReactionResult struct {
 	Duplicate bool      `json:"duplicate"`
 }
 
-type SlackProgressStatus string
-
-const (
-	SlackProgressPending    SlackProgressStatus = "pending"
-	SlackProgressInProgress SlackProgressStatus = "in_progress"
-	SlackProgressComplete   SlackProgressStatus = "complete"
-	SlackProgressError      SlackProgressStatus = "error"
-)
-
-// SlackProgressStep is a safe operational summary for Slack's Thinking Steps
-// timeline. It must never contain hidden reasoning, tool arguments, raw model
-// output, credentials, or private context.
-type SlackProgressStep struct {
-	ID      string                `json:"id"`
-	Title   string                `json:"title"`
-	Status  SlackProgressStatus   `json:"status"`
-	Details string                `json:"details,omitempty"`
-	Output  string                `json:"output,omitempty"`
-	Sources []SlackProgressSource `json:"sources,omitempty"`
+// SlackAgentStatusRequest is a control-plane-owned, transient status for an
+// agent thread. Status text and loading messages must come from an allowlisted
+// operational vocabulary; they must never contain reasoning, tool arguments,
+// raw model output, credentials, or private context.
+type SlackAgentStatusRequest struct {
+	TeamID          string   `json:"team_id"`
+	ChannelID       string   `json:"channel_id"`
+	ThreadTS        string   `json:"thread_ts"`
+	JobID           JobID    `json:"job_id"`
+	Status          string   `json:"status"`
+	LoadingMessages []string `json:"loading_messages,omitempty"`
 }
 
-type SlackProgressSource struct {
-	URL  string `json:"url"`
-	Text string `json:"text"`
-}
-
-type SlackProgressStartRequest struct {
-	IdempotencyKey  string            `json:"idempotency_key"`
-	TeamID          string            `json:"team_id"`
-	ChannelID       string            `json:"channel_id"`
-	ThreadTS        string            `json:"thread_ts,omitempty"`
-	JobID           JobID             `json:"job_id"`
-	RecipientUserID string            `json:"recipient_user_id"`
-	Title           string            `json:"title"`
-	Step            SlackProgressStep `json:"step"`
-}
-
-type SlackProgressUpdateRequest struct {
-	TeamID    string            `json:"team_id"`
-	ChannelID string            `json:"channel_id"`
-	MessageTS string            `json:"message_ts"`
-	JobID     JobID             `json:"job_id"`
-	Step      SlackProgressStep `json:"step"`
-}
-
-type SlackProgressResult struct {
-	MessageTS string    `json:"message_ts"`
+type SlackAgentStatusResult struct {
 	UpdatedAt time.Time `json:"updated_at"`
-	Duplicate bool      `json:"duplicate"`
+}
+
+// SlackThreadTitleRequest is a control-plane-owned label for one Slack agent
+// direct-message thread. The title must be derived and sanitized before it
+// reaches the transport; workers never choose or send it.
+type SlackThreadTitleRequest struct {
+	TeamID    string    `json:"team_id"`
+	ChannelID string    `json:"channel_id"`
+	ThreadTS  string    `json:"thread_ts"`
+	SessionID SessionID `json:"session_id"`
+	Title     string    `json:"title"`
+}
+
+type SlackThreadTitleResult struct {
+	UpdatedAt time.Time `json:"updated_at"`
 }

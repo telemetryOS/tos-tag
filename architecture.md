@@ -76,13 +76,14 @@ only their bounded one-time bootstrap. Exceptional Slack history reads use proac
 per-method pacing and still honor `Retry-After` in the background, keeping
 Socket Mode acknowledgement and live message processing responsive.
 
-Slack-authenticated bot, app, workflow, and assistant messages are never
+Slack-authenticated bot, app, workflow, and assistant messages are not ordinary
 interlocutors. Live ingress and offline catch-up import them as resolved,
 unverified destination-local context without creating pending decisions. A
-classifier hard suppression remains as defense in depth for legacy pending
-records. Consequently another agent cannot elicit a reaction, classifier call,
-job, Thinking Steps stream, or delivery by mentioning Tag or joining an active
-Tag thread.
+destination's durable channel policy may trust exact bot identities and thereby
+authorize only their new messages as classifier-gated triggers; edits,
+membership events, unmatched bots, and recovered history remain context-only.
+Classifier suppression remains defense in depth for every integration record
+without that exact grant.
 
 ## Context and privacy
 
@@ -98,6 +99,10 @@ later process session.
 The context builder selects authorized channels before querying content. It
 then applies a second post-query disclosure filter and creates an immutable,
 source-linked context-pack revision capped by configured partition budgets.
+Normalized Slack messages are retained indefinitely without a Mongo TTL index.
+Direct message selection is bounded separately by a configurable context
+lookback, which defaults to 30 days; persistence does not imply prompt
+inclusion.
 
 Partitions distinguish operator directives, current-thread history,
 destination history, releasable public cross-channel history, reviewed notes,
@@ -123,8 +128,8 @@ tool-free and use `store: false`.
 
 Each Mongo record carries its scope, privacy class, source IDs/hash,
 confidence, nested facts with their own source IDs and expiry, model/effort,
-revision, and natural expiry. Generated memory expires no later than its oldest
-retained source. Public channel memory is releasable across authorized public
+revision, and natural expiry. Generated memory expires no later than the
+context-validity boundary of its oldest source. Public channel memory is releasable across authorized public
 destinations; restricted memory is queried only for the same destination.
 Thread memory is additionally limited to its root thread. Context assembly
 performs a second restricted-channel check.
@@ -315,9 +320,9 @@ announcement, or social-copy request first reads the complete corporate source
 through `telemetryos.product-docs/read corporate-full`, then uses the relevant
 published human page URL for customer-facing links. Technical claims still
 route through `product-knowledge` for corroboration.
-The base `code-change-intake` skill handles the opposite capability boundary:
-requests to mutate TelemetryOS source are redirected to a Linear bug for broken
-existing behavior or a Linear feature for new or changed behavior.
+Requests to mutate TelemetryOS source are silently suppressed before worker
+admission. The base `code-change-intake` skill is available only when the user
+separately and explicitly asks to create a Linear bug or feature.
 
 ## Dynamic tools and credentials
 
@@ -333,8 +338,8 @@ Codex App Server receives three experimental dynamic function tools at
   current Slack channel.
 
 Typed Wiki validation failures expose and persist only closed, content-free
-codes. A corrected call reuses the same Slack Thinking Steps card, so a
-self-corrected validation attempt does not leave a separate failure card.
+codes. A corrected call reuses the same native Slack agent status, so a
+self-corrected validation attempt does not create an in-thread failure message.
 
 The App Server sends `item/tool/call` to the Go client. The control plane, not
 the Codex process, attaches the random attempt capability and calls a loopback
@@ -357,7 +362,7 @@ The current reviewed catalog is:
 | --- | --- | --- | --- |
 | `telemetryos.code` | `read` | Risk-based | On-demand fixed-origin default-branch snapshot freshness plus bounded exact/semantic search/read; no worker mount, credentials, branch/remote selector, shell, traversal, runtime env, or credential ledger |
 | `telemetryos.product-docs` | `read` | Never | Credential-free, fixed-host reads of `docs.telemetryos.com/llms.txt`, its `docs/` or `reference/` Markdown pages, and `www.telemetryos.com/llms-full.txt`; no redirects or arbitrary URLs |
-| `telemetryos.linear` | `read`, `write` | Risk-based | Typed Linear helper operations |
+| `telemetryos.linear` | `read`, `intake`, `write` | Never for bounded bug/feature intake; risk-based otherwise | Typed Linear helper operations |
 | `telemetryos.wiki` | `read`, `write`, `delete` | Never for page read/write; always for recoverable page soft-delete | Page-only CRUD; namespace, asset, publish-file, cascading move, activity, undo, and admin operations are unavailable |
 | `telemetryos.otel` | `read` | Risk-based | Bounded SigNoz/OpenTelemetry queries |
 | `telemetryos.analytics` | `read` | Never | Fixed production/QA funnel, website, account, and event GETs; internal records, direct identifiers, free-form properties, arbitrary paths, and exports are unavailable |
@@ -375,7 +380,9 @@ then read that snapshot; Semble networking is disabled and its verified
 `potion-code-16M-v2` model is local. Source-bearing indexes remain owner-only.
 The tool loader and executor independently reject any `telemetryos.code`
 operation that is not exactly read-only. There is no Slack approval path for
-source edits, patches, commits, pushes, merges, or deployments.
+source edits, patches, commits, pushes, merges, or deployments. The classifier
+silently suppresses those requests before worker admission, without a Slack
+reply or reaction.
 
 `telemetryos.product-docs` is a separate deterministic public-network
 capability. Its script constructs requests from fixed TelemetryOS hosts
@@ -404,10 +411,13 @@ execution audit receipt without being copied into broad audit listings.
 Each operation manifest declares an approval policy. If omitted, the policy is
 risk-based: `write` and `destructive` persist an exact canonical action and
 require Slack-native approval. Admin-risk worker operations are invalid. The
-reviewed Agent Wiki page read/write operations declare `never`, eliminating
-normal authoring prompts without giving the model generic authority; its
-recoverable page soft-delete declares `always`. Namespace and generic
-administrative/destructive Wiki surfaces are absent. All executions still use attempt-scoped capabilities,
+reviewed `telemetryos.linear/intake` operation declares `never` but is accepted
+only with the validated bug/feature workflow and permits only bounded
+create/comment/normalization/suitability arguments. Agent Wiki page read/write
+operations also declare `never`, eliminating normal authoring prompts without
+giving the model generic authority; its recoverable page soft-delete declares
+`always`. Namespace and generic administrative/destructive Wiki surfaces are
+absent. All executions still use attempt-scoped capabilities,
 immutable reviewed scripts, exact argv and environment allowlists, bounded
 timeouts/output, organization kill switches, and tamper-evident audit receipts.
 
@@ -449,9 +459,9 @@ types and generated special mentions, and creates a safe fallback string.
 Long AI-authored section text sets Slack's `expand` hint so substantive answers
 remain visible instead of being collapsed behind “see more.” Modal-only Alert
 blocks communicate channel-directive scope; they are never posted to messages.
-Native agent Cards, Carousels, and Data Tables travel in streamed block chunks;
-ordinary posts and stream-failure fallback deterministically downgrade them to
-standard Sections/Tables while preserving accessible message fallback text.
+Native-only Cards and Carousels deterministically downgrade to standard
+Sections/Tables for ordinary durable replies now that progress streams are no
+longer created; Data Tables and accessible fallback text remain preserved.
 Formatted table cells are converted into native rich-text/link elements, and
 the same validation rejects unproven mentions inside every cell type.
 At the untrusted model boundary, typed table rows with missing cells are padded
@@ -466,42 +476,51 @@ unsafe targets degrade to their visible label instead of failing the job.
 Delivery records are durable and leased. Multipart sends reconcile immutable
 metadata so restart cannot duplicate already accepted parts.
 
+After a one-to-one DM first creates a full-agent session and the corresponding
+job is durably enqueued, the control plane makes one best-effort
+`assistant.threads.setTitle` call for that root thread. The title is derived
+locally from the initial human request, bounded to 80 runes, and stripped of
+Slack markup, URLs, code, controls, and likely secret material; suspicious or
+empty input becomes `Tag request`. The transport rejects non-DM destinations,
+workers cannot select titles, logs omit title text, duplicate events do not
+retitle the session, and API failure remains cosmetic.
+
 Admitted full-agent thread work immediately acknowledges the source with the
-classifier-selected reaction. If the job remains active after the configured
-progress grace period, the control plane sets Slack's transient native thread
-status to `Organizing…` and starts a plan-mode Slack
-[Thinking Steps](https://slack.dev/slack-thinking-steps-ai-agents/) stream in
-the classifier-selected thread. Jobs that finish inside the grace period deliver
-their final threaded answer without creating Slack's generic `Thinking...`
-placeholder. Thread-status failure is cosmetic: the structured stream and final
-delivery continue. The returned stream message timestamp is
-persisted on the leased job. Reviewed harness events become concise task-card
-updates from a fixed control-plane vocabulary. Every native or reviewed tool
-call and every validated active skill replaces one shared current-action card,
-so all steps are visible while they happen without leaving completed-card clutter.
-Dynamic calls must declare active skill names from the injected allowlist. Raw prompts,
-reasoning, tool arguments, tool output, and message deltas are never streamed. Exact HTTPS
-artifact sources may be attached after the reviewed tool boundary validates
-them. On success, the durable delivery record carries the stream timestamp and
-`chat.stopStream` adds the validated Block Kit result as a chunks-mode block
-and finalizes that same message. Successfully completed capability categories are
-deduplicated into the control-plane-owned model footer.
-Start reconciliation uses immutable Slack metadata, retries reuse the persisted
-timestamp, and unsupported stream operations fall back to ordinary durable
-delivery. Intentional reaction-only and short direct classifier outcomes do not
-create a timeline. Slack requires `thread_ts` for streaming, so brief
-classifier-selected in-channel jobs keep their direct placement and do not
-attempt a progress stream.
+classifier-selected reaction and calls `assistant.threads.setStatus`. Slack
+rotates the generic `Understanding the request…`, `Gathering information…`, and
+`Planning the next step…` lifecycle messages while the worker starts. Reviewed
+harness events then replace the status with a fixed, tool-specific operational
+label such as `Consulting Agent Wiki…`, `Checking Linear…`, or `Querying
+telemetry…`; completion and recoverable failure states remain equally bounded.
+The current value is refreshed during long-running work so Slack's two-minute
+status timeout does not hide active work. Status failure is cosmetic and final
+durable delivery continues.
+
+The progress surface is transient only: Tag does not call `chat.startStream` or
+`chat.appendStream`, does not create plan-mode task cards, and does not persist
+a progress-message timestamp for new work. Slack clears the status when the
+validated final reply is posted. Dynamic calls must still declare active skill
+names from the injected allowlist, and the control plane alone selects status
+text. Raw prompts, reasoning, tool arguments, tool output, message deltas,
+credentials, and private context never enter the status. Successfully completed
+capability categories are deduplicated into the control-plane-owned model
+footer. Intentional reaction-only and short direct classifier outcomes do not
+create a status. Because the API requires `thread_ts`, brief classifier-selected
+in-channel jobs keep their direct placement and do not attempt agent status.
 
 The approved local development posture observes all user-authorized
 conversations and enrolls new conversations as `observe`. When explicitly
 enabled, it reconciles that human inventory with a bot-token inventory and
 derives `assist` only for public/private channels Tag has joined; membership
 events apply joins and leaves in real time, with bounded periodic inventory
-reconciliation as a fallback. DMs are not auto-enabled, and group DMs (mpim)
+reconciliation as a fallback. One-to-one DMs are auto-enabled in assist mode,
+and group DMs (mpim)
 are ignored entirely: excluded from discovery, never persisted, and hidden
-from channel coverage. An optional destination allowlist can narrow this set
-further.
+from channel coverage. A one-to-one DM is a hard
+participation surface for every human turn: the direct classifier either emits
+a bounded visible reply or selects normal full-agent work, while silent and
+reaction-only recommendations receive a deterministic visible fallback. An
+optional destination allowlist can narrow this set further.
 Checked-in defaults remain stub/shadow/disabled and do not encode live IDs or
 secrets.
 
@@ -531,6 +550,15 @@ availability/kill-switch state, reconciled bot membership, and public versus
 restricted scope. A directive lookup failure degrades only that row; policy
 lookup fails closed for the entire response.
 
+`/tag-automations` lists direct routines and classifier-gated schedules only
+for the invoking workspace/channel. Its ephemeral Block Kit rows open a modal
+that edits the task instruction, cron, timezone, enabled state, and trigger
+confidence. Modal metadata carries the immutable workspace/channel/kind/name
+identity and current version; load and save reauthorize that exact scope and
+reject stale versions. Listing is available to members of the enrolled channel;
+modal load/save additionally requires the actor to be a configured channel
+approver. A save is committed to the audit chain.
+
 Routines enqueue ordinary reauthorized jobs on a standard five-field cron
 schedule with an explicit IANA timezone. Trigger subscriptions wake on the
 same cron model, rebuild the full destination-safe context, run the direct
@@ -538,6 +566,14 @@ classifier gate, and enqueue work only when admitted. The scheduler advances
 past missed windows without replay storms. Older fixed-interval records remain
 readable and executable until an operator migrates them. Neither path bypasses
 policy, model routing, approval, or delivery controls.
+
+Routine and trigger-subscription identity is `(organization, workspace,
+channel, public_id)`. Scheduler advancement, job idempotency, tool access, the
+management API, and Slack editing all carry that channel scope. Startup
+migrates legacy records missing workspace/channel fields from the referenced
+durable session and disables any unresolved record before schedulers start; it
+then replaces the old organization-wide unique indexes with channel-scoped
+ones.
 
 The management **Automation** page combines classifier-gated subscriptions and
 direct routines into one operator view. It resolves channel/session scope in
@@ -598,8 +634,9 @@ enter the feed. The feed is diagnostic and disposable, not a durable authority.
 
 JSONL logs, audit records, and broad data listings omit Slack message text,
 provider bodies, prompts, results, secrets, lease tokens, and connector
-credentials. Raw observations, normalized messages, prompt/context data, and
-derived state follow configured TTL and source-linked deletion rules.
+credentials. Normalized Slack messages are durable and have no expiry or TTL
+index. Raw observations and prompt/context data retain their configured TTLs;
+derived state follows the context-validity boundary of its sources.
 
 ## Failure behavior
 
@@ -623,7 +660,7 @@ tests, vet, behavioral evals, gosec, and govulncheck. Network and credential
 tests are opt-in. `integration/codex_live_test.go` verifies the installed App
 Server handshake, dynamic-tool registration, model/effort routing, structured
 output, event normalization, and teardown against a real authenticated Codex
-runtime. `make eval-live` sends the 52 natural classifier messages through the
+runtime. `make eval-live` sends the 53 natural classifier messages through the
 configured direct OpenAI provider and scores outcomes, source grounding,
 restricted disclosure, placement, reaction semantics, and model/effort routing;
 fixture names and expected results are never part of the provider request.

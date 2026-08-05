@@ -274,7 +274,7 @@ func TestMongoRoutineAdvanceIsTenantScoped(t *testing.T) {
 	if _, err := store.PutContext(ctx, second); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AdvanceContext(ctx, "org-a", "shared", now); err != nil {
+	if err := store.AdvanceContext(ctx, "org-a", "workspace", "channel", "shared", now); err != nil {
 		t.Fatal(err)
 	}
 	a, err := store.List(ctx, "org-a")
@@ -287,13 +287,52 @@ func TestMongoRoutineAdvanceIsTenantScoped(t *testing.T) {
 	}
 }
 
-func TestMongoIndexesDedupeCountersFencingAndTTL(t *testing.T) {
+func TestMongoChannelAutomationMigrationBackfillsOrDisablesLegacyRows(t *testing.T) {
+	ctx, db := mongoDatabase(t)
+	session := models.Session{PublicID: "session-scoped", OrganizationID: "org", TeamID: "team", ChannelID: "alerts", RootThreadTS: "automation:daily", CurrentGeneration: 1, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), Version: 1}
+	if _, err := db.Collection(models.CollectionSessions).InsertOne(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Collection(models.CollectionRoutines).InsertMany(ctx, []any{
+		bson.M{"organization_id": "org", "public_id": "daily", "session_id": "session-scoped", "enabled": true},
+		bson.M{"organization_id": "org", "public_id": "orphan", "session_id": "missing-session", "enabled": true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MigrateChannelAutomations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var migrated, orphan bson.M
+	if err := db.Collection(models.CollectionRoutines).FindOne(ctx, bson.M{"organization_id": "org", "public_id": "daily"}).Decode(&migrated); err != nil {
+		t.Fatal(err)
+	}
+	if migrated["workspace_id"] != "team" || migrated["channel_id"] != "alerts" || migrated["channel_scope_migration_status"] != "migrated" {
+		t.Fatalf("migrated routine=%#v", migrated)
+	}
+	if err := db.Collection(models.CollectionRoutines).FindOne(ctx, bson.M{"organization_id": "org", "public_id": "orphan"}).Decode(&orphan); err != nil {
+		t.Fatal(err)
+	}
+	if enabled, _ := orphan["enabled"].(bool); enabled || orphan["channel_scope_migration_status"] != "unresolved" {
+		t.Fatalf("orphan routine=%#v", orphan)
+	}
+}
+
+func TestMongoIndexesDedupeCountersFencingAndDurableMessages(t *testing.T) {
 	ctx, db := mongoDatabase(t)
 	names, err := db.Collection(models.CollectionJobs).Indexes().ListSpecifications(ctx)
 	if err != nil || len(names) < 3 {
 		t.Fatalf("job indexes=%d err=%v", len(names), err)
 	}
-	store := observer.NewMongoStore(db, 30*24*time.Hour)
+	messageIndexes, err := db.Collection(models.CollectionMessages).Indexes().ListSpecifications(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, index := range messageIndexes {
+		if index.Name == "message_expiry" {
+			t.Fatal("obsolete message TTL index still exists")
+		}
+	}
+	store := observer.NewMongoStore(db, 24*time.Hour)
 	now := time.Now().UTC()
 	envelope := types.SlackEnvelope{OrganizationID: "org", TeamID: "team", ChannelID: "channel", EnvelopeID: "env", EventID: "event", MessageTS: "1.0", UserID: "user", Kind: types.SlackEventMessage, Text: "hello", EventTime: now}
 	var wg sync.WaitGroup
@@ -349,16 +388,27 @@ func TestMongoIndexesDedupeCountersFencingAndTTL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var foundOld bool
 	for _, message := range recent {
 		if message.MessageTS == "0.5" {
-			t.Fatal("expired message returned before TTL cleanup")
+			foundOld = true
 		}
+	}
+	if !foundOld {
+		t.Fatal("durable message disappeared outside the context window")
+	}
+	var persisted bson.M
+	if err := db.Collection(models.CollectionMessages).FindOne(ctx, bson.M{"organization_id": "org", "message_ts": "0.5"}).Decode(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := persisted["expires_at"]; exists {
+		t.Fatalf("durable message retained expires_at: %#v", persisted)
 	}
 }
 
 func TestMongoProjectionRetentionAndConcurrentAuditCAS(t *testing.T) {
 	ctx, db := mongoDatabase(t)
-	store := observer.NewMongoStore(db, 30*24*time.Hour)
+	store := observer.NewMongoStore(db, 24*time.Hour)
 	projector := intelligence.NewMongo(db)
 	now := time.Now().UTC()
 	envelope := types.SlackEnvelope{OrganizationID: "org", TeamID: "team", ChannelID: "alerts", EnvelopeID: "env", EventID: "event", MessageTS: "1.0", UserID: "user", Kind: types.SlackEventMessage, Text: "Production outage incident: API is down", EventTime: now}
@@ -430,7 +480,7 @@ func TestMongoProjectionRetentionAndConcurrentAuditCAS(t *testing.T) {
 
 func TestMongoProjectionRejectsStaleOriginalAndPersistsRestriction(t *testing.T) {
 	ctx, db := mongoDatabase(t)
-	store := observer.NewMongoStore(db, 30*24*time.Hour)
+	store := observer.NewMongoStore(db, 24*time.Hour)
 	now := time.Now().UTC()
 	original := types.SlackEnvelope{OrganizationID: "org", TeamID: "team", ChannelID: "private-alerts", EnvelopeID: "env-original", EventID: "event-original", MessageTS: "9.0", UserID: "user", Kind: types.SlackEventMessage, Text: "Confidential outage incident is down", EventTime: now}
 	accepted, err := store.Accept(ctx, original)

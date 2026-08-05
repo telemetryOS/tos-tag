@@ -102,7 +102,9 @@ type ChannelMessage struct {
 	ProjectionVersion int64         `bson:"projection_version"`
 	OriginalAt        time.Time     `bson:"original_at"`
 	UpdatedAt         time.Time     `bson:"updated_at"`
-	ExpiresAt         time.Time     `bson:"expires_at"`
+	// ExpiresAt decodes legacy rows written before normalized messages became
+	// durable. Current persistence and query paths do not use it.
+	ExpiresAt time.Time `bson:"expires_at,omitempty"`
 }
 
 type Counter struct {
@@ -152,6 +154,7 @@ type Channel struct {
 	DefaultModelProfile              string        `bson:"default_model_profile,omitempty"`
 	ContextHistoryMode               string        `bson:"context_history_mode,omitempty"`
 	ApproverUserIDs                  []string      `bson:"approver_user_ids,omitempty"`
+	TrustedIntegrationBotIDs         []string      `bson:"trusted_integration_bot_ids,omitempty"`
 	BotIsMember                      bool          `bson:"bot_is_member"`
 	BotMembershipKnown               bool          `bson:"bot_membership_known"`
 	ParticipationManagedByMembership bool          `bson:"participation_managed_by_membership"`
@@ -163,8 +166,8 @@ type Channel struct {
 }
 
 // SlackContextSyncState records durable history-bootstrap progress separately
-// from retained message content. Message TTL expiry must not cause a completed
-// conversation to be fully fetched again on every process restart.
+// from retained message content so a completed conversation is not fetched
+// again on every process restart.
 type SlackContextSyncState struct {
 	ID                   bson.ObjectID             `bson:"_id,omitempty"`
 	OrganizationID       string                    `bson:"organization_id"`

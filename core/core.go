@@ -14,6 +14,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/admission"
 	"github.com/telemetryos/tos-tag/core/approvals"
 	"github.com/telemetryos/tos-tag/core/audit"
+	"github.com/telemetryos/tos-tag/core/automations"
 	"github.com/telemetryos/tos-tag/core/channelconfig"
 	"github.com/telemetryos/tos-tag/core/classifier"
 	"github.com/telemetryos/tos-tag/core/config"
@@ -82,7 +83,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	activityFeed := activity.New(500)
 	logger.AddTarget(activityFeed)
 	db := database.New(cfg, logger)
-	observations := observer.NewMongoStore(db, cfg.Retention.Messages)
+	observations := observer.NewMongoStore(db, cfg.Retention.RawEnvelope)
 	sessionStore := sessions.NewMongoStore(db)
 	jobQueue := jobs.NewMongoQueue(db)
 	deliveryQueue := deliveries.NewMongoQueue(db)
@@ -94,7 +95,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	contextStore := contextpacks.NewMongoStore(db)
 	renderer := deliveries.NewRenderer()
 	organizationStore := orgconfig.NewMongo(db)
-	intelligenceProjector := intelligence.NewMongo(db)
+	intelligenceProjector := intelligence.NewMongo(db, cfg.ContextPacks.Lookback)
 	retentionJanitor, err := retention.New(db, cfg.Retention.Sweep)
 	if err != nil {
 		return nil, err
@@ -103,6 +104,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 		orgconfig.Resolver
 		GetOrganization(context.Context, string) (models.Organization, error)
 		GetWorkspace(context.Context, string, string) (models.Workspace, error)
+		PutChannel(context.Context, orgconfig.ChannelPolicy) (orgconfig.ChannelPolicy, error)
 		UpsertContextChannel(context.Context, orgconfig.ChannelPolicy) (orgconfig.ChannelPolicy, error)
 		ListChannels(context.Context, string) ([]orgconfig.ChannelPolicy, error)
 	}
@@ -129,7 +131,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 		if memoryErr != nil {
 			return nil, fmt.Errorf("construct memory summarizer: %w", memoryErr)
 		}
-		memoryCurator, memoryErr = agentmemory.NewCurator(db, memoryStore, memorySummarizer, usageRecorder, logger, agentmemory.CuratorOptions{Interval: cfg.Memory.Interval, Lookback: cfg.Memory.Lookback, MinMessages: cfg.Memory.MinMessages, MaxMessages: cfg.Memory.MaxMessages, MaxScopesPerRun: cfg.Memory.MaxScopesPerRun, MinConfidence: cfg.Memory.MinConfidence, Timeout: cfg.Memory.Timeout})
+		memoryCurator, memoryErr = agentmemory.NewCurator(db, memoryStore, memorySummarizer, usageRecorder, logger, agentmemory.CuratorOptions{Interval: cfg.Memory.Interval, Lookback: cfg.Memory.Lookback, SourceValidity: cfg.ContextPacks.Lookback, MinMessages: cfg.Memory.MinMessages, MaxMessages: cfg.Memory.MaxMessages, MaxScopesPerRun: cfg.Memory.MaxScopesPerRun, MinConfidence: cfg.Memory.MinConfidence, Timeout: cfg.Memory.Timeout})
 		if memoryErr != nil {
 			return nil, fmt.Errorf("construct memory curator: %w", memoryErr)
 		}
@@ -158,6 +160,10 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	directiveEditor, err := channelconfig.NewEditor(channelConfiguration, organizationStore, auditChain)
 	if err != nil {
 		return nil, fmt.Errorf("construct channel directive editor: %w", err)
+	}
+	automationEditor, err := automations.NewEditor(routineStore, triggerStore, organizationStore, auditChain)
+	if err != nil {
+		return nil, fmt.Errorf("construct channel automation editor: %w", err)
 	}
 	var secretStore keystore.Repository
 	if cfg.Keystore.Enabled {
@@ -350,6 +356,17 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 			result.Changed = true
 			return result, nil
 		})
+		liveIngress.SetAutomationHandlers(
+			func(ctx context.Context, scope automations.Scope) ([]automations.Task, error) {
+				return automationEditor.List(ctx, scope)
+			},
+			func(ctx context.Context, scope automations.Scope, kind automations.Kind, id string) (automations.Task, error) {
+				return automationEditor.Load(ctx, scope, kind, id)
+			},
+			func(ctx context.Context, request automations.SaveRequest) (automations.Task, error) {
+				return automationEditor.Save(ctx, request)
+			},
+		)
 	}
 	pipe, err := pipeline.New(pipeline.Dependencies{
 		Config: cfg, Logger: logger, Activity: activityFeed, Ingress: ingress, Transport: transport,

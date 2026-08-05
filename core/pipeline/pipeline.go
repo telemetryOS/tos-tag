@@ -60,6 +60,7 @@ type Dependencies struct {
 		orgconfig.Resolver
 		GetOrganization(context.Context, string) (models.Organization, error)
 		GetWorkspace(context.Context, string, string) (models.Workspace, error)
+		PutChannel(context.Context, orgconfig.ChannelPolicy) (orgconfig.ChannelPolicy, error)
 		UpsertContextChannel(context.Context, orgconfig.ChannelPolicy) (orgconfig.ChannelPolicy, error)
 		ListChannels(context.Context, string) ([]orgconfig.ChannelPolicy, error)
 	}
@@ -100,7 +101,7 @@ const currentAgentRuntimeContract = `Current tos-tag runtime facts are authorita
 - Admitted full-agent work runs through Codex App Server in a disposable worker.
 - MongoDB and the Go control plane own durable state, policy, authorization, approvals, and Slack delivery.
 - Every dynamic tool call must declare every injected skill actively being followed in skill_names. The control plane uses only those validated names and safe tool identities for Slack progress; never put arguments, source content, prompts, credentials, or hidden reasoning in progress metadata.
-- TelemetryOS source access is permanently read-only. Never edit, patch, commit, push, merge, deploy, or otherwise mutate source; code-change requests are redirected to Linear bug or feature intake.
+- TelemetryOS source access is permanently read-only. Never edit, patch, commit, push, merge, deploy, or otherwise mutate source. Source-write requests are silently suppressed before worker admission; only a separate explicit Linear issue-creation request may use bug or feature intake.
 - Source inspection runs against an on-demand, server-owned snapshot of the requested repository's verified default branch. Use one semantic-search call for conceptual discovery, then one exact read for decisive lines; use fixed search directly when the symbol or text is known. Treat the returned commit and fetch time as the source-freshness evidence.
 - Source-backed version or dependency adoption questions use the injected codebase-read skill's bounded version workflow. For Go, start with the single telemetryos.code versions <repo> go call, which returns manifest/toolchain, container/build, and CI version evidence together. Never infer that a patch version is unpinned from one manifest alone, and never fan out parallel or speculative source reads.
 - A job marked authoritative_product_retrieval_required must successfully read the Agent Wiki Primer and/or official TelemetryOS product documentation in the same attempt before answering.
@@ -214,7 +215,7 @@ func (p *Pipeline) HandleEnvelope(ctx context.Context, envelope types.SlackEnvel
 			return slack.AcceptResult{Ignored: true}, nil
 		}
 	}
-	// Slack echoes Tag's own delivered and Thinking Steps messages back through
+	// Slack echoes Tag's own delivered assistant messages back through the
 	// Events API. Preserve them as resolved, destination-local conversation
 	// context, but never put them on the pending decision queue. This keeps
 	// follow-up references coherent without spending classifier work or creating
@@ -232,12 +233,35 @@ func (p *Pipeline) HandleEnvelope(ctx context.Context, envelope types.SlackEnvel
 		eventLogger.WithCtx(blackbox.Ctx{"observation_id": accepted.Observation.PublicID, "duplicate": accepted.Duplicate, "duration_ms": time.Since(started).Milliseconds()}).Debug("Slack self-authored output retained as resolved context without classification")
 		return slack.AcceptResult{Duplicate: accepted.Duplicate, Ignored: true, ResolvedContext: true}, nil
 	}
-	// External Slack apps and agents are context, never interlocutors. Import
-	// their output as resolved, unverified destination-local context so humans
-	// can refer to it, but do not enqueue classifier, reaction, or agent work.
-	// This is the primary fail-closed loop boundary; classifier suppression is a
-	// second defense for legacy pending observations.
+	// Slack membership messages are non-conversational lifecycle events. Keep
+	// them as resolved destination-local context, but never let incident context
+	// turn a join/leave notice into classifier or agent work.
+	if envelope.MembershipEvent() {
+		accepted, err := p.deps.Observations.Import(ctx, envelope)
+		if err != nil {
+			eventLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err)}).Error("Slack membership context import failed")
+			return slack.AcceptResult{}, err
+		}
+		if err := p.advanceContextSyncWatermark(ctx, envelope); err != nil {
+			eventLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err)}).Error("Slack membership context watermark persistence failed")
+			return slack.AcceptResult{}, err
+		}
+		eventLogger.WithCtx(blackbox.Ctx{"observation_id": accepted.Observation.PublicID, "duplicate": accepted.Duplicate, "duration_ms": time.Since(started).Milliseconds()}).Debug("Slack membership event retained as resolved context without classification")
+		return slack.AcceptResult{Duplicate: accepted.Duplicate, Ignored: true, ResolvedContext: true}, nil
+	}
+	// External Slack apps and agents are context, never interlocutors unless the
+	// destination's durable channel policy explicitly trusts that bot as an
+	// integration trigger. This is the primary fail-closed loop boundary;
+	// classifier suppression is a second defense for legacy pending observations.
+	authorizedIntegrationTrigger := false
 	if envelope.IntegrationAuthored() {
+		var authorizationErr error
+		authorizedIntegrationTrigger, authorizationErr = p.resolveAuthorizedSlackIntegrationTrigger(ctx, envelope)
+		if authorizationErr != nil {
+			eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", authorizationErr)}).Warn("Slack integration trigger policy resolution failed; retaining context only")
+		}
+	}
+	if envelope.IntegrationAuthored() && !authorizedIntegrationTrigger {
 		accepted, err := p.deps.Observations.Import(ctx, envelope)
 		if err != nil {
 			eventLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err)}).Error("Slack integration context import failed")
@@ -249,6 +273,10 @@ func (p *Pipeline) HandleEnvelope(ctx context.Context, envelope types.SlackEnvel
 		}
 		eventLogger.WithCtx(blackbox.Ctx{"observation_id": accepted.Observation.PublicID, "duplicate": accepted.Duplicate, "duration_ms": time.Since(started).Milliseconds()}).Debug("Slack integration output retained as resolved context without classification")
 		return slack.AcceptResult{Duplicate: accepted.Duplicate, Ignored: true, ResolvedContext: true}, nil
+	}
+	if authorizedIntegrationTrigger {
+		envelope.OriginTag = "slack_authorized_integration_trigger"
+		eventLogger.Info("authorized Slack integration trigger admitted for classification")
 	}
 	eventLogger.Info("Slack envelope persistence started")
 	accepted, err := p.deps.Observations.Accept(ctx, envelope)
@@ -404,7 +432,7 @@ func (p *Pipeline) RecoverContextEnvelope(ctx context.Context, envelope types.Sl
 	}
 	humanAuthored := !envelope.IntegrationAuthored() && (p.deps.Config.Slack.BotUserID == "" || envelope.UserID != p.deps.Config.Slack.BotUserID)
 	direct := humanAuthored && (envelope.ChannelKind == types.SlackChannelKindDirectMessage || envelope.IsMention || activeThread)
-	canRespond := policy.ParticipationMode != types.ModeObserve && slackOutputChannelAllowed(p.deps.Config, envelope.ChannelID)
+	canRespond := (policy.ParticipationMode != types.ModeObserve || envelope.ChannelKind == types.SlackChannelKindDirectMessage || strings.HasPrefix(envelope.ChannelID, "D")) && slackOutputChannelAllowed(p.deps.Config, envelope.ChannelID)
 	if !direct || !canRespond {
 		_, importErr := p.deps.Observations.Import(ctx, envelope)
 		if importErr != nil {
@@ -451,8 +479,9 @@ func (p *Pipeline) ensureContextChannel(ctx context.Context, channel types.Slack
 		return errScopeDenied
 	}
 	now := time.Now().UTC()
+	directMessage := strings.HasPrefix(channel.ChannelID, "D")
 	current, err := p.deps.Scopes.Resolve(ctx, channel.OrganizationID, channel.TeamID, channel.ChannelID)
-	if err == nil && contextChannelPolicyCurrent(current, channel, p.deps.Config.Slack.AutoAssistJoinedChannels, now) {
+	if err == nil && contextChannelPolicyCurrent(current, channel, p.deps.Config.Slack.AutoAssistJoinedChannels, now) && (!directMessage || current.Enrolled && current.ParticipationMode == types.ModeAssist) {
 		return nil
 	}
 	if err != nil && !errors.Is(err, orgconfig.ErrNotFound) {
@@ -470,13 +499,16 @@ func (p *Pipeline) ensureContextChannel(ctx context.Context, channel types.Slack
 		if workspaceErr != nil {
 			return fmt.Errorf("resolve Slack context workspace: %w", workspaceErr)
 		}
-		if organization.KillSwitch || !workspace.Enabled || (organization.EnrollmentMode != "all_observable_channels" && organization.EnrollmentMode != "all_joined") {
+		if organization.KillSwitch || !workspace.Enabled || (!directMessage && organization.EnrollmentMode != "all_observable_channels" && organization.EnrollmentMode != "all_joined") {
 			return nil
 		}
 	}
 	participationMode := types.ModeObserve
 	participationManaged := p.deps.Config.Slack.AutoAssistJoinedChannels && channel.BotMembershipKnown
-	if err == nil && !current.ParticipationManagedByMembership {
+	if directMessage {
+		participationMode = types.ModeAssist
+		participationManaged = false
+	} else if err == nil && !current.ParticipationManagedByMembership {
 		// A channel changed through /tag-mode or the management API is
 		// operator-managed. Slack inventory refreshes membership metadata but
 		// must not replace that explicit observe/assist/proactive choice.
@@ -503,10 +535,37 @@ func (p *Pipeline) ensureContextChannel(ctx context.Context, channel types.Slack
 		MembershipRevision:               "slack-user+bot-context/v2",
 		MembershipRefreshedAt:            now,
 	}
+	if directMessage && err == nil {
+		policy = current
+		policy.Enrolled = true
+		policy.ParticipationMode = types.ModeAssist
+		policy.ParticipationManagedByMembership = false
+		policy.Restricted = policy.Restricted || channel.Restricted
+		if channel.Name != "" {
+			policy.Name = channel.Name
+		}
+		if channel.BotMembershipKnown {
+			policy.BotIsMember = channel.BotIsMember
+			policy.BotMembershipKnown = true
+		}
+		policy.MembershipRevision = "slack-user+bot-context/v2"
+		policy.MembershipRefreshedAt = now
+		saved, putErr := p.deps.Scopes.PutChannel(ctx, policy)
+		if putErr != nil {
+			return fmt.Errorf("enable Slack direct-message channel: %w", putErr)
+		}
+		p.logContextChannelRefresh(saved)
+		return nil
+	}
 	saved, err := p.deps.Scopes.UpsertContextChannel(ctx, policy)
 	if err != nil {
 		return fmt.Errorf("upsert Slack context channel: %w", err)
 	}
+	p.logContextChannelRefresh(saved)
+	return nil
+}
+
+func (p *Pipeline) logContextChannelRefresh(saved orgconfig.ChannelPolicy) {
 	p.deps.Logger.WithCtx(blackbox.Ctx{
 		"organization_id":    saved.OrganizationID,
 		"channel_id":         saved.ChannelID,
@@ -515,7 +574,6 @@ func (p *Pipeline) ensureContextChannel(ctx context.Context, channel types.Slack
 		"participation_mode": string(saved.ParticipationMode),
 		"policy_version":     saved.Version,
 	}).Info("Slack context channel membership refreshed")
-	return nil
 }
 
 func contextChannelPolicyCurrent(current orgconfig.ChannelPolicy, channel types.SlackContextChannel, autoAssist bool, now time.Time) bool {
@@ -620,6 +678,9 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 			return errScopeDenied
 		}
 		mode = policy.ParticipationMode
+		if envelope.ChannelKind == types.SlackChannelKindDirectMessage || strings.HasPrefix(envelope.ChannelID, "D") {
+			mode = types.ModeAssist
+		}
 		if !slackOutputChannelAllowed(p.deps.Config, envelope.ChannelID) {
 			mode = types.ModeObserve
 		}
@@ -636,15 +697,18 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 		_, activeErr := p.deps.Sessions.Find(ctx, envelope.OrganizationID, envelope.TeamID, envelope.ChannelID, envelope.RootThreadTS())
 		activeThread = activeErr == nil
 	}
+	authorizedIntegrationTrigger := channelPolicy != nil && authorizedOutputPolicy(*channelPolicy, time.Now().UTC()) && channelPolicyTrustsIntegration(*channelPolicy, envelope)
 	target := classifier.Target{
-		ObservationID:   observation.PublicID,
-		Envelope:        envelope,
-		Mode:            mode,
-		ActiveThread:    activeThread,
-		WorkflowLoop:    isWorkflowLoopOrigin(envelope.OriginTag),
-		Deleted:         isDeletedSlackTurn(envelope, activeThread),
-		AmbientLinkOnly: isAmbientLinkOnlySlackTurn(envelope, activeThread),
-		SelfAuthored:    envelope.BotID == "tos-tag-stub" || p.selfAuthoredEnvelope(envelope),
+		ObservationID:     observation.PublicID,
+		Envelope:          envelope,
+		Mode:              mode,
+		ActiveThread:      activeThread,
+		AuthorizedTrigger: authorizedIntegrationTrigger,
+		WorkflowLoop:      isWorkflowLoopOrigin(envelope.OriginTag),
+		Unsupported:       envelope.MembershipEvent(),
+		Deleted:           isDeletedSlackTurn(envelope, activeThread),
+		AmbientLinkOnly:   isAmbientLinkOnlySlackTurn(envelope, activeThread),
+		SelfAuthored:      envelope.BotID == "tos-tag-stub" || p.selfAuthoredEnvelope(envelope),
 	}
 	requiresProvider := p.deps.Classifier.RequiresProviderCall(target)
 	if target.Deleted || target.AmbientLinkOnly {
@@ -726,7 +790,7 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 	p.appendReceipt(ctx, audit.AppendRequest{OrganizationID: envelope.OrganizationID, Type: "decision.recorded", ResourceID: recordedDecision.ID, RetentionEpoch: retentionEpoch(pack.ExpiresAt), IdempotencyKey: fmt.Sprintf("decision/%s/%d", observation.PublicID, revision), Metadata: map[string]any{"outcome": string(recordedDecision.Result.Effective.Outcome), "revision": revision}})
 	// Every admitted non-silent decision applies the classifier-selected emoji
 	// immediately. For full-agent work this is the fast acknowledgement stage;
-	// Thinking Steps then provide the slower, detailed progress stage. This also
+	// the native thread status then provides the agent's transient progress. This also
 	// applies to proactive background work and approval requests: even though
 	// they do not answer the source message directly, the person who triggered
 	// them still needs immediate, visible feedback that Tag acted.
@@ -803,7 +867,7 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 		}
 	}
 
-	session, _, err := p.deps.Sessions.Resolve(ctx, envelope.OrganizationID, envelope.TeamID, envelope.ChannelID, envelope.RootThreadTS())
+	session, sessionCreated, err := p.deps.Sessions.Resolve(ctx, envelope.OrganizationID, envelope.TeamID, envelope.ChannelID, envelope.RootThreadTS())
 	if err != nil {
 		return fmt.Errorf("resolve session: %w", err)
 	}
@@ -820,6 +884,13 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 		}
 		return nil
 	}
+	requesterID := envelope.UserID
+	if target.AuthorizedTrigger && envelope.IntegrationAuthored() {
+		// Authorized integration triggers may produce normal channel/thread output,
+		// but never impersonate the bot as a human requester for approvals or other
+		// requester-bound policy.
+		requesterID = ""
+	}
 	job, _, err := p.deps.Jobs.Enqueue(ctx, jobs.Spec{
 		OrganizationID:         envelope.OrganizationID,
 		WorkspaceID:            envelope.TeamID,
@@ -829,7 +900,7 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 		SessionID:              session.ID,
 		Generation:             session.CurrentGeneration,
 		ObservationID:          types.ObservationID(observation.PublicID),
-		RequesterID:            envelope.UserID,
+		RequesterID:            requesterID,
 		IdempotencyKey:         outputReservationID,
 		Kind:                   "agent_response",
 		Input:                  buildAgentInput(envelope, pack, decision.Effective, p.deps.Config.Slack.BotUserID),
@@ -849,7 +920,34 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 	if err := p.deps.Observations.FinalizeOutput(ctx, observation.PublicID, outputReservationID, string(job.ID), ""); err != nil {
 		return fmt.Errorf("finalize job output: %w", err)
 	}
+	p.setNewDirectMessageThreadTitle(ctx, envelope, session, sessionCreated)
 	return nil
+}
+
+func (p *Pipeline) resolveAuthorizedSlackIntegrationTrigger(ctx context.Context, envelope types.SlackEnvelope) (bool, error) {
+	if p.deps.Scopes == nil || envelope.Kind != types.SlackEventMessage || envelope.BotID == "" || !envelope.IntegrationAuthored() || envelope.MembershipEvent() {
+		return false, nil
+	}
+	policy, err := p.deps.Scopes.Resolve(ctx, envelope.OrganizationID, envelope.TeamID, envelope.ChannelID)
+	if err != nil {
+		if errors.Is(err, orgconfig.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return authorizedOutputPolicy(policy, time.Now().UTC()) && channelPolicyTrustsIntegration(policy, envelope), nil
+}
+
+func channelPolicyTrustsIntegration(policy orgconfig.ChannelPolicy, envelope types.SlackEnvelope) bool {
+	if envelope.Kind != types.SlackEventMessage || envelope.BotID == "" || !envelope.IntegrationAuthored() || envelope.MembershipEvent() {
+		return false
+	}
+	for _, botID := range policy.TrustedIntegrationBotIDs {
+		if envelope.BotID == botID {
+			return true
+		}
+	}
+	return false
 }
 
 var slackLinkOnlyPattern = regexp.MustCompile(`^(?:\s*(?:<https?://[^>\s]+(?:\|[^>]*)?>|https?://\S+)\s*)+$`)
@@ -1140,7 +1238,7 @@ func (p *Pipeline) buildContextPack(ctx context.Context, envelope types.SlackEnv
 	if sessionOnly {
 		channels = []string{envelope.ChannelID}
 	}
-	since := now.Add(-7 * 24 * time.Hour)
+	since := now.Add(-p.deps.Config.ContextPacks.Lookback)
 	if sessionOnly && sessionStartedAt.After(since) {
 		since = sessionStartedAt
 	}
@@ -1226,7 +1324,7 @@ func (p *Pipeline) buildContextPack(ctx context.Context, envelope types.SlackEnv
 		candidates = append(candidates, types.ContextCandidate{
 			ID: message.ChannelID + "/" + message.MessageTS, Version: message.ProjectionVersion, OrganizationID: message.OrganizationID,
 			ChannelID: message.ChannelID, ChannelName: channelNames[message.ChannelID], AuthorID: message.AuthorID, Partition: partition, Provenance: provenance, Text: message.Text, Priority: priority, ObservedAt: message.OriginalAt,
-			DisclosureClass: types.DisclosureDestinationSafe, Required: message.ChannelID == envelope.ChannelID && message.MessageTS == envelope.MessageTS, SourceExpiresAt: message.ExpiresAt,
+			DisclosureClass: types.DisclosureDestinationSafe, Required: message.ChannelID == envelope.ChannelID && message.MessageTS == envelope.MessageTS,
 		})
 	}
 	return p.deps.ContextPacks.Build(contextpacks.Request{
@@ -1253,7 +1351,7 @@ func (p *Pipeline) EvaluateHeartbeat(ctx context.Context, subscription triggers.
 	if !slackOutputChannelAllowed(p.deps.Config, subscription.ChannelID) {
 		mode = types.ModeObserve
 	}
-	targetID := "trigger/" + subscription.ID + "/" + window
+	targetID := "trigger/" + subscription.ChannelID + "/" + subscription.ID + "/" + window
 	messageTS := targetID
 	if subscription.RootThreadTS != "" {
 		messageTS = subscription.RootThreadTS
@@ -1306,7 +1404,7 @@ func (p *Pipeline) EvaluateHeartbeat(ctx context.Context, subscription triggers.
 		"confidence": result.Effective.Confidence, "shadowed": result.Shadowed, "context_pack_id": pack.ID,
 	}).Info("heartbeat classifier gate evaluated")
 	p.appendReceipt(ctx, audit.AppendRequest{
-		OrganizationID: subscription.OrganizationID, Type: "trigger.heartbeat.classified", ResourceID: subscription.ID,
+		OrganizationID: subscription.OrganizationID, Type: "trigger.heartbeat.classified", ResourceID: subscription.ChannelID + "/" + subscription.ID,
 		RetentionEpoch: retentionEpoch(pack.ExpiresAt), IdempotencyKey: targetID + "/classified",
 		Metadata: map[string]any{"channel_id": subscription.ChannelID, "outcome": string(result.Effective.Outcome), "confidence": result.Effective.Confidence, "shadowed": result.Shadowed},
 	})
@@ -1340,7 +1438,7 @@ func (p *Pipeline) recordHeartbeatFloodDrop(ctx context.Context, subscription tr
 	p.appendReceipt(ctx, audit.AppendRequest{
 		OrganizationID: subscription.OrganizationID,
 		Type:           "trigger.heartbeat.flood_dropped",
-		ResourceID:     subscription.ID,
+		ResourceID:     subscription.ChannelID + "/" + subscription.ID,
 		IdempotencyKey: targetID + "/flood-drop",
 		Metadata: map[string]any{
 			"channel_id":   subscription.ChannelID,
@@ -1361,6 +1459,9 @@ func authorizedPolicy(policy orgconfig.ChannelPolicy, now time.Time) bool {
 func authorizedOutputPolicy(policy orgconfig.ChannelPolicy, now time.Time) bool {
 	if !authorizedPolicy(policy, now) {
 		return false
+	}
+	if strings.HasPrefix(policy.ChannelID, "D") {
+		return true
 	}
 	if policy.ParticipationMode != types.ModeMention && policy.ParticipationMode != types.ModeAssist && policy.ParticipationMode != types.ModeProactive {
 		return false
@@ -1638,10 +1739,9 @@ func (p *Pipeline) processOneJob(ctx context.Context, workerID types.WorkerID) b
 		}
 		return true
 	}
-	result, progressedJob, runErr := p.runHarnessWithDelayedProgress(ctx, job, jobLogger)
-	job = progressedJob
+	result, runErr := p.runHarnessWithProgressStatus(ctx, job, jobLogger)
 	if current, getErr := p.deps.Jobs.Get(ctx, job.ID); getErr == nil && current.State == jobs.StateWaitingApproval && current.ApprovalID != "" {
-		p.updateJobProgress(ctx, current, types.SlackProgressStep{ID: "approval", Title: "Waiting for approval", Status: types.SlackProgressPending})
+		p.updateJobStatus(ctx, current, "Waiting for approval…")
 		// A suspended job no longer owns a worker lease and must not consume the
 		// channel's concurrency slot while it waits for a human. Complete only
 		// releases the active count; the response remains charged to the hourly
@@ -1708,7 +1808,7 @@ func (p *Pipeline) processOneJob(ctx context.Context, workerID types.WorkerID) b
 			jobLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", requeueErr)}).Error("agent job requeue persistence failed")
 			return true
 		}
-		p.updateJobProgress(requeueCtx, requeued, types.SlackProgressStep{ID: "retry", Title: "Retrying agent work", Status: types.SlackProgressPending})
+		p.updateJobStatus(requeueCtx, requeued, "Retrying the request…")
 		cancelRequeue()
 		jobLogger.WithCtx(blackbox.Ctx{"next_state": requeued.State, "available_at": requeued.AvailableAt}).Warn("agent job requeued")
 		return true
@@ -1757,86 +1857,43 @@ func (p *Pipeline) processOneJob(ctx context.Context, workerID types.WorkerID) b
 	return true
 }
 
-func (p *Pipeline) startJobProgress(ctx context.Context, job jobs.Job, logger *blackbox.Logger) jobs.Job {
+func (p *Pipeline) startJobStatus(ctx context.Context, job jobs.Job, logger *blackbox.Logger) {
 	threadTS := deliveryThreadTS(job)
-	// Slack requires every streamed agent message to reply to a user request.
-	// Preserve brief classifier-selected channel answers instead of silently
-	// changing their placement just to obtain a progress surface.
-	if threadTS == "" || job.ProgressMessageTS != "" || job.RequesterID == "" || p.deps.Transport == nil || !slackOutputChannelAllowed(p.deps.Config, job.ChannelID) {
-		return job
-	}
-	result, err := p.deps.Transport.StartProgress(ctx, types.SlackProgressStartRequest{
-		IdempotencyKey:  string(job.ID) + "/progress",
-		TeamID:          job.WorkspaceID,
-		ChannelID:       job.ChannelID,
-		ThreadTS:        threadTS,
-		JobID:           job.ID,
-		RecipientUserID: job.RequesterID,
-		Title:           "Tag is working",
-		Step:            types.SlackProgressStep{ID: "agent-work", Title: "Working on the request", Status: types.SlackProgressInProgress},
-	})
-	if err != nil {
-		logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Warn("Slack Thinking Steps start failed; continuing without progress UI")
-		return job
-	}
-	updated, persistErr := p.deps.Jobs.SetProgressMessageTS(ctx, job.ID, job.Lease.Token, result.MessageTS)
-	if persistErr != nil {
-		logger.WithCtx(blackbox.Ctx{"message_ts": result.MessageTS, "error_type": fmt.Sprintf("%T", persistErr)}).Warn("Slack Thinking Steps timestamp persistence failed")
-		job.ProgressMessageTS = result.MessageTS
-		return job
-	}
-	logger.WithCtx(blackbox.Ctx{"message_ts": result.MessageTS, "duplicate": result.Duplicate}).Info("Slack Thinking Steps started")
-	return updated
-}
-
-func (p *Pipeline) runHarnessWithDelayedProgress(ctx context.Context, job jobs.Job, logger *blackbox.Logger) (types.SlackResult, jobs.Job, error) {
-	// The classifier-selected reaction is the immediate acknowledgement. Avoid
-	// creating Slack's generic "Thinking..." stream for work that completes
-	// quickly; only jobs still running after the configured grace period need a
-	// separate progress surface. Existing streams from a prior attempt remain
-	// available immediately and are never replaced.
-	if job.ProgressMessageTS != "" || deliveryThreadTS(job) == "" || job.RequesterID == "" || p.deps.Transport == nil || !slackOutputChannelAllowed(p.deps.Config, job.ChannelID) {
-		result, err := p.runHarness(ctx, job)
-		return result, job, err
-	}
-
-	progressCtx, cancelProgress := context.WithCancel(ctx)
-	progressed := make(chan jobs.Job, 1)
-	go func() {
-		timer := time.NewTimer(p.deps.Config.Jobs.ProgressDelay)
-		defer timer.Stop()
-		select {
-		case <-progressCtx.Done():
-			progressed <- job
-		case <-timer.C:
-			progressed <- p.startJobProgress(progressCtx, job, logger)
-		}
-	}()
-
-	result, err := p.runHarness(ctx, job)
-	cancelProgress()
-	progressedJob := <-progressed
-	if progressedJob.ProgressMessageTS != "" {
-		job.ProgressMessageTS = progressedJob.ProgressMessageTS
-	}
-	return result, job, err
-}
-
-func (p *Pipeline) updateJobProgress(ctx context.Context, job jobs.Job, step types.SlackProgressStep) {
-	if job.ProgressMessageTS == "" && p.deps.Jobs != nil {
-		// runHarness may already be consuming events when the delayed progress
-		// stream is opened. Resolve the persisted timestamp so later milestones
-		// and terminal completion update the newly created stream.
-		if current, err := p.deps.Jobs.Get(ctx, job.ID); err == nil {
-			job.ProgressMessageTS = current.ProgressMessageTS
-		}
-	}
-	if job.ProgressMessageTS == "" || p.deps.Transport == nil {
+	// Slack's native agent status belongs to a thread. Preserve brief
+	// classifier-selected in-channel answers instead of moving them solely to
+	// obtain a progress surface.
+	if threadTS == "" || p.deps.Transport == nil || !slackOutputChannelAllowed(p.deps.Config, job.ChannelID) {
 		return
 	}
-	_, err := p.deps.Transport.UpdateProgress(ctx, types.SlackProgressUpdateRequest{TeamID: job.WorkspaceID, ChannelID: job.ChannelID, MessageTS: job.ProgressMessageTS, JobID: job.ID, Step: step})
+	_, err := p.deps.Transport.SetAgentStatus(ctx, types.SlackAgentStatusRequest{
+		TeamID: job.WorkspaceID, ChannelID: job.ChannelID, ThreadTS: threadTS, JobID: job.ID,
+		Status: "Gathering information…",
+		LoadingMessages: []string{
+			"Understanding the request…",
+			"Gathering information…",
+			"Planning the next step…",
+		},
+	})
+	if err != nil {
+		logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Warn("Slack agent status start failed; continuing without progress UI")
+		return
+	}
+	logger.Info("Slack agent status started")
+}
+
+func (p *Pipeline) runHarnessWithProgressStatus(ctx context.Context, job jobs.Job, logger *blackbox.Logger) (types.SlackResult, error) {
+	p.startJobStatus(ctx, job, logger)
+	return p.runHarness(ctx, job)
+}
+
+func (p *Pipeline) updateJobStatus(ctx context.Context, job jobs.Job, status string) {
+	threadTS := deliveryThreadTS(job)
+	if threadTS == "" || p.deps.Transport == nil || !slackOutputChannelAllowed(p.deps.Config, job.ChannelID) {
+		return
+	}
+	_, err := p.deps.Transport.SetAgentStatus(ctx, types.SlackAgentStatusRequest{TeamID: job.WorkspaceID, ChannelID: job.ChannelID, ThreadTS: threadTS, JobID: job.ID, Status: status})
 	if err != nil && p.deps.Logger != nil {
-		p.deps.Logger.WithCtx(blackbox.Ctx{"job_id": job.ID, "channel_id": job.ChannelID, "progress_step_id": step.ID, "error_type": fmt.Sprintf("%T", err)}).Warn("Slack Thinking Steps update failed")
+		p.deps.Logger.WithCtx(blackbox.Ctx{"job_id": job.ID, "channel_id": job.ChannelID, "error_type": fmt.Sprintf("%T", err)}).Warn("Slack agent status update failed")
 	}
 }
 
@@ -2032,9 +2089,17 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 	producedArtifactURLs := make(map[string]struct{})
 	resolvedWikiReferenceURLs := make(map[string]string)
 	completedToolOperations := make(map[string]struct{})
-	reportedToolProgressSteps := make(map[string]string)
+	reportedToolStatuses := make(map[string]string)
 	usedSkills := make(map[string]struct{})
 	usedActivities := make(map[string]struct{})
+	currentAgentStatus := "Gathering information…"
+	setAgentStatus := func(status string) {
+		if status == currentAgentStatus {
+			return
+		}
+		currentAgentStatus = status
+		p.updateJobStatus(ctx, job, status)
+	}
 	var reportedUsage types.SlackAgentFooter
 	heartbeatEvery := p.deps.Config.Jobs.Lease / 3
 	if heartbeatEvery <= 0 {
@@ -2057,7 +2122,7 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 				if safeProgressIdentifier(skillName) {
 					if _, alreadyReported := usedSkills[skillName]; !alreadyReported {
 						usedSkills[skillName] = struct{}{}
-						p.updateJobProgress(ctx, job, safeSkillProgressStep(skillName, types.SlackProgressInProgress))
+						setAgentStatus("Planning the next step…")
 					}
 				}
 			} else if event.Type == "tool.validation.failed" || event.Type == "tool.execution.started" || event.Type == "tool.execution.completed" || event.Type == "tool.execution.failed" {
@@ -2083,24 +2148,24 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 				if toolID != "" && operationID != "" {
 					resourceAction, _ := event.Data["resource_action"].(string)
 					callID, _ := event.Data["call_id"].(string)
-					status := types.SlackProgressInProgress
+					phase := agentStatusActive
 					if event.Type == "tool.execution.completed" {
-						status = types.SlackProgressComplete
+						phase = agentStatusComplete
 						completedToolOperations[toolID+"/"+operationID+"/"+resourceAction] = struct{}{}
 					} else if event.Type == "tool.execution.failed" && validationCode == "" {
-						status = types.SlackProgressError
+						phase = agentStatusError
 					}
-					step := safeToolProgressLifecycleStep(toolID, operationID, resourceAction, callID, status)
-					// Slack closes a Thinking Steps stream when its single step reaches
-					// complete or error. Tool lifecycle events are intermediate agent
-					// activity, so retain their truthful past-tense/failure title while
-					// keeping the shared card open. Only the terminal job transition below
-					// completes the stream.
-					step.Status = types.SlackProgressInProgress
-					signature := string(step.Status) + "\x00" + step.Title
-					if reportedToolProgressSteps[step.ID] != signature {
-						reportedToolProgressSteps[step.ID] = signature
-						p.updateJobProgress(ctx, job, step)
+					status := safeToolAgentStatus(toolID, operationID, resourceAction, phase)
+					if event.Type == "tool.validation.failed" {
+						status = "Adjusting the tool request…"
+					}
+					statusKey := callID + "\x00" + event.Type
+					if callID == "" {
+						statusKey = toolID + "\x00" + operationID + "\x00" + resourceAction + "\x00" + event.Type
+					}
+					if reportedToolStatuses[statusKey] != status {
+						reportedToolStatuses[statusKey] = status
+						setAgentStatus(status)
 					}
 					if event.Type == "tool.execution.completed" {
 						if activity := safeFooterActivity(toolID, operationID, resourceAction); activity != "" {
@@ -2111,11 +2176,7 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 			} else if event.Type == "artifact.produced" {
 				if artifactURL, ok := event.Data["url"].(string); ok && artifactURL != "" {
 					producedArtifactURLs[artifactURL] = struct{}{}
-					step := types.SlackProgressStep{ID: "agent-work", Title: "Published Agent Wiki artifact", Status: types.SlackProgressInProgress}
-					if strings.HasPrefix(artifactURL, "https://") {
-						step.Sources = []types.SlackProgressSource{{URL: artifactURL, Text: "Agent Wiki artifact"}}
-					}
-					p.updateJobProgress(ctx, job, step)
+					setAgentStatus("Preparing the published result…")
 				}
 			} else if event.Type == "wiki.reference.resolved" {
 				fingerprint, _ := event.Data["reference_sha256"].(string)
@@ -2174,6 +2235,10 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 				_ = p.deps.Harness.Abort(context.Background(), session.ID)
 				return types.SlackResult{}, err
 			}
+			// Slack removes an assistant status after two minutes without a reply.
+			// Refresh the current allowlisted status only after the lease and live
+			// output policy have been revalidated.
+			p.updateJobStatus(ctx, job, currentAgentStatus)
 		}
 	}
 	text := strings.TrimSpace(output.String())
@@ -2217,7 +2282,7 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 		sort.Strings(reportedUsage.Activities)
 	}
 	result.AgentFooter = &reportedUsage
-	p.updateJobProgress(ctx, job, types.SlackProgressStep{ID: "agent-work", Title: "Completed agent work", Status: types.SlackProgressComplete})
+	setAgentStatus("Preparing the response…")
 	return result, nil
 }
 
@@ -2237,10 +2302,6 @@ func eventInt64(value any) int64 {
 	}
 }
 
-func safeToolProgressStep(toolID, operationID, resourceAction string) types.SlackProgressStep {
-	return safeToolProgressLifecycleStep(toolID, operationID, resourceAction, "", types.SlackProgressComplete)
-}
-
 func safeToolValidationCode(value string) bool {
 	if value == "" || len(value) > 96 {
 		return false
@@ -2253,71 +2314,74 @@ func safeToolValidationCode(value string) bool {
 	return true
 }
 
-func safeToolProgressLifecycleStep(toolID, operationID, resourceAction, _ string, status types.SlackProgressStatus) types.SlackProgressStep {
-	title := progressVerb(status, "Using a reviewed tool", "Used a reviewed tool", "Reviewed tool call failed")
+type agentStatusPhase string
+
+const (
+	agentStatusActive   agentStatusPhase = "active"
+	agentStatusComplete agentStatusPhase = "complete"
+	agentStatusError    agentStatusPhase = "error"
+)
+
+func safeToolAgentStatus(toolID, operationID, resourceAction string, phase agentStatusPhase) string {
+	if phase == agentStatusComplete {
+		return "Reviewing the results…"
+	}
+	if phase == agentStatusError {
+		return "Adjusting the approach…"
+	}
+	title := statusVerb(phase, "Using a reviewed tool…", "Reviewing tool results…", "Recovering from a tool error…")
 	switch toolID {
 	case "telemetryos.wiki":
 		if operationID == "read" {
-			title = progressVerb(status, "Reading Agent Wiki", "Read Agent Wiki", "Agent Wiki call failed")
+			title = statusVerb(phase, "Consulting Agent Wiki…", "Reviewing Agent Wiki results…", "Recovering from an Agent Wiki error…")
 		} else {
-			title = progressVerb(status, "Updating Agent Wiki", "Updated Agent Wiki", "Agent Wiki update failed")
+			title = statusVerb(phase, "Updating Agent Wiki…", "Confirming the Agent Wiki update…", "Recovering from an Agent Wiki error…")
 		}
 	case "telemetryos.product-docs":
 		switch resourceAction {
 		case "corporate-full":
-			title = progressVerb(status, "Reading TelemetryOS corporate website", "Read TelemetryOS corporate website", "Corporate website read failed")
+			title = statusVerb(phase, "Consulting the TelemetryOS website…", "Reviewing website results…", "Recovering from a website lookup error…")
 		case "docs-index":
-			title = progressVerb(status, "Reading TelemetryOS documentation index", "Read TelemetryOS documentation index", "Documentation index read failed")
+			title = statusVerb(phase, "Consulting the documentation index…", "Reviewing documentation results…", "Recovering from a documentation error…")
 		default:
-			title = progressVerb(status, "Reading TelemetryOS documentation", "Read TelemetryOS documentation", "Documentation read failed")
+			title = statusVerb(phase, "Consulting TelemetryOS documentation…", "Reviewing documentation results…", "Recovering from a documentation error…")
 		}
 	case "telemetryos.code":
-		title = progressVerb(status, "Inspecting TelemetryOS source (read-only)", "Inspected TelemetryOS source (read-only)", "Source inspection failed")
+		title = statusVerb(phase, "Inspecting TelemetryOS source…", "Reviewing source findings…", "Recovering from a source lookup error…")
 	case "telemetryos.linear":
 		if operationID == "read" {
-			title = progressVerb(status, "Checking Linear", "Checked Linear", "Linear lookup failed")
+			title = statusVerb(phase, "Checking Linear…", "Reviewing Linear results…", "Recovering from a Linear lookup error…")
 		} else {
-			title = progressVerb(status, "Updating Linear", "Updated Linear", "Linear update failed")
+			title = statusVerb(phase, "Updating Linear…", "Confirming the Linear update…", "Recovering from a Linear update error…")
 		}
 	case "telemetryos.otel":
-		title = progressVerb(status, "Querying telemetry", "Queried telemetry", "Telemetry query failed")
+		title = statusVerb(phase, "Querying telemetry…", "Reviewing telemetry results…", "Recovering from a telemetry error…")
 	case "telemetryos.analytics":
-		title = progressVerb(status, "Reviewing marketing analytics", "Reviewed marketing analytics", "Marketing analytics query failed")
+		title = statusVerb(phase, "Reviewing marketing analytics…", "Interpreting analytics results…", "Recovering from an analytics error…")
 	case "telemetryos.device-logs":
-		title = progressVerb(status, "Checking device logs", "Checked device logs", "Device log lookup failed")
+		title = statusVerb(phase, "Checking device logs…", "Reviewing device log results…", "Recovering from a device log error…")
 	case "telemetryos.mongo":
-		title = progressVerb(status, "Querying approved data", "Queried approved data", "Approved data query failed")
+		title = statusVerb(phase, "Querying approved data…", "Reviewing approved data…", "Recovering from a data query error…")
 	case "tos-tag-triggers":
-		title = progressVerb(status, "Managing channel automation", "Managed channel automation", "Channel automation call failed")
+		title = statusVerb(phase, "Managing channel automation…", "Confirming the automation update…", "Recovering from an automation error…")
 	case "openai.web-search":
-		title = progressVerb(status, "Searching the web", "Searched the web", "Web search failed")
+		title = statusVerb(phase, "Searching the web…", "Reviewing web results…", "Recovering from a web search error…")
 	case "openai.integration":
-		title = progressVerb(status, "Using an approved integration", "Used an approved integration", "Integration call failed")
+		title = statusVerb(phase, "Using an approved integration…", "Reviewing integration results…", "Recovering from an integration error…")
 	case "openai.command":
-		title = progressVerb(status, "Running a command", "Ran a command", "Command failed")
+		title = statusVerb(phase, "Running a command…", "Reviewing command results…", "Recovering from a command error…")
 	case "openai.file-change":
-		title = progressVerb(status, "Applying a file change", "Applied a file change", "File change failed")
+		title = statusVerb(phase, "Applying a file change…", "Reviewing the file change…", "Recovering from a file change error…")
 	case "openai.image-view":
-		title = progressVerb(status, "Inspecting an image", "Inspected an image", "Image inspection failed")
+		title = statusVerb(phase, "Inspecting an image…", "Reviewing image findings…", "Recovering from an image error…")
 	case "openai.image-generation":
-		title = progressVerb(status, "Generating an image", "Generated an image", "Image generation failed")
+		title = statusVerb(phase, "Generating an image…", "Reviewing the generated image…", "Recovering from an image generation error…")
 	case "openai.subagent":
-		title = progressVerb(status, "Delegating agent work", "Completed delegated agent work", "Delegated agent work failed")
+		title = statusVerb(phase, "Delegating agent work…", "Reviewing delegated work…", "Recovering from a delegated task error…")
 	case "openai.wait":
-		title = progressVerb(status, "Waiting", "Wait completed", "Wait failed")
+		title = statusVerb(phase, "Waiting…", "Continuing the request…", "Recovering from a wait error…")
 	}
-	return types.SlackProgressStep{ID: "agent-work", Title: title, Status: status}
-}
-
-func safeSkillProgressStep(skillName string, status types.SlackProgressStatus) types.SlackProgressStep {
-	displayName := strings.ReplaceAll(skillName, "-", " ")
-	title := "Using " + displayName + " skill"
-	if status == types.SlackProgressComplete {
-		title = "Used " + displayName + " skill"
-	} else if status == types.SlackProgressError {
-		title = displayName + " skill failed"
-	}
-	return types.SlackProgressStep{ID: "agent-work", Title: title, Status: status}
+	return title
 }
 
 func safeFooterActivity(toolID, _ string, resourceAction string) string {
@@ -2362,11 +2426,11 @@ func safeFooterActivity(toolID, _ string, resourceAction string) string {
 	}
 }
 
-func progressVerb(status types.SlackProgressStatus, active, complete, failed string) string {
-	switch status {
-	case types.SlackProgressComplete:
+func statusVerb(phase agentStatusPhase, active, complete, failed string) string {
+	switch phase {
+	case agentStatusComplete:
 		return complete
-	case types.SlackProgressError:
+	case agentStatusError:
 		return failed
 	default:
 		return active

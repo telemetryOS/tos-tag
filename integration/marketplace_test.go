@@ -68,6 +68,7 @@ printf '200'
 func TestLinearReviewedHelperAcceptsInlineWorkerText(t *testing.T) {
 	temporary := t.TempDir()
 	capture := filepath.Join(temporary, "requests.jsonl")
+	inputPath := filepath.Join(temporary, "last-input.json")
 	fakeCurl := filepath.Join(temporary, "curl")
 	const fakeCurlScript = `#!/bin/bash
 set -eu
@@ -82,12 +83,22 @@ printf '%s\n' "$payload" >> "$CAPTURE_PATH"
 case "$payload" in
   *'commentCreate'*)
     printf '%s' '{"data":{"commentCreate":{"success":true,"comment":{"id":"comment-1"}}}}' ;;
+  *'VerifyUpdatedIssue'*)
+    input="$(cat "$INPUT_PATH")"
+    jq -cn --argjson input "$input" '{data:{issue:{identifier:"ENG-1234",title:$input.title,description:($input.description | gsub("\r\n"; "\n") | gsub("\r"; "\n") | sub("\n+$"; "")),state:{id:"state-1"},labelIds:[]}}}' ;;
+  *'VerifyCreatedIssue'*)
+    input="$(cat "$INPUT_PATH")"
+    jq -cn --argjson input "$input" '{data:{issue:{identifier:"ENG-4321",title:$input.title,description:($input.description | gsub("\r\n"; "\n") | gsub("\r"; "\n") | sub("\n+$"; "")),parent:null,state:{id:$input.stateId,name:"Triage"},labelIds:($input.labelIds // []),labels:{nodes:(if (($input.labelIds // []) | length) > 0 then [{name:"Feature"}] else [] end)}}}}' ;;
   *'issueUpdate'*)
     input="$(printf '%s' "$payload" | jq -c '.variables.input')"
-    jq -cn --argjson input "$input" '{data:{issueUpdate:{success:true,issue:{identifier:"ENG-1234",title:$input.title,description:$input.description,assignee:null,priority:3,state:{id:"state-1",name:"Triage"},labelIds:[],labels:{nodes:[]},parent:null}}}}' ;;
+    printf '%s' "$input" > "$INPUT_PATH"
+    jq -cn --argjson input "$input" '{data:{issueUpdate:{success:true,issue:{identifier:"ENG-1234",title:$input.title,description:"stale mutation payload",assignee:null,priority:3,state:{id:"state-1",name:"Triage"},labelIds:[],labels:{nodes:[]},parent:null}}}}' ;;
   *'issueCreate'*)
     input="$(printf '%s' "$payload" | jq -c '.variables.input')"
-    jq -cn --argjson input "$input" '{data:{issueCreate:{success:true,issue:{identifier:"ENG-4321",url:"https://linear.example/ENG-4321",title:$input.title,description:$input.description,parent:null,state:{id:$input.stateId,name:"Triage"},labelIds:[],labels:{nodes:[]}}}}}' ;;
+    printf '%s' "$input" > "$INPUT_PATH"
+    jq -cn --argjson input "$input" '{data:{issueCreate:{success:true,issue:{identifier:"ENG-4321",url:"https://linear.example/ENG-4321",title:$input.title,description:"stale mutation payload",parent:null,state:{id:$input.stateId,name:"Triage"},labelIds:($input.labelIds // []),labels:{nodes:(if (($input.labelIds // []) | length) > 0 then [{name:"Feature"}] else [] end)}}}}}' ;;
+  *'issueLabels'*)
+    printf '%s' '{"data":{"issueLabels":{"nodes":[{"id":"label-feature","name":"Feature","team":{"id":"65861c09-dd00-4ace-ab70-bda91f06f929"}}]}}}' ;;
   *'issue(id:'*)
     printf '%s' '{"data":{"issue":{"id":"issue-1","identifier":"ENG-1234","labelIds":[],"state":{"id":"state-1"},"team":{"id":"team-1"}}}}' ;;
   *)
@@ -98,9 +109,9 @@ esac
 		t.Fatal(err)
 	}
 	helper := filepath.Join("..", "tool-marketplace", "tools", "linear", "run.sh")
-	environment := []string{"PATH=" + temporary + ":/usr/bin:/bin", "HOME=" + temporary, "LINEAR_API_KEY=test-token", "TOS_TAG_OPERATION_ID=write", "CAPTURE_PATH=" + capture}
+	environment := []string{"PATH=" + temporary + ":/usr/bin:/bin", "HOME=" + temporary, "LINEAR_API_KEY=test-token", "TOS_TAG_OPERATION_ID=write", "CAPTURE_PATH=" + capture, "INPUT_PATH=" + inputPath}
 
-	create := exec.Command("/bin/bash", helper, "create", "--title", "Inline title", "--description", "## TL;DR\n\nInline description")
+	create := exec.Command("/bin/bash", helper, "create", "--title", "Inline title", "--description", "## TL;DR\r\n\r\nInline description\r\n")
 	create.Env = environment
 	if output, err := create.CombinedOutput(); err != nil || !strings.Contains(string(output), "ISSUE=ENG-4321") || !strings.Contains(string(output), "DESCRIPTION_APPLIED=1") {
 		t.Fatalf("inline create failed: %v: %s", err, output)
@@ -112,12 +123,64 @@ esac
 		t.Fatalf("inline update failed: %v: %s", err, output)
 	}
 
+	intakeEnvironment := []string{"PATH=" + temporary + ":/usr/bin:/bin", "HOME=" + temporary, "LINEAR_API_KEY=test-token", "TOS_TAG_OPERATION_ID=intake", "CAPTURE_PATH=" + capture, "INPUT_PATH=" + inputPath}
+	intakeCreate := exec.Command("/bin/bash", helper, "create", "--title", "Intake feature", "--description", "Complete feature body", "--priority", "3", "--label", "Feature")
+	intakeCreate.Env = intakeEnvironment
+	if output, err := intakeCreate.CombinedOutput(); err != nil || !strings.Contains(string(output), "ISSUE=ENG-4321") || !strings.Contains(string(output), "LABELS_APPLIED=1") {
+		t.Fatalf("approval-free intake create failed: %v: %s", err, output)
+	}
+	intakeComment := exec.Command("/bin/bash", helper, "comment", "--issue", "ENG-1234", "--body", "New defect evidence")
+	intakeComment.Env = intakeEnvironment
+	if output, err := intakeComment.CombinedOutput(); err != nil || !strings.Contains(string(output), "COMMENT_ID=comment-1") {
+		t.Fatalf("approval-free intake comment failed: %v: %s", err, output)
+	}
+
 	requests, err := os.ReadFile(capture)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(requests, []byte("Inline description")) || !bytes.Contains(requests, []byte("Concise update")) {
 		t.Fatalf("inline text was not encoded into reviewed requests: %s", requests)
+	}
+	if !bytes.Contains(requests, []byte("VerifyCreatedIssue")) || !bytes.Contains(requests, []byte("VerifyUpdatedIssue")) {
+		t.Fatalf("content writes did not use fresh Linear read-back queries")
+	}
+}
+
+func TestLinearReviewedHelperRejectsSubstantiveFreshDescriptionMismatchWithoutLeakingContent(t *testing.T) {
+	temporary := t.TempDir()
+	fakeCurl := filepath.Join(temporary, "curl")
+	const fakeCurlScript = `#!/bin/bash
+set -eu
+payload=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -d) payload="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$payload" in
+  *'VerifyCreatedIssue'*)
+    printf '%s' '{"data":{"issue":{"identifier":"ENG-9876","title":"Mismatch title","description":"substantively different","parent":null,"state":{"id":"c6ddabe1-23a7-4ade-a65a-d52fccc31af6","name":"Triage"},"labelIds":[],"labels":{"nodes":[]}}}}' ;;
+  *'issueCreate'*)
+    printf '%s' '{"data":{"issueCreate":{"success":true,"issue":{"identifier":"ENG-9876","url":"https://linear.example/ENG-9876","title":"Mismatch title","description":"stale mutation payload","parent":null,"state":{"id":"c6ddabe1-23a7-4ade-a65a-d52fccc31af6","name":"Triage"},"labelIds":[],"labels":{"nodes":[]}}}}}' ;;
+  *)
+    printf '%s' '{"errors":[{"message":"unexpected test query"}]}' ;;
+esac
+`
+	if err := os.WriteFile(fakeCurl, []byte(fakeCurlScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper := filepath.Join("..", "tool-marketplace", "tools", "linear", "run.sh")
+	const privateDescription = "PRIVATE-MARKDOWN-CONTENT"
+	command := exec.Command("/bin/bash", helper, "create", "--title", "Mismatch title", "--description", privateDescription)
+	command.Env = []string{"PATH=" + temporary + ":/usr/bin:/bin", "HOME=" + temporary, "LINEAR_API_KEY=test-token", "TOS_TAG_OPERATION_ID=write"}
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "ISSUE=ENG-9876") || !strings.Contains(string(output), "DESCRIPTION_APPLIED=0") || !strings.Contains(string(output), "read-back mismatched description") {
+		t.Fatalf("substantive mismatch was not rejected safely: %v: %s", err, output)
+	}
+	if bytes.Contains(output, []byte(privateDescription)) || bytes.Contains(output, []byte("substantively different")) {
+		t.Fatalf("description content leaked in mismatch output: %s", output)
 	}
 }
 
@@ -627,6 +690,20 @@ func TestCheckedInReviewedToolMarketplace(t *testing.T) {
 	}
 	if operations["read"].RequiresApproval() || operations["write"].RequiresApproval() || !operations["delete"].RequiresApproval() {
 		t.Fatalf("wiki approval boundary is invalid: %#v", operations)
+	}
+	linear, ok := registry.Resolve("telemetryos.linear")
+	if !ok {
+		t.Fatal("Linear tool was not resolved")
+	}
+	linearOperations := make(map[string]tools.Operation, len(linear.Manifest.Operations))
+	for _, operation := range linear.Manifest.Operations {
+		linearOperations[operation.ID] = operation
+	}
+	if len(linearOperations) != 3 || linearOperations["read"].Risk != "read" || linearOperations["intake"].Risk != "write" || linearOperations["write"].Risk != "write" {
+		t.Fatalf("Linear operations are invalid: %#v", linearOperations)
+	}
+	if linearOperations["read"].RequiresApproval() || linearOperations["intake"].RequiresApproval() || !linearOperations["write"].RequiresApproval() {
+		t.Fatalf("Linear approval boundary is invalid: %#v", linearOperations)
 	}
 	productDocs, ok := registry.Resolve("telemetryos.product-docs")
 	if !ok || len(productDocs.Manifest.Operations) != 1 {

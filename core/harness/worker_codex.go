@@ -828,6 +828,9 @@ func (s *codexWorkerSession) prepareToolInvocation(callID, tool string, argument
 		if invocation.ToolID == wikiToolID {
 			return declaredToolInvocation{}, nil, &wikiValidationError{Code: "wiki.typed_interface_required", Operation: invocation.ResourceAction}
 		}
+		if invocation.ToolID == "telemetryos.linear" && invocation.OperationID == "intake" && (!containsString(validatedSkills, "linear-issue-manager") || (!containsString(validatedSkills, "bug") && !containsString(validatedSkills, "feature"))) {
+			return declaredToolInvocation{}, nil, errors.New("Linear intake requires the bug or feature workflow with linear-issue-manager")
+		}
 	case wikiDynamicTool:
 		request, err := decodeWikiToolRequest(arguments)
 		if err != nil {
@@ -868,6 +871,15 @@ func validationCodeFromBridgeOutput(output string) string {
 		return ""
 	}
 	return response.ValidationCode
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func safeValidationCode(value string) bool {
@@ -1051,9 +1063,9 @@ func codexDynamicTools(skills []marketplace.SkillSnapshot) []map[string]any {
 	return []map[string]any{
 		{
 			"type": "function", "name": "tos_tag_tool",
-			"description": "Run one reviewed non-Wiki tos-tag marketplace operation through the current job capability. Agent Wiki calls must use tos_tag_wiki; telemetryos.wiki is rejected here. Declare every injected skill actively being followed in skill_names so Slack can show safe live progress. Calls must be sequential, narrowly scoped, and complete within the callback deadline; never fan out parallel source searches. telemetryos.code refreshes only the requested repository into a verified default-branch snapshot; use one semantic-search for conceptual discovery and one exact read to verify decisive lines. For a Go version/adoption question, call telemetryos.code read once with arguments [\"versions\",\"<repo>\",\"go\"] before any broader source lookup. Write, destructive, and admin operations require an independently approved approval_id.",
+			"description": "Run one reviewed non-Wiki tos-tag marketplace operation through the current job capability. Agent Wiki calls must use tos_tag_wiki; telemetryos.wiki is rejected here. Declare every injected skill actively being followed in skill_names so Slack can show safe live progress. Calls must be sequential, narrowly scoped, and complete within the callback deadline; never fan out parallel source searches. telemetryos.code refreshes only the requested repository into a verified default-branch snapshot; use one semantic-search for conceptual discovery and one exact read to verify decisive lines. For a Go version/adoption question, call telemetryos.code read once with arguments [\"versions\",\"<repo>\",\"go\"] before any broader source lookup. The narrow telemetryos.linear intake operation executes explicit bug/feature intake without per-action approval; generic write, destructive, and admin operations require an independently approved approval_id.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"skill_names", "tool_id", "operation_id", "arguments"}, "properties": map[string]any{
-				"skill_names": skillNamesSchema, "tool_id": map[string]any{"type": "string"}, "operation_id": map[string]any{"type": "string", "enum": []string{"read", "write", "delete"}}, "arguments": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"},
+				"skill_names": skillNamesSchema, "tool_id": map[string]any{"type": "string"}, "operation_id": map[string]any{"type": "string", "enum": []string{"read", "intake", "write", "delete"}}, "arguments": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"},
 			}},
 		},
 		{

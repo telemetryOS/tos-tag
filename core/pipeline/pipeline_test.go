@@ -384,15 +384,14 @@ type testSystem struct {
 }
 
 func newTestSystem(t *testing.T) testSystem {
-	return newTestSystemWithHarness(t, nil, config.DefaultConfiguration.Jobs.ProgressDelay)
+	return newTestSystemWithHarness(t, nil)
 }
 
-func newTestSystemWithHarness(t *testing.T, workerHarness harness.Harness, progressDelay time.Duration) testSystem {
+func newTestSystemWithHarness(t *testing.T, workerHarness harness.Harness) testSystem {
 	t.Helper()
 	cfg := config.DefaultConfiguration
 	cfg.Jobs.Poll = 2 * time.Millisecond
 	cfg.Jobs.Lease = time.Second
-	cfg.Jobs.ProgressDelay = progressDelay
 	builder, err := contextpacks.New(cfg.ContextPacks, contextpacks.WordTokenizer{})
 	if err != nil {
 		t.Fatal(err)
@@ -416,7 +415,7 @@ func newTestSystemWithHarness(t *testing.T, workerHarness harness.Harness, progr
 		Activity:        activityFeed,
 		Ingress:         ingress,
 		Transport:       transport,
-		Observations:    observer.NewMemoryStore(cfg.Retention.Messages, nil),
+		Observations:    observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil),
 		Sessions:        sessions.NewMemoryStore(nil),
 		Jobs:            jobQueue,
 		Decisions:       decisionStore,
@@ -474,8 +473,8 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 	if reactions := system.transport.ReactionRequests(); len(reactions) != 1 || reactions[0].Emoji == "" || reactions[0].ChannelID != message.ChannelID || reactions[0].MessageTS != message.MessageTS {
 		t.Fatalf("admitted answer work did not immediately acknowledge the source message with a classifier reaction: %#v", reactions)
 	}
-	if starts := system.transport.ProgressStarts(); len(starts) != 0 {
-		t.Fatalf("quick answer incorrectly started Thinking Steps: %#v", starts)
+	if statuses := system.transport.StatusRequests(); len(statuses) != 1 || statuses[0].Status != "Gathering information…" {
+		t.Fatalf("thread agent did not start its native Slack status: %#v", statuses)
 	}
 	activityRecords := system.activity.Snapshot(message.OrganizationID, 10)
 	if len(activityRecords) != 1 || activityRecords[0].Category != "classifier" || activityRecords[0].Message != message.Text || activityRecords[0].Details["outcome"] != string(types.OutcomeReplyInThread) {
@@ -512,16 +511,19 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 	if got := len(system.transport.ReactionRequests()); got != 1 {
 		t.Fatalf("duplicate changed reaction count to %d", got)
 	}
-	if got := len(system.transport.ProgressStarts()); got != 0 {
-		t.Fatalf("duplicate caused %d progress streams", got)
+	if got := len(system.transport.StatusRequests()); got != 1 {
+		t.Fatalf("duplicate changed agent status count to %d", got)
+	}
+	if got := len(system.transport.ThreadTitleRequests()); got != 0 {
+		t.Fatalf("non-DM thread received %d assistant titles", got)
 	}
 }
 
-func TestLongMentionStartsThinkingStepsAfterReactionGrace(t *testing.T) {
+func TestLongMentionStartsNativeAgentStatusImmediately(t *testing.T) {
 	blocking := &blockingHarness{started: make(chan struct{}, 1), release: make(chan struct{})}
 	var releaseOnce sync.Once
 	t.Cleanup(func() { releaseOnce.Do(func() { close(blocking.release) }) })
-	system := newTestSystemWithHarness(t, blocking, 5*time.Millisecond)
+	system := newTestSystemWithHarness(t, blocking)
 	message := envelope("mention-progress-grace", "product", "100.0015", "<@tos-tag> investigate this in depth")
 	message.IsMention = true
 	message.OriginTag = "slack_app_mention"
@@ -534,18 +536,18 @@ func TestLongMentionStartsThinkingStepsAfterReactionGrace(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("agent harness did not start")
 	}
-	waitFor(t, func() bool { return len(system.transport.ProgressStarts()) == 1 })
+	waitFor(t, func() bool { return len(system.transport.StatusRequests()) == 1 })
 	if reactions := system.transport.ReactionRequests(); len(reactions) != 1 || reactions[0].MessageTS != message.MessageTS {
 		t.Fatalf("long work did not retain its immediate reaction: %#v", reactions)
 	}
-	starts := system.transport.ProgressStarts()
-	if starts[0].ChannelID != message.ChannelID || starts[0].ThreadTS != message.MessageTS || starts[0].Step.Status != types.SlackProgressInProgress {
-		t.Fatalf("delayed Thinking Steps start = %#v", starts[0])
+	statuses := system.transport.StatusRequests()
+	if statuses[0].ChannelID != message.ChannelID || statuses[0].ThreadTS != message.MessageTS || statuses[0].Status != "Gathering information…" || len(statuses[0].LoadingMessages) != 3 {
+		t.Fatalf("native agent status start = %#v", statuses[0])
 	}
 	releaseOnce.Do(func() { close(blocking.release) })
 	waitFor(t, func() bool { return len(system.transport.Requests()) == 1 })
-	if streamTS := system.transport.Requests()[0].Destination.StreamTS; streamTS == "" {
-		t.Fatal("long answer did not finalize its delayed progress stream")
+	if streamTS := system.transport.Requests()[0].Destination.StreamTS; streamTS != "" {
+		t.Fatalf("long answer retained an in-thread progress stream: %q", streamTS)
 	}
 }
 
@@ -807,8 +809,8 @@ func TestProactiveBackgroundWorkImmediatelyAcknowledgesSourceMessage(t *testing.
 	if reactions := system.transport.ReactionRequests(); len(reactions) != 1 || reactions[0].Emoji != "rotating_light" || reactions[0].ChannelID != message.ChannelID || reactions[0].MessageTS != message.MessageTS {
 		t.Fatalf("proactive background work did not immediately acknowledge its source message: %#v", reactions)
 	}
-	if starts := system.transport.ProgressStarts(); len(starts) != 0 {
-		t.Fatalf("quick proactive work incorrectly started Thinking Steps: %#v", starts)
+	if statuses := system.transport.StatusRequests(); len(statuses) != 1 || statuses[0].Status != "Gathering information…" {
+		t.Fatalf("proactive thread work did not use native agent status: %#v", statuses)
 	}
 }
 
@@ -860,15 +862,15 @@ func TestFullAgentHarnessDeduplicatesRepeatedToolProgress(t *testing.T) {
 	transport := slack.NewStubDelivery()
 	p := &Pipeline{deps: Dependencies{Config: &cfg, Harness: &duplicateToolProgressHarness{}, Transport: transport}}
 	_, err := p.runHarness(context.Background(), jobs.Job{
-		ID: "job-progress", OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "tos-tag", ProgressMessageTS: "progress.1",
+		ID: "job-progress", OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "tos-tag", RootThreadTS: "100.1",
 		Input: `{"request":"inspect"}`, ResolvedModel: types.ResolvedModel{ProviderID: "openai", ModelID: "gpt-5.6-luna", Variant: "medium"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	updates := transport.ProgressUpdates()
-	if len(updates) != 2 || updates[0].Step.ID != "agent-work" || updates[1].Step.ID != "agent-work" {
-		t.Fatalf("progress updates = %#v", updates)
+	statuses := transport.StatusRequests()
+	if len(statuses) != 2 || statuses[0].Status != "Reviewing the results…" || statuses[1].Status != "Preparing the response…" {
+		t.Fatalf("agent statuses = %#v", statuses)
 	}
 }
 
@@ -878,40 +880,32 @@ func TestFullAgentHarnessShowsSkillAndEveryToolLifecycle(t *testing.T) {
 	transport := slack.NewStubDelivery()
 	p := &Pipeline{deps: Dependencies{Config: &cfg, Harness: &transparentProgressHarness{}, Transport: transport}}
 	result, err := p.runHarness(context.Background(), jobs.Job{
-		ID: "job-transparent-progress", OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "tos-tag", ProgressMessageTS: "progress.1",
+		ID: "job-transparent-progress", OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "tos-tag", RootThreadTS: "100.1",
 		Input: `{"request":"research"}`, ResolvedModel: types.ResolvedModel{ProviderID: "openai", ModelID: "gpt-5.6-luna", Variant: "medium"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	updates := transport.ProgressUpdates()
-	if len(updates) != 6 {
-		t.Fatalf("progress updates = %#v", updates)
+	statuses := transport.StatusRequests()
+	if len(statuses) != 6 {
+		t.Fatalf("agent statuses = %#v", statuses)
 	}
-	want := []struct {
-		status types.SlackProgressStatus
-		title  string
-	}{
-		{types.SlackProgressInProgress, "Using product knowledge skill"},
-		{types.SlackProgressInProgress, "Reading Agent Wiki"},
-		{types.SlackProgressInProgress, "Read Agent Wiki"},
-		{types.SlackProgressInProgress, "Searching the web"},
-		{types.SlackProgressInProgress, "Web search failed"},
-		{types.SlackProgressComplete, "Completed agent work"},
+	want := []string{
+		"Planning the next step…",
+		"Consulting Agent Wiki…",
+		"Reviewing the results…",
+		"Searching the web…",
+		"Adjusting the approach…",
+		"Preparing the response…",
 	}
 	for index, expected := range want {
-		if updates[index].Step.Status != expected.status || updates[index].Step.Title != expected.title {
-			t.Fatalf("update %d = %#v, want %q/%q", index, updates[index].Step, expected.status, expected.title)
+		if statuses[index].Status != expected {
+			t.Fatalf("status %d = %#v, want %q", index, statuses[index], expected)
 		}
 	}
-	for _, update := range updates {
-		if update.Step.ID != "agent-work" {
-			t.Fatalf("progress did not reuse the single transient card: %#v", updates)
-		}
-	}
-	for index, update := range updates[:len(updates)-1] {
-		if update.Step.Status == types.SlackProgressComplete || update.Step.Status == types.SlackProgressError {
-			t.Fatalf("intermediate progress update %d prematurely closed the stream: %#v", index, update.Step)
+	for _, status := range statuses {
+		if status.ThreadTS != "100.1" {
+			t.Fatalf("agent status left the source thread: %#v", statuses)
 		}
 	}
 	if result.AgentFooter == nil || len(result.AgentFooter.Activities) != 1 || result.AgentFooter.Activities[0] != "wiki" {
@@ -929,19 +923,19 @@ func TestFullAgentHarnessCollapsesSelfCorrectedWikiValidationAttempt(t *testing.
 	}
 	p := &Pipeline{deps: Dependencies{Config: &cfg, Harness: &wikiValidationRetryHarness{}, Transport: transport, Audit: auditLog}}
 	_, err = p.runHarness(context.Background(), jobs.Job{
-		ID: "job-wiki-validation", OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "tos-tag", ProgressMessageTS: "progress.1",
+		ID: "job-wiki-validation", OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "tos-tag", RootThreadTS: "100.1",
 		Input: `{"request":"publish"}`, ResolvedModel: types.ResolvedModel{ProviderID: "openai", ModelID: "gpt-5.6-luna", Variant: "medium"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	updates := transport.ProgressUpdates()
-	if len(updates) != 3 || updates[0].Step.Title != "Updating Agent Wiki" || updates[1].Step.Title != "Updated Agent Wiki" || updates[2].Step.Title != "Completed agent work" {
-		t.Fatalf("collapsed progress updates = %#v", updates)
+	statuses := transport.StatusRequests()
+	if len(statuses) != 4 || statuses[0].Status != "Adjusting the tool request…" || statuses[1].Status != "Updating Agent Wiki…" || statuses[2].Status != "Reviewing the results…" || statuses[3].Status != "Preparing the response…" {
+		t.Fatalf("collapsed agent statuses = %#v", statuses)
 	}
-	for _, update := range updates {
-		if update.Step.Title == "Agent Wiki update failed" || update.Step.Title == "Retrying agent work" {
-			t.Fatalf("self-corrected validation leaked as a separate failure: %#v", updates)
+	for _, status := range statuses {
+		if strings.Contains(status.Status, "failed") || strings.Contains(status.Status, "Retrying") {
+			t.Fatalf("self-corrected validation leaked as a separate failure: %#v", statuses)
 		}
 	}
 	receipts := auditLog.List("org-test")
@@ -954,29 +948,29 @@ func TestFullAgentHarnessCollapsesSelfCorrectedWikiValidationAttempt(t *testing.
 	}
 }
 
-func TestProductSourceProgressIdentifiesCorporateWebsite(t *testing.T) {
+func TestProductSourceAgentStatusIdentifiesCorporateWebsite(t *testing.T) {
 	tests := []struct {
 		resourceAction string
-		wantTitle      string
+		wantStatus     string
 	}{
-		{resourceAction: "corporate-full", wantTitle: "Read TelemetryOS corporate website"},
-		{resourceAction: "docs-index", wantTitle: "Read TelemetryOS documentation index"},
-		{resourceAction: "docs-page", wantTitle: "Read TelemetryOS documentation"},
+		{resourceAction: "corporate-full", wantStatus: "Consulting the TelemetryOS website…"},
+		{resourceAction: "docs-index", wantStatus: "Consulting the documentation index…"},
+		{resourceAction: "docs-page", wantStatus: "Consulting TelemetryOS documentation…"},
 	}
 	for _, test := range tests {
 		t.Run(test.resourceAction, func(t *testing.T) {
-			step := safeToolProgressStep("telemetryos.product-docs", "read", test.resourceAction)
-			if step.Title != test.wantTitle {
-				t.Fatalf("title = %q, want %q", step.Title, test.wantTitle)
+			status := safeToolAgentStatus("telemetryos.product-docs", "read", test.resourceAction, agentStatusActive)
+			if status != test.wantStatus {
+				t.Fatalf("status = %q, want %q", status, test.wantStatus)
 			}
 		})
 	}
 }
 
-func TestAnalyticsProgressUsesPrivacySafeTitle(t *testing.T) {
-	step := safeToolProgressStep("telemetryos.analytics", "read", "account")
-	if step.Title != "Reviewed marketing analytics" || safeFooterActivity("telemetryos.analytics", "read", "account") != "analytics" {
-		t.Fatalf("analytics progress=%#v activity=%q", step, safeFooterActivity("telemetryos.analytics", "read", "account"))
+func TestAnalyticsAgentStatusUsesPrivacySafeTitle(t *testing.T) {
+	status := safeToolAgentStatus("telemetryos.analytics", "read", "account", agentStatusActive)
+	if status != "Reviewing marketing analytics…" || safeFooterActivity("telemetryos.analytics", "read", "account") != "analytics" {
+		t.Fatalf("analytics status=%q activity=%q", status, safeFooterActivity("telemetryos.analytics", "read", "account"))
 	}
 }
 
@@ -1010,8 +1004,8 @@ func TestBriefMentionDeliversInChannel(t *testing.T) {
 	if requests[0].Destination.ChannelID != message.ChannelID || requests[0].Destination.ThreadTS != "" {
 		t.Fatalf("brief answer was not delivered in-channel: %#v", requests[0].Destination)
 	}
-	if starts := system.transport.ProgressStarts(); len(starts) != 0 {
-		t.Fatalf("brief in-channel answer incorrectly started Thinking Steps: %#v", starts)
+	if statuses := system.transport.StatusRequests(); len(statuses) != 0 {
+		t.Fatalf("brief in-channel answer incorrectly started a thread status: %#v", statuses)
 	}
 	jobList, err := system.jobs.List(context.Background())
 	if err != nil || len(jobList) != 1 || !jobList[0].ReplyInChannel {
@@ -1455,6 +1449,39 @@ func TestContextSyncAutoEnrollsObserveOnlyAndPreservesExistingOutputPolicy(t *te
 	}
 }
 
+func TestContextSyncAutoEnablesEveryOneToOneDirectMessage(t *testing.T) {
+	cfg := contextSyncConfig()
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test", EnrollmentMode: "allowlist"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
+	now := time.Now().UTC()
+	_, err := scopes.PutChannel(context.Background(), orgconfig.ChannelPolicy{
+		OrganizationID: "org-test", TeamID: "team-test", ChannelID: "D-existing", Enrolled: true, Restricted: true,
+		ParticipationMode: types.ModeObserve, Cooldown: time.Minute, MaxResponsesPerHour: 2, MaxConcurrentJobs: 2,
+		MembershipRevision: "manual/v1", MembershipRefreshedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Scopes: scopes}}
+	for _, channelID := range []string{"D-new", "D-existing"} {
+		authorized, registerErr := p.RegisterContextChannel(context.Background(), types.SlackContextChannel{
+			OrganizationID: "org-test", TeamID: "team-test", ChannelID: channelID,
+			Restricted: true, RestrictionKnown: true,
+		})
+		if registerErr != nil || !authorized {
+			t.Fatalf("register %s authorized=%v err=%v", channelID, authorized, registerErr)
+		}
+		policy, resolveErr := scopes.Resolve(context.Background(), "org-test", "team-test", channelID)
+		if resolveErr != nil {
+			t.Fatal(resolveErr)
+		}
+		if !policy.Enrolled || !policy.Restricted || policy.ParticipationMode != types.ModeAssist || policy.ParticipationManagedByMembership || !authorizedOutputPolicy(policy, time.Now().UTC()) {
+			t.Fatalf("direct-message policy %s = %#v", channelID, policy)
+		}
+	}
+}
+
 func TestContextSyncAutomaticallyAssistsOnlyBotJoinedChannels(t *testing.T) {
 	cfg := contextSyncConfig()
 	cfg.Slack.AutoAssistJoinedChannels = true
@@ -1525,7 +1552,7 @@ func TestUnknownAppMentionPrivacyIsDeferredBeforePersistence(t *testing.T) {
 	scopes := orgconfig.NewMemory()
 	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test", EnrollmentMode: "all_observable_channels"})
 	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
-	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	observations := observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)
 	pipe := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Scopes: scopes, Observations: observations}}
 	message := envelope("unknown-app-mention", "unknown-channel", "391.001", "<@BOT> private or public is not yet known")
 	message.IsMention = true
@@ -1559,7 +1586,7 @@ func TestAgentAuthoredSlackOutputBecomesResolvedContextWithoutDecision(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	observations := observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)
 	p := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Scopes: scopes, Observations: observations}}
 
 	message := envelope("message/team-test/tos-tag/392.001", "tos-tag", "392.001", "Tag delivery")
@@ -1608,6 +1635,92 @@ func TestAgentAuthoredSlackOutputBecomesResolvedContextWithoutDecision(t *testin
 	}
 }
 
+func TestAuthorizedSlackIntegrationTriggerEntersDecisionQueue(t *testing.T) {
+	cfg := contextSyncConfig()
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test", EnrollmentMode: "all_observable_channels"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
+	_, err := scopes.PutChannel(context.Background(), orgconfig.ChannelPolicy{
+		OrganizationID: "org-test", TeamID: "team-test", ChannelID: "CDEPLOYMENTS", Enrolled: true,
+		ParticipationMode: types.ModeProactive, MaxResponsesPerHour: 6, MaxConcurrentJobs: 2,
+		TrustedIntegrationBotIDs: []string{"BDEPLOYMENTS"},
+		MembershipRevision:       "member/v1", MembershipRefreshedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations := observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Scopes: scopes, Observations: observations}}
+
+	message := envelope("message/team-test/CDEPLOYMENTS/392.010", "CDEPLOYMENTS", "392.010", "Deploy QA FAILED")
+	message.UserID = "UDEPLOYMENTS"
+	message.BotID = "BDEPLOYMENTS"
+	accepted, err := p.HandleEnvelope(context.Background(), message)
+	if err != nil || accepted.Ignored || accepted.ResolvedContext {
+		t.Fatalf("authorized integration trigger was not accepted: %#v err=%v", accepted, err)
+	}
+	claimed, err := observations.ClaimPending(context.Background(), "worker", time.Minute)
+	if err != nil || claimed.BotID != "BDEPLOYMENTS" || claimed.OriginTag != "slack_authorized_integration_trigger" {
+		t.Fatalf("authorized integration trigger pending observation = %#v err=%v", claimed, err)
+	}
+}
+
+func TestTrustedSlackIntegrationIsScopedToItsChannelPolicy(t *testing.T) {
+	cfg := contextSyncConfig()
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test", EnrollmentMode: "all_observable_channels"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
+	for _, policy := range []orgconfig.ChannelPolicy{
+		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "CDEPLOYMENTS", Enrolled: true, ParticipationMode: types.ModeProactive, MaxResponsesPerHour: 6, MaxConcurrentJobs: 2, TrustedIntegrationBotIDs: []string{"BDEPLOYMENTS"}, MembershipRevision: "member/v1", MembershipRefreshedAt: time.Now().UTC()},
+		{OrganizationID: "org-test", TeamID: "team-test", ChannelID: "COTHER", Enrolled: true, ParticipationMode: types.ModeProactive, MaxResponsesPerHour: 6, MaxConcurrentJobs: 2, MembershipRevision: "member/v1", MembershipRefreshedAt: time.Now().UTC()},
+	} {
+		if _, err := scopes.PutChannel(context.Background(), policy); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observations := observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Scopes: scopes, Observations: observations}}
+
+	message := envelope("message/team-test/COTHER/392.012", "COTHER", "392.012", "Deploy QA FAILED")
+	message.UserID = "UDEPLOYMENTS"
+	message.BotID = "BDEPLOYMENTS"
+	accepted, err := p.HandleEnvelope(context.Background(), message)
+	if err != nil || !accepted.Ignored || !accepted.ResolvedContext {
+		t.Fatalf("integration trust leaked across channels: %#v err=%v", accepted, err)
+	}
+	if _, err := observations.ClaimPending(context.Background(), "worker", time.Minute); !errors.Is(err, observer.ErrNoPendingObservation) {
+		t.Fatalf("out-of-policy integration entered decision queue: %v", err)
+	}
+}
+
+func TestSlackMembershipEventsRemainResolvedContext(t *testing.T) {
+	cfg := contextSyncConfig()
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test", EnrollmentMode: "all_observable_channels"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
+	_, err := scopes.PutChannel(context.Background(), orgconfig.ChannelPolicy{
+		OrganizationID: "org-test", TeamID: "team-test", ChannelID: "CDEPLOYMENTS", Enrolled: true,
+		ParticipationMode: types.ModeProactive, MaxResponsesPerHour: 6, MaxConcurrentJobs: 2,
+		MembershipRevision: "member/v1", MembershipRefreshedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations := observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Scopes: scopes, Observations: observations}}
+
+	message := envelope("message/team-test/CDEPLOYMENTS/392.011", "CDEPLOYMENTS", "392.011", "Claude has left the channel")
+	message.UserID = "UCLAUDE"
+	message.Subtype = types.SlackMessageSubtypeChannelLeave
+	accepted, err := p.HandleEnvelope(context.Background(), message)
+	if err != nil || !accepted.Ignored || !accepted.ResolvedContext {
+		t.Fatalf("membership event was not retained as resolved context: %#v err=%v", accepted, err)
+	}
+	if _, err := observations.ClaimPending(context.Background(), "worker", time.Minute); !errors.Is(err, observer.ErrNoPendingObservation) {
+		t.Fatalf("membership event entered decision queue: %v", err)
+	}
+}
+
 func TestRecoveredAgentMentionRemainsContextOnly(t *testing.T) {
 	cfg := contextSyncConfig()
 	scopes := orgconfig.NewMemory()
@@ -1621,7 +1734,7 @@ func TestRecoveredAgentMentionRemainsContextOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	observations := observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)
 	p := &Pipeline{deps: Dependencies{Config: &cfg, Logger: blackbox.New(), Scopes: scopes, Observations: observations}}
 
 	message := envelope("history/team-test/tos-tag/392.100", "tos-tag", "392.100", "<@U-tag> please continue")
@@ -1652,7 +1765,7 @@ func TestContextSyncDoesNotExpandAllowlistEnrollment(t *testing.T) {
 	if _, err := scopes.Resolve(context.Background(), "org-test", "team-test", "not-allowed"); !errors.Is(err, orgconfig.ErrNotFound) {
 		t.Fatalf("allowlist enrollment expanded: %v", err)
 	}
-	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	observations := observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)
 	p.deps.Observations = observations
 	message := envelope("not-allowed-event", "not-allowed", "390.001", "must not be retained")
 	accepted, err := p.HandleEnvelope(context.Background(), message)
@@ -1669,7 +1782,7 @@ func TestContextSyncDoesNotExpandAllowlistEnrollment(t *testing.T) {
 
 func TestContextHistoryImportCannotCreateDecisionAndRespectsExplicitUnenrollment(t *testing.T) {
 	cfg := contextSyncConfig()
-	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	observations := observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)
 	scopes := orgconfig.NewMemory()
 	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test"})
 	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
@@ -1701,7 +1814,7 @@ func TestContextHistoryImportCannotCreateDecisionAndRespectsExplicitUnenrollment
 
 func TestSessionOnlyChannelSkipsHistoricalImportAndOfflineRecovery(t *testing.T) {
 	cfg := contextSyncConfig()
-	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	observations := observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)
 	scopes := orgconfig.NewMemory()
 	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test"})
 	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})
@@ -1738,7 +1851,7 @@ func TestSessionOnlyContextUsesOnlyDestinationMessagesFromCurrentProcess(t *test
 	}
 	now := time.Now().UTC()
 	startedAt := now.Add(-time.Minute)
-	base := observer.NewMemoryStore(cfg.Retention.Messages, func() time.Time { return now.Add(time.Minute) })
+	base := observer.NewMemoryStore(cfg.Retention.RawEnvelope, func() time.Time { return now.Add(time.Minute) })
 	recording := &recordingObservationStore{Store: base}
 	for _, message := range []types.SlackEnvelope{
 		envelope("old-test", "tos-tag", "ephemeral.101", "TEST-101 old test context"),
@@ -1798,7 +1911,7 @@ func TestOfflineCatchUpQueuesDirectMentionButKeepsAmbientHistoryResolved(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	observations := observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)
 	p := &Pipeline{deps: Dependencies{
 		Config: &cfg, Logger: blackbox.New(), Scopes: scopes, Observations: observations,
 		Sessions: sessions.NewMemoryStore(nil),
@@ -1839,7 +1952,7 @@ func TestOfflineCatchUpQueuesReplyOnlyForExistingTagThread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	observationStore := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	observationStore := observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)
 	sessionStore := sessions.NewMemoryStore(nil)
 	if _, _, err := sessionStore.Resolve(context.Background(), "org-test", "team-test", "tos-tag", "root.001"); err != nil {
 		t.Fatal(err)
@@ -1872,7 +1985,7 @@ func TestOfflineCatchUpQueuesTopLevelDirectMessageWithoutMention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	observations := observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)
 	p := &Pipeline{deps: Dependencies{
 		Config: &cfg, Logger: blackbox.New(), Scopes: scopes, Observations: observations,
 		Sessions: sessions.NewMemoryStore(nil),
@@ -1894,7 +2007,7 @@ func TestOfflineCatchUpQueuesTopLevelDirectMessageWithoutMention(t *testing.T) {
 
 func TestLiveSlackEnvelopeAdvancesDurableContextWatermark(t *testing.T) {
 	cfg := contextSyncConfig()
-	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	observations := observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)
 	states := slack.NewMemoryContextSyncStateStore()
 	scopes := orgconfig.NewMemory()
 	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test"})
@@ -1921,11 +2034,12 @@ func TestLiveSlackEnvelopeAdvancesDurableContextWatermark(t *testing.T) {
 
 func TestContextQueryUsesOnlyAuthorizedChannelsAndPolicyRestriction(t *testing.T) {
 	cfg := config.DefaultConfiguration
+	cfg.ContextPacks.Lookback = 36 * time.Hour
 	builder, err := contextpacks.New(cfg.ContextPacks, contextpacks.WordTokenizer{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	base := observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)
 	recording := &recordingObservationStore{Store: base}
 	now := time.Now().UTC()
 	for _, message := range []types.SlackEnvelope{
@@ -1972,6 +2086,10 @@ func TestContextQueryUsesOnlyAuthorizedChannelsAndPolicyRestriction(t *testing.T
 	}
 	if len(recording.recentChannels) != 2 || !containsString(recording.recentChannels, "support") || !containsString(recording.recentChannels, "public-status") {
 		t.Fatalf("pre-query channels=%v", recording.recentChannels)
+	}
+	wantSince := time.Now().UTC().Add(-cfg.ContextPacks.Lookback)
+	if recording.recentSince.Before(wantSince.Add(-time.Second)) || recording.recentSince.After(wantSince.Add(time.Second)) {
+		t.Fatalf("context query since=%s, want configured lookback near %s", recording.recentSince, wantSince)
 	}
 	for _, source := range pack.Sources {
 		if source.ChannelID == "not-enrolled" || source.ChannelID == "private-alerts" || source.ChannelID == "management" {
@@ -2025,7 +2143,7 @@ func TestHeartbeatClassifierUsesDestinationFilteredContextAndOutputPolicy(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	base := observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)
 	recording := &recordingObservationStore{Store: base}
 	now := time.Now().UTC()
 	for _, message := range []types.SlackEnvelope{
@@ -2139,7 +2257,7 @@ func TestBotAuthoredCrossChannelContextIsMarkedUnverified(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	observations := observer.NewMemoryStore(cfg.Retention.Messages, nil)
+	observations := observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)
 	now := time.Now().UTC()
 	botMessage := envelope("bot-context", "status", "360.001", "generated status")
 	botMessage.BotID = "B-external"
@@ -2177,7 +2295,7 @@ func TestBotAuthoredCrossChannelContextIsMarkedUnverified(t *testing.T) {
 func TestRestrictedIncidentDoesNotReconsiderOtherChannels(t *testing.T) {
 	cfg := config.DefaultConfiguration
 	now := time.Now().UTC()
-	recording := &recordingObservationStore{Store: observer.NewMemoryStore(cfg.Retention.Messages, nil)}
+	recording := &recordingObservationStore{Store: observer.NewMemoryStore(cfg.Retention.RawEnvelope, nil)}
 	scopes := orgconfig.NewMemory()
 	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org-test"})
 	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org-test", TeamID: "team-test", Enabled: true})

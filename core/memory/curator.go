@@ -24,6 +24,7 @@ import (
 type CuratorOptions struct {
 	Interval        time.Duration
 	Lookback        time.Duration
+	SourceValidity  time.Duration
 	MinMessages     int
 	MaxMessages     int
 	MaxScopesPerRun int
@@ -45,7 +46,7 @@ type Curator struct {
 }
 
 func NewCurator(db *database.Database, repository Repository, summarizer Summarizer, recorder usage.Recorder, logger *blackbox.Logger, options CuratorOptions) (*Curator, error) {
-	if db == nil || repository == nil || summarizer == nil || options.Interval <= 0 || options.Lookback <= 0 || options.MinMessages < 2 || options.MaxMessages < options.MinMessages || options.MaxScopesPerRun <= 0 || options.MinConfidence < 0 || options.MinConfidence > 1 || options.Timeout <= 0 {
+	if db == nil || repository == nil || summarizer == nil || options.Interval <= 0 || options.Lookback <= 0 || options.SourceValidity <= 0 || options.MinMessages < 2 || options.MaxMessages < options.MinMessages || options.MaxScopesPerRun <= 0 || options.MinConfidence < 0 || options.MinConfidence > 1 || options.Timeout <= 0 {
 		return nil, errors.New("invalid memory curator configuration")
 	}
 	if logger == nil {
@@ -206,7 +207,6 @@ func (c *Curator) candidates(ctx context.Context) ([]Batch, error) {
 		"subtype":     bson.M{"$nin": bson.A{types.SlackMessageSubtypeBotMessage, types.SlackMessageSubtypeAssistantAppThread}},
 		"text":        bson.M{"$ne": ""},
 		"original_at": bson.M{"$gte": now.Add(-c.options.Lookback)},
-		"expires_at":  bson.M{"$gt": now},
 	}, options.Find().SetSort(bson.D{{Key: "updated_at", Value: -1}}).SetLimit(5000))
 	if err != nil {
 		return nil, err
@@ -266,7 +266,7 @@ func (c *Curator) candidates(ctx context.Context) ([]Batch, error) {
 		hash := sha256.New()
 		for _, message := range value.messages {
 			id := message.ChannelID + "/" + message.MessageTS
-			batch.Messages = append(batch.Messages, SourceMessage{ID: id, AuthorID: message.AuthorID, Text: message.Text, ObservedAt: message.OriginalAt, ExpiresAt: message.ExpiresAt})
+			batch.Messages = append(batch.Messages, SourceMessage{ID: id, AuthorID: message.AuthorID, Text: message.Text, ObservedAt: message.OriginalAt, ExpiresAt: message.OriginalAt.Add(c.options.SourceValidity)})
 			_, _ = fmt.Fprintf(hash, "%s\x00%d\x00%s\x00", id, message.ProjectionVersion, message.Text)
 		}
 		batch.SourceHash = hex.EncodeToString(hash.Sum(nil))

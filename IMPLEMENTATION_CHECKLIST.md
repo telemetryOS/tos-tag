@@ -63,10 +63,17 @@ Only mark an item complete when source and verification evidence exist.
   admission, keep operator-created heartbeat triggers authorized, and pass the
   46-message deterministic and live provider matrices (`48/48` with
   infrastructure invariants) plus a zero-reply/zero-job `#tos-tag` canary.
+- [x] Silently suppress source-write requests across ambient, direct-mention,
+  and active-thread paths, and cover the TelemetryCode concept-post false
+  positive caused by loose mutation-verb substring matching.
 - [x] Require text-confirmed source mutation intent before applying the Linear
   redirect, keep ambient Agent Wiki report links silent, and suppress leading
-  third-party handoffs in active Tag threads before classification (`54/54`
+  third-party handoffs in active Tag threads before classification (now `55/55`
   deterministic matrix with infrastructure invariants).
+- [x] Auto-enable one-to-one DMs as hard assist participation surfaces:
+  expose the DM fact to the direct classifier, preserve its normal full-agent
+  escalation choice, and replace silent or reaction-only outcomes with a
+  bounded classifier-direct reply.
 - [x] Persist content-free classifier input/output/context/failure dimensions,
   record deterministic avoided calls by reason, and expose organization-scoped
   daily efficiency totals with estimates kept distinct from exact provider
@@ -141,8 +148,8 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Pin Semble and its local embedding model, keep query-time semantic search
   offline, and retain source-bearing indexes only in owner-only server state.
 - [x] Enforce the code tool's permanent read-only boundary at both bundle load
-  and execution, and redirect source mutation intent to Linear bug/feature
-  intake instead of an approval flow.
+  and execution, and silently suppress source mutation intent instead of
+  starting a worker or approval flow.
 - [x] Provide a credential-free `telemetryos.product-docs` read operation that
   permits only the public docs index/pages and corporate full-content source.
 - [x] Provide a read-only `telemetryos.analytics` operation with fixed Gateway
@@ -166,16 +173,23 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Persist canonical exact-action approvals.
 - [x] Render Slack-native approval blocks and update them after decision.
 - [x] Default non-read risk to an independent allowlisted approver, with
-  source-reviewed per-operation exceptions; Agent Wiki read/write authoring is
-  trusted without per-action approval, recoverable page soft-delete is always
+  source-reviewed per-operation exceptions; bounded bug/feature Linear intake
+  and Agent Wiki read/write authoring are trusted without per-action approval,
+  generic Linear writes remain gated, recoverable page soft-delete is always
   gated, admin-risk worker operations are invalid, and all calls remain fully
   audited.
+- [x] Verify Linear create/update title and description writes through a fresh
+  issue read-back, tolerating only line-ending and terminal-newline
+  normalization without printing authored content.
 - [x] Consume approvals once and resume a fresh fenced attempt.
 - [x] Implement `/tag-directive` modal load/save for every authenticated
   workspace user in an enrolled, enabled channel, plus explicit management-UI
   creation, revision history, activation, and audit.
 - [x] Implement channel-bound `/tag-status` with an ephemeral native Block Kit
   table for participation, directive, availability, membership, and scope.
+- [x] Implement `/tag-automations` as a channel-only ephemeral list with an
+  audited, stale-write-aware Slack modal editor; migrate automation indexes and
+  backfill legacy channel scope from durable sessions before scheduling.
 - [x] Persist and reauthorize standard five-field cron routines with explicit
   IANA timezones while advancing legacy interval records safely.
 - [x] Persist classifier-gated cron heartbeat subscriptions and manage them in
@@ -206,12 +220,15 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Persist, lease, retry, reconcile, and deduplicate deliveries.
 - [x] Distinguish channel replies from thread replies according to classifier
   placement.
-- [x] Use immediate reactions for admitted answer acknowledgement, delay
-  Slack-native Thinking Steps until a full-agent thread job outlives the
-  configured grace period, transition through a best-effort native thread
-  status into a plan-mode stream, persist and reconcile the stream timestamp, expose
-  only safe operational milestones, and
-  finalize the same message with a durable validated result.
+- [x] Title each newly created one-to-one DM full-agent session once through
+  control-plane-owned `assistant.threads.setTitle`, after durable job enqueue,
+  with bounded sanitized request text, likely-secret fallback, DM-only
+  validation, duplicate suppression, and cosmetic failure handling.
+- [x] Use immediate reactions for admitted answer acknowledgement and native
+  assistant thread status for every full-agent thread job. Rotate generic
+  lifecycle text, replace it with one safe tool-specific status per call,
+  refresh long-running work, create no plan-mode stream or task-card pills, and
+  finish with an ordinary durable validated reply that clears the status.
 
 ## 10. Persistence, audit, and operations
 
@@ -220,6 +237,11 @@ Only mark an item complete when source and verification evidence exist.
   management listings.
 - [x] Encrypt organization-scoped keystore values.
 - [x] Record append-only content-committed audit receipts.
+- [x] Retain normalized Slack messages indefinitely, omit their expiry field,
+  remove the message TTL index, and migrate the obsolete index at startup.
+- [x] Bound new context independently with a configurable 30-day-default
+  lookback; keep raw observations, context packs, and derived state on their
+  separate TTL or source-validity boundaries.
 - [x] Apply TTL and source-linked expiry to derived state.
 - [x] Curate changed channel/thread memory asynchronously with
   `gpt-5.6-luna` medium effort and strict stateless structured output.

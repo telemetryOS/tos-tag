@@ -397,22 +397,16 @@ func (b *Bridge) serveTriggerSubscriptions(w http.ResponseWriter, r *http.Reques
 	}
 	switch input.Operation {
 	case "list":
-		values, err := b.triggers.List(r.Context(), scope.OrganizationID)
+		values, err := b.triggers.ListChannel(r.Context(), scope.OrganizationID, scope.WorkspaceID, scope.ChannelID)
 		if err != nil {
 			writeBridge(w, http.StatusServiceUnavailable, map[string]any{"error": "query_failed"})
 			return
 		}
-		filtered := make([]triggers.Subscription, 0, len(values))
-		for _, value := range values {
-			if value.WorkspaceID == scope.WorkspaceID && value.ChannelID == scope.ChannelID {
-				filtered = append(filtered, value)
-			}
-		}
-		writeBridge(w, http.StatusOK, map[string]any{"subscriptions": filtered})
+		writeBridge(w, http.StatusOK, map[string]any{"subscriptions": values})
 		return
 	case "get":
-		value, err := b.triggers.GetContext(r.Context(), scope.OrganizationID, input.ID)
-		if err != nil || value.WorkspaceID != scope.WorkspaceID || value.ChannelID != scope.ChannelID {
+		value, err := b.triggers.GetContext(r.Context(), scope.OrganizationID, scope.WorkspaceID, scope.ChannelID, input.ID)
+		if err != nil {
 			writeBridge(w, http.StatusNotFound, map[string]any{"error": "trigger_subscription_not_found"})
 			return
 		}
@@ -429,10 +423,6 @@ func (b *Bridge) serveTriggerSubscriptions(w http.ResponseWriter, r *http.Reques
 	}
 	var pendingSubscription triggers.Subscription
 	if input.Operation == "put" {
-		if existing, getErr := b.triggers.GetContext(r.Context(), scope.OrganizationID, input.ID); getErr == nil && (existing.WorkspaceID != scope.WorkspaceID || existing.ChannelID != scope.ChannelID) {
-			writeBridge(w, http.StatusForbidden, map[string]any{"error": "trigger_subscription_scope_denied"})
-			return
-		}
 		job, err := b.jobs.Get(r.Context(), jobsID(scope.JobID))
 		if err != nil {
 			writeBridge(w, http.StatusForbidden, map[string]any{"error": "execution_revoked"})
@@ -492,8 +482,8 @@ func (b *Bridge) serveTriggerSubscriptions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if input.Operation == "disable" {
-		value, err := b.triggers.GetContext(r.Context(), scope.OrganizationID, input.ID)
-		if err != nil || value.WorkspaceID != scope.WorkspaceID || value.ChannelID != scope.ChannelID {
+		value, err := b.triggers.GetContext(r.Context(), scope.OrganizationID, scope.WorkspaceID, scope.ChannelID, input.ID)
+		if err != nil {
 			writeBridge(w, http.StatusNotFound, map[string]any{"error": "trigger_subscription_not_found"})
 			return
 		}
@@ -515,7 +505,7 @@ func (b *Bridge) serveTriggerSubscriptions(w http.ResponseWriter, r *http.Reques
 		writeBridge(w, http.StatusUnprocessableEntity, map[string]any{"error": "invalid_trigger_subscription"})
 		return
 	}
-	_, _ = b.audit.Append(r.Context(), audit.AppendRequest{OrganizationID: scope.OrganizationID, Type: "trigger.subscription.put", ActorID: "agent:" + scope.JobID, ResourceID: saved.ID, RetentionEpoch: time.Now().UTC().Format("2006-01"), IdempotencyKey: "trigger-subscription/" + saved.ID + "/" + fmt.Sprint(saved.Version), Metadata: map[string]any{"channel_id": saved.ChannelID, "enabled": saved.Enabled, "version": saved.Version}})
+	_, _ = b.audit.Append(r.Context(), audit.AppendRequest{OrganizationID: scope.OrganizationID, Type: "trigger.subscription.put", ActorID: "agent:" + scope.JobID, ResourceID: saved.ChannelID + "/" + saved.ID, RetentionEpoch: time.Now().UTC().Format("2006-01"), IdempotencyKey: "trigger-subscription/" + saved.ChannelID + "/" + saved.ID + "/" + fmt.Sprint(saved.Version), Metadata: map[string]any{"channel_id": saved.ChannelID, "enabled": saved.Enabled, "version": saved.Version}})
 	writeBridge(w, http.StatusOK, saved)
 }
 

@@ -159,6 +159,9 @@
     .data-table td time { white-space: nowrap; }
     code.id-code { white-space: nowrap; }
     .data-table select.mode-select { display: inline-block; width: 128px; height: 30px; margin: 0; padding: 4px 28px 4px 9px; font-size: 11.5px; }
+    .data-table .inline-control { display: flex; align-items: center; gap: 7px; min-width: 255px; }
+    .data-table .inline-control input { min-width: 175px; height: 30px; margin: 0; padding: 4px 8px; font: 11.5px/1.2 var(--mono); }
+    .data-table .inline-control button { flex: 0 0 auto; height: 30px; margin: 0; padding: 4px 10px; }
     .data-table.page-channels th:first-child, .data-table.page-channels td:first-child { min-width: 180px; }
     .data-table.page-memory { table-layout: fixed; }
     .data-table.page-memory .memory-context-column { width: 240px; }
@@ -703,14 +706,15 @@
 
     const pageViews = {
       channels: {
-        guidance: 'Change a channel\'s participation mode directly with its dropdown. Search by name, filter by mode, and open details for limits and membership metadata.',
+        guidance: 'Manage participation and the exact Slack bots trusted to trigger work in each channel. Search by name, filter by mode, and open details for limits and membership metadata.',
         empty: 'No usable Slack channels are known yet. Named public and private channels appear here once Slack discovery completes.',
         search: 'Find a channel…', filter: {key: 'participation_mode', label: 'mode'},
-        columns: ['name', {key:'participation_mode', label:'Mode'}, {key:'context_history_mode', label:'Context'}, {key:'bot_is_member', label:'Tag joined'}, 'restricted', 'kill_switch', 'membership_refreshed_at'],
+        columns: ['name', {key:'participation_mode', label:'Mode'}, {key:'trusted_integrations', label:'Trusted integration bots', derived:true}, {key:'context_history_mode', label:'Context'}, {key:'bot_is_member', label:'Tag joined'}, 'restricted', 'kill_switch', 'membership_refreshed_at'],
         summaries: rows => [
           {label:'Known channels', value:rows.length, detail:'Usable named channels visible to the installed Slack app'},
           {label:'Can participate', value:rows.filter(row => ['assist','proactive'].includes(row.participation_mode) && row.enrolled && !row.kill_switch && (!row.participation_managed_by_membership || row.bot_is_member)).length, detail:'Joined assist/proactive channels passing safeguards'},
           {label:'Observe only', value:rows.filter(row => row.participation_mode === 'observe').length, detail:'Context only; no messages or reactions'},
+          {label:'Integration triggers', value:rows.reduce((count, row) => count + (Array.isArray(row.trusted_integration_bot_ids) ? row.trusted_integration_bot_ids.length : 0), 0), detail:'Exact bot identities trusted by channel policy'},
           {label:'Restricted', value:rows.filter(row => row.restricted).length, detail:'Private Slack channels'}
         ]
       },
@@ -1077,6 +1081,36 @@
       });
       return select;
     }
+    function trustedIntegrationControl(row) {
+      const control = document.createElement('div'); control.className = 'inline-control';
+      const input = document.createElement('input'); input.type = 'text'; input.placeholder = 'B0123456789';
+      input.value = (Array.isArray(row.trusted_integration_bot_ids) ? row.trusted_integration_bot_ids : []).join(', ');
+      input.setAttribute('aria-label', 'Trusted integration bot IDs for ' + conversationLabel(row));
+      const save = document.createElement('button'); save.type = 'button'; save.className = 'row-action'; save.textContent = 'Save';
+      save.setAttribute('aria-label', 'Save trusted integration bot IDs for ' + conversationLabel(row));
+      save.addEventListener('click', async () => {
+        const botIDs = [...new Set(input.value.split(',').map(value => value.trim()).filter(Boolean))];
+        if (botIDs.some(value => !/^B[A-Z0-9]+$/.test(value))) {
+          window.alert('Use comma-separated exact Slack bot IDs beginning with B.');
+          return;
+        }
+        input.disabled = true; save.disabled = true;
+        try {
+          const csrf = await fetchJSON('/admin/api/csrf');
+          await fetchJSON('/admin/api/channels', {
+            method: 'PUT',
+            headers: {'content-type': 'application/json', 'x-tos-tag-csrf': csrf.token},
+            body: JSON.stringify({...row, trusted_integration_bot_ids: botIDs})
+          });
+          window.dispatchEvent(new CustomEvent('organizationchange'));
+        } catch (error) {
+          window.alert('Trusted integration policy change failed: ' + error.message);
+          input.disabled = false; save.disabled = false;
+        }
+      });
+      control.append(input, save);
+      return control;
+    }
     function memoryContext(row) {
       const context = document.createElement('div'); context.className = 'memory-context';
       const head = document.createElement('div'); head.className = 'memory-context-head';
@@ -1200,6 +1234,7 @@
           for (const column of tableState.columns) {
             const cell = tr.insertCell();
             if (page === 'channels' && column.key === 'participation_mode') cell.append(participationModeControl(row));
+            else if (page === 'channels' && column.key === 'trusted_integrations') cell.append(trustedIntegrationControl(row));
             else if (page === 'channels' && column.key === 'name') cell.append(document.createTextNode(conversationLabel(row)));
             else if (page === 'memory' && column.key === 'memory_context') { cell.className = 'memory-context-cell'; cell.append(memoryContext(row)); }
             else if (page === 'memory' && column.key === 'text') { cell.className = 'memory-text-cell'; cell.append(cellValue(row.text, 'text')); }

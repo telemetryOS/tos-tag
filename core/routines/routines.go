@@ -13,7 +13,11 @@ import (
 	"time"
 )
 
-var ErrLoopSuppressed = errors.New("routine loop suppressed")
+var (
+	ErrLoopSuppressed = errors.New("routine loop suppressed")
+	ErrNotFound       = errors.New("routine not found")
+	ErrUpdateConflict = errors.New("routine update conflict")
+)
 
 type Routine struct {
 	ID             string          `json:"id" bson:"public_id"`
@@ -59,9 +63,12 @@ type Store struct {
 
 type Repository interface {
 	PutContext(context.Context, Routine) (Routine, error)
+	UpdateContext(context.Context, Routine, int64) (Routine, error)
+	GetContext(context.Context, string, string, string, string) (Routine, error)
 	DueContext(context.Context, time.Time, int) ([]Routine, error)
-	AdvanceContext(context.Context, string, string, time.Time) error
+	AdvanceContext(context.Context, string, string, string, string, time.Time) error
 	List(context.Context, string) ([]Routine, error)
+	ListChannel(context.Context, string, string, string) ([]Routine, error)
 }
 
 func NewStore() *Store { return &Store{routines: make(map[string]Routine)} }
@@ -74,7 +81,7 @@ func (s *Store) Put(r Routine) (Routine, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
-	key := r.OrganizationID + "/" + r.ID
+	key := routineKey(r.OrganizationID, r.WorkspaceID, r.ChannelID, r.ID)
 	if old, ok := s.routines[key]; ok {
 		r.Version = old.Version + 1
 		r.CreatedAt = old.CreatedAt
@@ -87,6 +94,37 @@ func (s *Store) Put(r Routine) (Routine, error) {
 	return r, nil
 }
 func (s *Store) PutContext(_ context.Context, r Routine) (Routine, error) { return s.Put(r) }
+func (s *Store) UpdateContext(_ context.Context, r Routine, expectedVersion int64) (Routine, error) {
+	var err error
+	r, err = normalize(r, time.Now().UTC())
+	if err != nil {
+		return Routine{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := routineKey(r.OrganizationID, r.WorkspaceID, r.ChannelID, r.ID)
+	old, ok := s.routines[key]
+	if !ok {
+		return Routine{}, ErrNotFound
+	}
+	if old.Version != expectedVersion {
+		return Routine{}, ErrUpdateConflict
+	}
+	r.Version = old.Version + 1
+	r.CreatedAt = old.CreatedAt
+	r.UpdatedAt = time.Now().UTC()
+	s.routines[key] = r
+	return r, nil
+}
+func (s *Store) GetContext(_ context.Context, organizationID, workspaceID, channelID, id string) (Routine, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	routine, ok := s.routines[routineKey(organizationID, workspaceID, channelID, id)]
+	if !ok {
+		return Routine{}, ErrNotFound
+	}
+	return routine, nil
+}
 func (s *Store) Due(now time.Time) []Routine {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -111,13 +149,13 @@ func (s *Store) DueContext(_ context.Context, now time.Time, limit int) ([]Routi
 	}
 	return values, nil
 }
-func (s *Store) Advance(organizationID, id string, from time.Time) error {
+func (s *Store) Advance(organizationID, workspaceID, channelID, id string, from time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := organizationID + "/" + id
+	key := routineKey(organizationID, workspaceID, channelID, id)
 	r, ok := s.routines[key]
 	if !ok {
-		return fmt.Errorf("routine not found")
+		return ErrNotFound
 	}
 	spec, err := schedule.Parse(r.Cron, r.Timezone, r.Interval)
 	if err != nil {
@@ -128,8 +166,8 @@ func (s *Store) Advance(organizationID, id string, from time.Time) error {
 	s.routines[key] = r
 	return nil
 }
-func (s *Store) AdvanceContext(_ context.Context, organizationID, id string, from time.Time) error {
-	return s.Advance(organizationID, id, from)
+func (s *Store) AdvanceContext(_ context.Context, organizationID, workspaceID, channelID, id string, from time.Time) error {
+	return s.Advance(organizationID, workspaceID, channelID, id, from)
 }
 func (s *Store) List(_ context.Context, organizationID string) ([]Routine, error) {
 	s.mu.Lock()
@@ -142,6 +180,26 @@ func (s *Store) List(_ context.Context, organizationID string) ([]Routine, error
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].NextRun.Before(result[j].NextRun) })
 	return result, nil
+}
+
+func (s *Store) ListChannel(_ context.Context, organizationID, workspaceID, channelID string) ([]Routine, error) {
+	if organizationID == "" || workspaceID == "" || channelID == "" {
+		return nil, errors.New("routine channel scope is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]Routine, 0)
+	for _, routine := range s.routines {
+		if routine.OrganizationID == organizationID && routine.WorkspaceID == workspaceID && routine.ChannelID == channelID {
+			result = append(result, routine)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].NextRun.Before(result[j].NextRun) })
+	return result, nil
+}
+
+func routineKey(organizationID, workspaceID, channelID, id string) string {
+	return organizationID + "/" + workspaceID + "/" + channelID + "/" + id
 }
 
 type Scheduler struct {
@@ -165,7 +223,7 @@ func (s *Scheduler) RunDue(ctx context.Context) error {
 	}
 	for _, routine := range due {
 		if err := s.authorizer.AuthorizeRoutine(ctx, routine); err != nil {
-			if advanceErr := s.store.AdvanceContext(ctx, routine.OrganizationID, routine.ID, now); advanceErr != nil {
+			if advanceErr := s.store.AdvanceContext(ctx, routine.OrganizationID, routine.WorkspaceID, routine.ChannelID, routine.ID, now); advanceErr != nil {
 				return advanceErr
 			}
 			continue
@@ -175,11 +233,11 @@ func (s *Scheduler) RunDue(ctx context.Context) error {
 		if specErr != nil {
 			return specErr
 		}
-		_, _, err := s.jobs.Enqueue(ctx, jobs.Spec{OrganizationID: routine.OrganizationID, WorkspaceID: routine.WorkspaceID, ChannelID: routine.ChannelID, RootThreadTS: routine.RootThreadTS, SessionID: routine.SessionID, Generation: routine.Generation, IdempotencyKey: "routine/" + routine.ID + "/" + window, Kind: "routine", Input: routine.Input, MaxAttempts: 3, ExpiresAt: now.Add(spec.Window(routine.NextRun))})
+		_, _, err := s.jobs.Enqueue(ctx, jobs.Spec{OrganizationID: routine.OrganizationID, WorkspaceID: routine.WorkspaceID, ChannelID: routine.ChannelID, RootThreadTS: routine.RootThreadTS, SessionID: routine.SessionID, Generation: routine.Generation, IdempotencyKey: "routine/" + routine.ChannelID + "/" + routine.ID + "/" + window, Kind: "routine", Input: routine.Input, MaxAttempts: 3, ExpiresAt: now.Add(spec.Window(routine.NextRun))})
 		if err != nil {
 			return err
 		}
-		if err := s.store.AdvanceContext(ctx, routine.OrganizationID, routine.ID, now); err != nil {
+		if err := s.store.AdvanceContext(ctx, routine.OrganizationID, routine.WorkspaceID, routine.ChannelID, routine.ID, now); err != nil {
 			return err
 		}
 	}
@@ -222,6 +280,6 @@ func (s *Scheduler) Trigger(ctx context.Context, routine Routine, trigger Trigge
 	if err := s.authorizer.AuthorizeRoutine(ctx, routine); err != nil {
 		return jobs.Job{}, err
 	}
-	job, _, err := s.jobs.Enqueue(ctx, jobs.Spec{OrganizationID: routine.OrganizationID, WorkspaceID: routine.WorkspaceID, ChannelID: routine.ChannelID, RootThreadTS: routine.RootThreadTS, SessionID: routine.SessionID, Generation: routine.Generation, IdempotencyKey: "routine/" + routine.ID + "/event/" + trigger.SourceEventID, Kind: "routine", Input: routine.Input, MaxAttempts: 3})
+	job, _, err := s.jobs.Enqueue(ctx, jobs.Spec{OrganizationID: routine.OrganizationID, WorkspaceID: routine.WorkspaceID, ChannelID: routine.ChannelID, RootThreadTS: routine.RootThreadTS, SessionID: routine.SessionID, Generation: routine.Generation, IdempotencyKey: "routine/" + routine.ChannelID + "/" + routine.ID + "/event/" + trigger.SourceEventID, Kind: "routine", Input: routine.Input, MaxAttempts: 3})
 	return job, err
 }

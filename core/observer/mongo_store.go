@@ -17,13 +17,13 @@ import (
 )
 
 type MongoStore struct {
-	db               *database.Database
-	messageRetention time.Duration
-	now              func() time.Time
+	db                   *database.Database
+	observationRetention time.Duration
+	now                  func() time.Time
 }
 
-func NewMongoStore(db *database.Database, messageRetention time.Duration) *MongoStore {
-	return &MongoStore{db: db, messageRetention: messageRetention, now: time.Now}
+func NewMongoStore(db *database.Database, observationRetention time.Duration) *MongoStore {
+	return &MongoStore{db: db, observationRetention: observationRetention, now: time.Now}
 }
 
 func (s *MongoStore) Accept(ctx context.Context, envelope types.SlackEnvelope) (Acceptance, error) {
@@ -89,7 +89,7 @@ func (s *MongoStore) accept(ctx context.Context, envelope types.SlackEnvelope, s
 		IsMention:               envelope.IsMention,
 		OriginTag:               envelope.OriginTag,
 		CreatedAt:               now,
-		ExpiresAt:               at.Add(s.messageRetention),
+		ExpiresAt:               at.Add(s.observationRetention),
 		Version:                 1,
 	}
 	if _, err := s.db.Collection(models.CollectionObservations).InsertOne(ctx, observation); err != nil {
@@ -197,7 +197,6 @@ func (s *MongoStore) applyProjection(ctx context.Context, envelope types.SlackEn
 		"bot_id":             bson.M{"$ifNull": bson.A{"$bot_id", envelope.BotID}},
 		"subtype":            choose(envelope.Subtype, "$subtype"),
 		"original_at":        bson.M{"$ifNull": bson.A{"$original_at", observation.SlackEventTime}},
-		"expires_at":         bson.M{"$ifNull": bson.A{"$expires_at", observation.SlackEventTime.Add(s.messageRetention)}},
 		"source_event_id":    choose(envelope.EventID, "$source_event_id"),
 		"source_event_at":    choose(eventAt, "$source_event_at"),
 		"source_event_rank":  choose(eventRank, "$source_event_rank"),
@@ -206,7 +205,7 @@ func (s *MongoStore) applyProjection(ctx context.Context, envelope types.SlackEn
 		"deleted":            choose(deleted, "$deleted"),
 		"text":               choose(text, "$text"),
 		"projection_version": bson.M{"$cond": bson.A{newer, bson.M{"$add": bson.A{bson.M{"$ifNull": bson.A{"$projection_version", 0}}, 1}}, "$projection_version"}},
-	}}}}
+	}}}, {{Key: "$unset", Value: "expires_at"}}}
 	if _, err := s.db.Collection(models.CollectionMessages).UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true)); err != nil {
 		return fmt.Errorf("apply message projection: %w", err)
 	}
@@ -241,7 +240,6 @@ func (s *MongoStore) Recent(ctx context.Context, organizationID string, channelI
 		"channel_id":      bson.M{"$in": channelIDs},
 		"deleted":         false,
 		"original_at":     bson.M{"$gte": since},
-		"expires_at":      bson.M{"$gt": s.now().UTC()},
 	}
 	cursor, err := s.db.Collection(models.CollectionMessages).Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "original_at", Value: -1}, {Key: "message_ts", Value: -1}}).SetLimit(int64(limit)))
 	if err != nil {
@@ -264,7 +262,6 @@ func (s *MongoStore) CurrentMessage(ctx context.Context, organizationID, teamID,
 		"team_id":         teamID,
 		"channel_id":      channelID,
 		"message_ts":      messageTS,
-		"expires_at":      bson.M{"$gt": s.now().UTC()},
 	}
 	var message models.ChannelMessage
 	if err := s.db.Collection(models.CollectionMessages).FindOne(ctx, filter).Decode(&message); err != nil {
@@ -280,7 +277,6 @@ func (s *MongoStore) Channels(ctx context.Context, organizationID string) ([]str
 	var values []string
 	err := s.db.Collection(models.CollectionMessages).Distinct(ctx, "channel_id", bson.M{
 		"organization_id": organizationID,
-		"expires_at":      bson.M{"$gt": s.now().UTC()},
 	}).Decode(&values)
 	if err != nil {
 		return nil, fmt.Errorf("list observed channels: %w", err)

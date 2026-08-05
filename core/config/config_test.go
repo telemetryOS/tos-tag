@@ -32,6 +32,9 @@ func TestDefaultConfigurationValid(t *testing.T) {
 	if cfg.Memory.Enabled || cfg.Memory.Model != "gpt-5.6-luna" || cfg.Memory.ReasoningEffort != "medium" {
 		t.Fatalf("unexpected default memory configuration: %#v", cfg.Memory)
 	}
+	if cfg.Retention.Messages != 0 || cfg.ContextPacks.Lookback != 30*24*time.Hour {
+		t.Fatalf("unexpected message/context retention contract: retention=%#v context=%#v", cfg.Retention, cfg.ContextPacks)
+	}
 }
 
 func TestAuditCommitmentKeyIsDurableAndProductionSpecific(t *testing.T) {
@@ -123,16 +126,12 @@ func TestValidateMemoryRequiresLuna(t *testing.T) {
 
 func TestLoadJobWorkerConcurrencyEnvironment(t *testing.T) {
 	t.Setenv("TAG__JOBS__WORKER_CONCURRENCY", "7")
-	t.Setenv("TAG__JOBS__PROGRESS_DELAY", "12s")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Jobs.WorkerConcurrency != 7 {
 		t.Fatalf("job worker concurrency = %d", cfg.Jobs.WorkerConcurrency)
-	}
-	if cfg.Jobs.ProgressDelay != 12*time.Second {
-		t.Fatalf("job progress delay = %s", cfg.Jobs.ProgressDelay)
 	}
 }
 
@@ -141,16 +140,6 @@ func TestValidateRejectsUnboundedJobWorkerConcurrency(t *testing.T) {
 	cfg.Jobs.WorkerConcurrency = 65
 	if err := Validate(&cfg); err == nil {
 		t.Fatal("expected excessive job worker concurrency to fail")
-	}
-}
-
-func TestValidateRejectsInvalidJobProgressDelay(t *testing.T) {
-	for _, delay := range []time.Duration{0, -time.Second, time.Minute + time.Second} {
-		cfg := DefaultConfiguration
-		cfg.Jobs.ProgressDelay = delay
-		if err := Validate(&cfg); err == nil {
-			t.Fatalf("expected progress delay %s to fail", delay)
-		}
 	}
 }
 
@@ -203,15 +192,32 @@ func TestRedactedStatusDoesNotExposeSecrets(t *testing.T) {
 
 func TestValidateRetentionAndContextBounds(t *testing.T) {
 	cfg := DefaultConfiguration
-	cfg.Retention.Prompt = cfg.Retention.Messages + time.Second
+	cfg.Retention.Messages = 30 * 24 * time.Hour
 	if err := Validate(&cfg); err == nil {
-		t.Fatal("expected derived retention beyond messages to fail")
+		t.Fatal("expected retired message TTL to fail")
+	}
+
+	cfg = DefaultConfiguration
+	cfg.ContextPacks.Lookback = 0
+	if err := Validate(&cfg); err == nil {
+		t.Fatal("expected empty context lookback to fail")
 	}
 
 	cfg = DefaultConfiguration
 	cfg.ContextPacks.Headroom--
 	if err := Validate(&cfg); err == nil {
 		t.Fatal("expected mismatched context partitions to fail")
+	}
+}
+
+func TestLoadContextLookbackEnvironment(t *testing.T) {
+	t.Setenv("TAG__CONTEXT_PACKS__LOOKBACK", "336h")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ContextPacks.Lookback != 14*24*time.Hour {
+		t.Fatalf("context lookback = %s", cfg.ContextPacks.Lookback)
 	}
 }
 

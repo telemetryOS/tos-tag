@@ -372,7 +372,7 @@ func TestCodexDynamicToolsRequireValidatedSkillNames(t *testing.T) {
 }
 
 func TestPrepareToolInvocationValidatesSkillsAndStripsProgressMetadata(t *testing.T) {
-	session := &codexWorkerSession{allowedSkills: map[string]struct{}{"product-knowledge": {}, "wiki": {}}}
+	session := &codexWorkerSession{allowedSkills: map[string]struct{}{"product-knowledge": {}, "wiki": {}, "bug": {}, "feature": {}, "linear-issue-manager": {}}}
 	invocation, forwarded, err := session.prepareToolInvocation("call-1", wikiDynamicTool, json.RawMessage(`{"skill_names":["product-knowledge","wiki","wiki"],"operation":"get","page_reference":"primer/node-mini"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -388,6 +388,13 @@ func TestPrepareToolInvocationValidatesSkillsAndStripsProgressMetadata(t *testin
 	}
 	if _, _, err := session.prepareToolInvocation("call-3", "tos_tag_tool", json.RawMessage(`{"skill_names":["wiki"],"tool_id":"telemetryos.wiki","operation_id":"read","arguments":["get","primer/node-mini"]}`)); err == nil || !strings.Contains(err.Error(), "wiki.typed_interface_required") {
 		t.Fatalf("generic Wiki invocation error = %v", err)
+	}
+	intake, intakeForwarded, err := session.prepareToolInvocation("call-4", "tos_tag_tool", json.RawMessage(`{"skill_names":["feature","linear-issue-manager"],"tool_id":"telemetryos.linear","operation_id":"intake","arguments":["create","--title","Feature","--description","Body","--label","Feature"]}`))
+	if err != nil || intake.ToolID != "telemetryos.linear" || intake.OperationID != "intake" || !reflect.DeepEqual(intake.SkillNames, []string{"feature", "linear-issue-manager"}) || bytes.Contains(intakeForwarded, []byte("skill_names")) {
+		t.Fatalf("Linear intake invocation=%#v forwarded=%s err=%v", intake, intakeForwarded, err)
+	}
+	if _, _, err := session.prepareToolInvocation("call-5", "tos_tag_tool", json.RawMessage(`{"skill_names":["linear-issue-manager"],"tool_id":"telemetryos.linear","operation_id":"intake","arguments":["create","--title","Feature","--description","Body","--label","Feature"]}`)); err == nil || !strings.Contains(err.Error(), "bug or feature workflow") {
+		t.Fatalf("unscoped Linear intake error = %v", err)
 	}
 }
 

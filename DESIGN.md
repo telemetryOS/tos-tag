@@ -14,7 +14,7 @@ to that architecture.
 | `core/modelrouter`, `core/harness`, `core/workers` | dynamic routing, Codex App Server, and disposable execution |
 | `core/policy`, `core/tools`, `core/approvals` | authorization, reviewed tools, and exact-action approval |
 | `core/audit`, `core/retention`, `core/usage` | receipts, integrity, metering, and deletion fan-out |
-| `core/channelconfig`, `core/routines`, `core/triggers` | channel directives and scheduled/classifier-gated work |
+| `core/channelconfig`, `core/automations`, `core/routines`, `core/triggers` | channel directives plus channel-locked Slack/admin editing and scheduled/classifier-gated work |
 | `tool-marketplace` | reviewed typed helper catalog, risk and approval-policy declarations, scripts, and behavioral tool guidance |
 | `container`, `Dockerfile.dev`, `docker-compose.yml` | persistent operator/code/Codex environment with disposable Slack workers |
 | `evals`, `integration` | deterministic behavioral/security contracts and explicit opt-in live compatibility tests |
@@ -36,6 +36,11 @@ memory/situation facts. Live operational records remain durable for
 acknowledgement, idempotency, recovery, and audit, but are not eligible as
 future-session conversational context for that destination.
 
+Normalized Slack messages have no expiration field or TTL index. Startup drops
+the retired `message_expiry` index from existing databases, while context-pack
+assembly applies its own configurable lookback (30 days by default). Raw
+observations and immutable prompt/context revisions retain separate short TTLs.
+
 `core/memory` asynchronously consolidates changed human channel/thread scopes
 with Luna medium effort, stores source hashes, summaries, confidence, and
 source-bound facts in MongoDB, and recalls them through destination-safe
@@ -54,8 +59,9 @@ sources. `telemetryos-documentation` treats the public documentation
 `llms.txt` as a discovery index and reads the exact indexed page before
 answering procedural or technical-reference questions. `marketing-messaging` requires the full corporate website source for
 every TelemetryOS promotional-copy request and delegates concrete product-fact
-validation back to `product-knowledge`. `code-change-intake` routes
-source-mutation intent to a Linear bug or feature instead of granting a worker
+validation back to `product-knowledge`. Source-mutation requests are silently
+suppressed before worker admission. `code-change-intake` is used only for a
+separate explicit request to create a Linear bug or feature and never grants
 source-write authority.
 Executable access is limited to `tos_tag_tool` operations in the reviewed tool
 catalog plus the typed `tos_tag_wiki` page-CRUD facade; Aion source is not mounted and can be inspected only through bounded
@@ -80,11 +86,14 @@ product requests, delivery additionally requires successful same-attempt full
 content retrieval from the Primer Wiki, public docs page, or corporate source.
 
 Approval defaults to risk-based at the operation manifest. A reviewed bundle
-may declare `approval: never`; the current exception is Agent Wiki page
-read/write authoring. The recoverable Wiki page soft-delete always requires
-exact-action approval. Namespace, asset, publish-file, cascading move, generic
-undo, and admin Wiki operations are unavailable, and admin-risk worker-tool
-manifests are rejected globally. Every
+may declare `approval: never`. The bounded `telemetryos.linear/intake`
+operation uses that exception only for an explicitly requested bug/feature
+workflow and restricts argv to issue creation, evidence comments, feature
+normalization, and its suitability follow-up. Agent Wiki page read/write
+authoring is the other exception. The recoverable Wiki page soft-delete always
+requires exact-action approval. Namespace, asset, publish-file, cascading move,
+generic undo, and admin Wiki operations are unavailable, and admin-risk
+worker-tool manifests are rejected globally. Every
 execution remains job-scoped, hash-pinned, bounded, kill-switchable, and
 audited regardless of approval policy.
 
@@ -108,18 +117,24 @@ control plane owns this metadata; model output and classifier-only replies do
 not carry it.
 
 Admitted full-agent thread jobs use the classifier-selected reaction as their
-immediate acknowledgement. Jobs still active after the configured progress grace
-period use Slack Thinking Steps in collapsed timeline mode; quick jobs deliver
-their final answer without flashing a generic `Thinking...` placeholder. The
-control plane starts and owns the stream, emits only allowlisted operational
-milestones, gives every native/reviewed tool call one stable in-progress then
-complete/error update on one rotating current-action task card, and shows each
-dynamically declared validated skill through that same transient card. Examples include reading the Wiki, querying telemetry, or
-publishing a reviewed artifact. It finalizes the same message with the typed result.
-Model deltas, tool arguments, raw outputs, private context, and chain-of-thought
-never enter the timeline. Reaction-only classifier decisions remain reactions.
-Slack requires a stream to reply to a user message, so the control plane does
-not override a brief-answer-in-channel placement merely to show progress.
+immediate acknowledgement and immediately set Slack's native assistant thread
+status. Slack rotates generic lifecycle messages while the worker starts; every
+native or reviewed tool call then receives an allowlisted, tool-specific status
+such as consulting the Wiki, checking Linear, or querying telemetry. The control
+plane refreshes the current value during long-running work and finishes with a
+generic response-preparation status. It does not open a plan-mode stream or
+create in-thread task-card pills. Model deltas, tool arguments, raw outputs,
+private context, and chain-of-thought never enter the status. Reaction-only
+classifier decisions remain reactions. Because status requires `thread_ts`, the
+control plane does not override brief-answer-in-channel placement merely to show
+progress.
+
+New one-to-one DM full-agent sessions receive one best-effort
+`assistant.threads.setTitle` update after durable job enqueue. Title derivation
+is deterministic and control-plane-owned: Slack markup, URLs, code, controls,
+and likely secrets are removed, suspicious input falls back to `Tag request`,
+and the live transport rejects channel and group-DM targets. Title failures do
+not affect job execution or delivery.
 
 The management home page is the operator's live-operations surface rather than
 a database browser. An organization-scoped Server-Sent Events stream presents a

@@ -203,7 +203,8 @@ func TestChannelPolicyMutationIsAuditedAndPersisted(t *testing.T) {
 		OrganizationID: "org-a", TeamID: "team", ChannelID: "channel", Name: "tos-tag",
 		Enrolled: true, ParticipationMode: types.ModeProactive, MaxResponsesPerHour: 120,
 		MaxConcurrentJobs: 8, ContextHistoryMode: types.ContextHistorySessionOnly,
-		MembershipRevision: "operator/v1", MembershipRefreshedAt: now,
+		TrustedIntegrationBotIDs: []string{"BDEPLOYMENTS"},
+		MembershipRevision:       "operator/v1", MembershipRefreshedAt: now,
 	}
 	body, err := json.Marshal(policy)
 	if err != nil {
@@ -221,7 +222,7 @@ func TestChannelPolicyMutationIsAuditedAndPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.ParticipationMode != types.ModeProactive || saved.ContextHistoryMode != types.ContextHistorySessionOnly {
+	if saved.ParticipationMode != types.ModeProactive || saved.ContextHistoryMode != types.ContextHistorySessionOnly || len(saved.TrustedIntegrationBotIDs) != 1 || saved.TrustedIntegrationBotIDs[0] != "BDEPLOYMENTS" {
 		t.Fatalf("saved policy=%#v", saved)
 	}
 }
@@ -473,7 +474,7 @@ func TestDedicatedManagementPages(t *testing.T) {
 			t.Fatal("learned notes page does not normalize a null collection into its empty state")
 		}
 		if page == "channels" {
-			for _, marker := range []string{`function conversationLabel`, `No usable Slack channels are known yet`, `Change participation mode for`} {
+			for _, marker := range []string{`function conversationLabel`, `No usable Slack channels are known yet`, `Change participation mode for`, `function trustedIntegrationControl`, `trusted_integration_bot_ids`} {
 				if !strings.Contains(response.Body.String(), marker) {
 					t.Fatalf("channel page missing fallback-label marker %s", marker)
 				}

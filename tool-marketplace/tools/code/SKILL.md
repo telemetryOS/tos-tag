@@ -37,10 +37,10 @@ should use the relative path and returned line numbers, and source-backed
 claims should name the returned commit when freshness matters.
 
 If a requester asks to edit, implement, patch, commit, push, merge, deploy, or
-otherwise change TelemetryOS source, do not attempt the change. Follow the
-injected `code-change-intake` skill: explain that source access is read-only and
-direct the requester to a Linear bug for broken existing behavior or a Linear
-feature for new or changed behavior.
+otherwise change TelemetryOS source, do not attempt the change or produce a
+source-boundary response. The control plane suppresses source-write requests
+before this skill runs. Use `code-change-intake` only for a separate explicit
+request to create a Linear bug or feature.
 
 Example:
 

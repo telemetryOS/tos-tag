@@ -279,6 +279,143 @@ func TestDirectSocialFallbackSurvivesClassifierFailure(t *testing.T) {
 	}
 }
 
+func TestEnabledDirectMessageNeverSilencesHumanTurn(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		decision types.ClassificationDecision
+		err      error
+		channel  types.SlackEnvelope
+	}{
+		"provider silent": {
+			decision: types.ClassificationDecision{Outcome: types.OutcomeSilent, Confidence: .99, ReasonCodes: []string{"ambient"}, DisclosureClass: types.DisclosureDestinationSafe},
+			channel:  types.SlackEnvelope{ChannelKind: types.SlackChannelKindDirectMessage},
+		},
+		"provider reaction only": {
+			decision: types.ClassificationDecision{Outcome: types.OutcomeReact, Confidence: .99, ReasonCodes: []string{"reaction"}, DisclosureClass: types.DisclosureDestinationSafe, Reaction: "eyes"},
+			channel:  types.SlackEnvelope{ChannelID: "D123"},
+		},
+		"provider failure": {
+			err:     errors.New("provider unavailable"),
+			channel: types.SlackEnvelope{ChannelKind: types.SlackChannelKindDirectMessage},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+				return testCase.decision, testCase.err
+			}), false, .9, .98)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := target("testing")
+			got.Envelope.ChannelKind = testCase.channel.ChannelKind
+			got.Envelope.ChannelID = testCase.channel.ChannelID
+			result := service.Decide(context.Background(), got, types.ContextPackRevision{})
+			if result.Effective.Outcome != types.OutcomeReplyInChannel || result.Effective.DirectReply != directMessageClarificationReply || result.Effective.RequiresFullAgent || result.Shadowed {
+				t.Fatalf("direct message was not visibly acknowledged: %#v", result)
+			}
+			result = EnforceParticipation(result, got, types.ContextPackRevision{})
+			if result.Effective.Outcome != types.OutcomeReplyInChannel || result.Effective.DirectReply != directMessageClarificationReply || result.Shadowed {
+				t.Fatalf("pipeline participation backstop suppressed direct message: %#v", result)
+			}
+		})
+	}
+}
+
+func TestEnabledDirectMessageKeepsClassifierEscalationChoice(t *testing.T) {
+	providerDecision := types.ClassificationDecision{
+		Outcome: types.OutcomeReplyInThread, Confidence: .99, ReasonCodes: []string{"provider.deep_analysis"},
+		ResponseIntent: "investigate", DisclosureClass: types.DisclosureDestinationSafe,
+		RequiresFullAgent: true, Reaction: "thinking_face",
+	}
+	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		return providerDecision, nil
+	}), false, .9, .98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := target("Investigate the deployment failure and explain the root cause")
+	got.Envelope.ChannelKind = types.SlackChannelKindDirectMessage
+	result := service.Decide(context.Background(), got, types.ContextPackRevision{})
+	if result.Effective.Outcome != types.OutcomeReplyInThread || !result.Effective.RequiresFullAgent || result.Effective.DirectReply != "" || result.Shadowed {
+		t.Fatalf("direct-message escalation was changed: %#v", result)
+	}
+}
+
+func TestEnabledDirectMessageVisiblyDeclinesSourceWrite(t *testing.T) {
+	providerDecision := types.ClassificationDecision{
+		Outcome: types.OutcomeSilent, Confidence: .99, ReasonCodes: []string{"policy.source_write_silent"},
+		SourceWriteRequested: true, DisclosureClass: types.DisclosureDestinationSafe, AgentModelStrength: "none",
+	}
+	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		return providerDecision, nil
+	}), false, .9, .98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, threaded := range map[string]bool{"top-level": false, "threaded": true} {
+		t.Run(name, func(t *testing.T) {
+			got := target("Implement this source change")
+			got.Envelope.ChannelKind = types.SlackChannelKindDirectMessage
+			got.ActiveThread = threaded
+			result := service.Decide(context.Background(), got, types.ContextPackRevision{})
+			wantOutcome := types.OutcomeReplyInChannel
+			if threaded {
+				wantOutcome = types.OutcomeReplyInThread
+			}
+			if result.Effective.Outcome != wantOutcome || result.Effective.DirectReply != directMessageSourceWriteReply || result.Effective.RequiresFullAgent || result.Shadowed {
+				t.Fatalf("source-write DM was not visibly declined: %#v", result)
+			}
+		})
+	}
+}
+
+func TestEnabledDirectMessageFallsBackToAgentForClearQuestion(t *testing.T) {
+	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		return types.ClassificationDecision{Outcome: types.OutcomeSilent, Confidence: .99, ReasonCodes: []string{"ambient"}, DisclosureClass: types.DisclosureDestinationSafe}, nil
+	}), false, .9, .98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := target("What is 2 + 2?")
+	got.Envelope.ChannelKind = types.SlackChannelKindDirectMessage
+	result := service.Decide(context.Background(), got, types.ContextPackRevision{})
+	if result.Effective.Outcome != types.OutcomeReplyInChannel || !result.Effective.RequiresFullAgent || result.Effective.DirectReply != "" || !slices.Contains(result.Effective.ReasonCodes, "hard.direct_message_brief_reply") {
+		t.Fatalf("clear direct-message question did not reach the agent fallback: %#v", result)
+	}
+}
+
+func TestObserveModeStillSuppressesUnenabledDirectMessage(t *testing.T) {
+	calls := 0
+	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		calls++
+		return types.ClassificationDecision{}, nil
+	}), false, .9, .98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := target("testing")
+	got.Mode = types.ModeObserve
+	got.Envelope.ChannelKind = types.SlackChannelKindDirectMessage
+	result := service.Decide(context.Background(), got, types.ContextPackRevision{})
+	if calls != 0 || result.Effective.Outcome != types.OutcomeSilent || !slices.Contains(result.Effective.ReasonCodes, "admission.channel_mode") {
+		t.Fatalf("observe-only direct message was activated: %#v calls=%d", result, calls)
+	}
+}
+
+func TestDirectMessageSocialFallbackHandlesCasualTail(t *testing.T) {
+	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		return types.ClassificationDecision{Outcome: types.OutcomeSilent, Confidence: .99, ReasonCodes: []string{"ambient"}, DisclosureClass: types.DisclosureDestinationSafe}, nil
+	}), false, .9, .98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := target("how are you dude?")
+	got.Envelope.ChannelKind = types.SlackChannelKindDirectMessage
+	result := service.Decide(context.Background(), got, types.ContextPackRevision{})
+	if result.Effective.Outcome != types.OutcomeReplyInChannel || result.Effective.DirectReply != "Hey!" || result.Effective.RequiresFullAgent {
+		t.Fatalf("casual direct message did not receive a classifier reply: %#v", result)
+	}
+}
+
 func TestExplicitChannelRequestOverridesClassifierThreadPlacement(t *testing.T) {
 	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
 		return types.ClassificationDecision{Outcome: types.OutcomeReplyInThread, Confidence: 0.99, ReasonCodes: []string{"classifier.thread"}, DisclosureClass: types.DisclosureDestinationSafe, RequiresFullAgent: true, Reaction: "eyes"}, nil
@@ -538,6 +675,31 @@ func TestSelfIntegrationAndKillSwitchSuppressBeforeClassifier(t *testing.T) {
 	}
 }
 
+func TestAuthorizedIntegrationTriggerBypassesBotSuppression(t *testing.T) {
+	calls := 0
+	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		calls++
+		return types.ClassificationDecision{
+			Outcome: types.OutcomeReplyInChannel, Confidence: .99, ReasonCodes: []string{"deployment.failure"},
+			ResponseIntent: "investigate the deployment failure", DisclosureClass: types.DisclosureDestinationSafe,
+			RequiresFullAgent: true, Reaction: "rotating_light", AgentModelProfile: "standard", AgentModelStrength: "standard", AgentReasoningEffort: "medium",
+		}, nil
+	}), false, .9, .98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := target("Deploy QA FAILED")
+	got.Envelope.BotID = "BDEPLOYMENTS"
+	got.AuthorizedTrigger = true
+	result := service.Decide(context.Background(), got, types.ContextPackRevision{})
+	if calls != 1 || result.Effective.Outcome != types.OutcomeReplyInChannel || !result.Effective.RequiresFullAgent || result.Shadowed {
+		t.Fatalf("authorized integration trigger was suppressed: calls=%d result=%#v", calls, result)
+	}
+	if !service.RequiresProviderCall(got) {
+		t.Fatal("authorized integration trigger did not reach the provider gate")
+	}
+}
+
 func TestCrossChannelIncidentIsShadowedButInspectable(t *testing.T) {
 	pack := types.ContextPackRevision{Sources: []types.ContextSource{{ID: "alert-1", Partition: types.PartitionEvidence, Text: "active outage", DisclosureClass: types.DisclosureDestinationSafe}}}
 	result := newService(t, true).Decide(context.Background(), target("is the system down?"), pack)
@@ -672,19 +834,28 @@ func TestAssistModeBlocksUnsolicitedDeclarativeAgentWork(t *testing.T) {
 	}
 }
 
-func TestAssistModeBlocksUnsolicitedSourceWriteRedirect(t *testing.T) {
-	redirect := types.ClassificationDecision{
-		Outcome: types.OutcomeReplyInChannel, Confidence: .99,
-		ReasonCodes: []string{"policy.source_write_to_linear"}, ResponseIntent: "redirect source writes to Linear",
-		DirectReply: sourceWriteRedirectReply, SourceWriteRequested: true,
-		DisclosureClass: types.DisclosureDestinationSafe, Reaction: "speech_balloon", AgentModelStrength: "none",
+func TestSourceWriteRequestsRemainSilentAcrossHardParticipationTriggers(t *testing.T) {
+	writeSilent := types.ClassificationDecision{
+		Outcome: types.OutcomeSilent, Confidence: .99,
+		ReasonCodes: []string{"policy.source_write_silent"}, ResponseIntent: "silently suppress the source-write request",
+		SourceWriteRequested: true, DisclosureClass: types.DisclosureDestinationSafe, AgentModelStrength: "none",
 	}
-	target := Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{
-		Text: "Done Today: [TOSF PWA] Report cache usage ENG-3175 — the browser player now reports its cache stats, so the Cache Information card shows hit rate, cache size, and image/video counts instead of blanks; background images are cached and counted as images. Also make sure the remote cache-clear command actually removed the stored media.",
-	}}
-	result := EnforceParticipation(Result{Predicted: redirect, Effective: redirect}, target, types.ContextPackRevision{})
-	if result.Predicted.Outcome != types.OutcomeReplyInChannel || result.Effective.Outcome != types.OutcomeSilent || !result.Shadowed || !slices.Contains(result.Effective.ReasonCodes, "policy.unsolicited_assist_work") {
-		t.Fatalf("unsolicited source-write redirect was admitted: %#v", result)
+	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		return writeSilent, nil
+	}), false, .9, .98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]Target{
+		"direct mention": {Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Text: "<@tos-tag> implement the fix in Gateway-Service.", IsMention: true}},
+		"active thread":  {Mode: types.ModeAssist, ActiveThread: true, Envelope: types.SlackEnvelope{Text: "Implement the fix in Gateway-Service."}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := service.Decide(context.Background(), target, types.ContextPackRevision{})
+			if result.Predicted.Outcome != types.OutcomeSilent || result.Effective.Outcome != types.OutcomeSilent || result.Predicted.DirectReply != "" || result.Predicted.Reaction != "" || result.Predicted.RequiresFullAgent {
+				t.Fatalf("source-write request escaped silent policy: %#v", result)
+			}
+		})
 	}
 }
 

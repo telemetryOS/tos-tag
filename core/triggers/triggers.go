@@ -19,7 +19,10 @@ type Kind string
 
 const KindHeartbeat Kind = "heartbeat"
 
-var ErrScopeConflict = errors.New("trigger subscription scope conflict")
+var (
+	ErrScopeConflict  = errors.New("trigger subscription scope conflict")
+	ErrUpdateConflict = errors.New("trigger subscription update conflict")
+)
 
 type Subscription struct {
 	ID             string          `json:"id" bson:"public_id"`
@@ -72,10 +75,12 @@ func (f AuthorizerFunc) AuthorizeTrigger(ctx context.Context, subscription Subsc
 
 type Repository interface {
 	PutContext(context.Context, Subscription) (Subscription, error)
-	GetContext(context.Context, string, string) (Subscription, error)
+	UpdateContext(context.Context, Subscription, int64) (Subscription, error)
+	GetContext(context.Context, string, string, string, string) (Subscription, error)
 	List(context.Context, string) ([]Subscription, error)
+	ListChannel(context.Context, string, string, string) ([]Subscription, error)
 	DueContext(context.Context, time.Time, int) ([]Subscription, error)
-	AdvanceContext(context.Context, string, string, time.Time) error
+	AdvanceContext(context.Context, string, string, string, string, time.Time) error
 }
 
 type Store struct {
@@ -100,11 +105,8 @@ func (s *Store) PutContext(_ context.Context, subscription Subscription) (Subscr
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now().UTC()
-	key := subscription.OrganizationID + "/" + subscription.ID
+	key := subscriptionKey(subscription.OrganizationID, subscription.WorkspaceID, subscription.ChannelID, subscription.ID)
 	if previous, ok := s.subscriptions[key]; ok {
-		if previous.WorkspaceID != subscription.WorkspaceID || previous.ChannelID != subscription.ChannelID {
-			return Subscription{}, ErrScopeConflict
-		}
 		subscription.Version = previous.Version + 1
 		subscription.CreatedAt = previous.CreatedAt
 	} else {
@@ -116,14 +118,53 @@ func (s *Store) PutContext(_ context.Context, subscription Subscription) (Subscr
 	return subscription, nil
 }
 
-func (s *Store) GetContext(_ context.Context, organizationID, id string) (Subscription, error) {
+func (s *Store) UpdateContext(_ context.Context, subscription Subscription, expectedVersion int64) (Subscription, error) {
+	var err error
+	subscription, err = Normalize(subscription, s.now().UTC())
+	if err != nil {
+		return Subscription{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	value, ok := s.subscriptions[organizationID+"/"+id]
+	key := subscriptionKey(subscription.OrganizationID, subscription.WorkspaceID, subscription.ChannelID, subscription.ID)
+	previous, ok := s.subscriptions[key]
+	if !ok {
+		return Subscription{}, errors.New("trigger subscription not found")
+	}
+	if previous.Version != expectedVersion {
+		return Subscription{}, ErrUpdateConflict
+	}
+	subscription.Version = previous.Version + 1
+	subscription.CreatedAt = previous.CreatedAt
+	subscription.UpdatedAt = s.now().UTC()
+	s.subscriptions[key] = subscription
+	return subscription, nil
+}
+
+func (s *Store) GetContext(_ context.Context, organizationID, workspaceID, channelID, id string) (Subscription, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.subscriptions[subscriptionKey(organizationID, workspaceID, channelID, id)]
 	if !ok {
 		return Subscription{}, errors.New("trigger subscription not found")
 	}
 	return value, nil
+}
+
+func (s *Store) ListChannel(_ context.Context, organizationID, workspaceID, channelID string) ([]Subscription, error) {
+	if organizationID == "" || workspaceID == "" || channelID == "" {
+		return nil, errors.New("trigger subscription channel scope is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	values := make([]Subscription, 0)
+	for _, subscription := range s.subscriptions {
+		if subscription.OrganizationID == organizationID && subscription.WorkspaceID == workspaceID && subscription.ChannelID == channelID {
+			values = append(values, subscription)
+		}
+	}
+	sortSubscriptions(values)
+	return values, nil
 }
 
 func (s *Store) List(_ context.Context, organizationID string) ([]Subscription, error) {
@@ -158,10 +199,10 @@ func (s *Store) DueContext(_ context.Context, now time.Time, limit int) ([]Subsc
 	return values, nil
 }
 
-func (s *Store) AdvanceContext(_ context.Context, organizationID, id string, from time.Time) error {
+func (s *Store) AdvanceContext(_ context.Context, organizationID, workspaceID, channelID, id string, from time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := organizationID + "/" + id
+	key := subscriptionKey(organizationID, workspaceID, channelID, id)
 	subscription, ok := s.subscriptions[key]
 	if !ok {
 		return errors.New("trigger subscription not found")
@@ -175,6 +216,10 @@ func (s *Store) AdvanceContext(_ context.Context, organizationID, id string, fro
 	subscription.UpdatedAt = s.now().UTC()
 	s.subscriptions[key] = subscription
 	return nil
+}
+
+func subscriptionKey(organizationID, workspaceID, channelID, id string) string {
+	return organizationID + "/" + workspaceID + "/" + channelID + "/" + id
 }
 
 func sortSubscriptions(values []Subscription) {
@@ -236,7 +281,7 @@ func (s *Scheduler) RunDue(ctx context.Context) error {
 	for _, subscription := range due {
 		window := subscription.NextRun.UTC().Format(time.RFC3339Nano)
 		if err := s.authorizer.AuthorizeTrigger(ctx, subscription); err != nil {
-			if advanceErr := s.store.AdvanceContext(ctx, subscription.OrganizationID, subscription.ID, now); advanceErr != nil {
+			if advanceErr := s.store.AdvanceContext(ctx, subscription.OrganizationID, subscription.WorkspaceID, subscription.ChannelID, subscription.ID, now); advanceErr != nil {
 				return advanceErr
 			}
 			continue
@@ -252,7 +297,7 @@ func (s *Scheduler) RunDue(ctx context.Context) error {
 				ChannelID: subscription.ChannelID, RootThreadTS: subscription.RootThreadTS,
 				RequesterID: subscription.OwnerID,
 				SessionID:   subscription.SessionID, Generation: subscription.Generation,
-				IdempotencyKey: "trigger/" + subscription.ID + "/" + window,
+				IdempotencyKey: "trigger/" + subscription.ChannelID + "/" + subscription.ID + "/" + window,
 				Kind:           "heartbeat", Input: subscription.Instruction, MaxAttempts: 3,
 				ExpiresAt: now.Add(spec.Window(subscription.NextRun)),
 			})
@@ -260,7 +305,7 @@ func (s *Scheduler) RunDue(ctx context.Context) error {
 				return fmt.Errorf("enqueue heartbeat trigger: %w", err)
 			}
 		}
-		if err := s.store.AdvanceContext(ctx, subscription.OrganizationID, subscription.ID, now); err != nil {
+		if err := s.store.AdvanceContext(ctx, subscription.OrganizationID, subscription.WorkspaceID, subscription.ChannelID, subscription.ID, now); err != nil {
 			return err
 		}
 	}

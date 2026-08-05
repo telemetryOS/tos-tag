@@ -5,17 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/RobertWHurst/blackbox"
 	slackapi "github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
 
+	"github.com/telemetryos/tos-tag/core/automations"
 	"github.com/telemetryos/tos-tag/core/deliveries"
 	"github.com/telemetryos/tos-tag/types"
 )
@@ -30,6 +31,15 @@ const (
 	assistSlashCommand      = "/tag-assist"
 	offSlashCommand         = "/tag-off"
 	statusSlashCommand      = "/tag-status"
+	automationsSlashCommand = "/tag-automations"
+	automationCallbackID    = "tos_tag_channel_automation_v1"
+	automationEditActionID  = "tos_tag_automation_edit"
+	automationInstructionID = "automation_instruction"
+	automationCronID        = "automation_cron"
+	automationTimezoneID    = "automation_timezone"
+	automationConfidenceID  = "automation_confidence"
+	automationEnabledID     = "automation_enabled"
+	automationValueActionID = "value"
 )
 
 type LiveOptions struct {
@@ -57,6 +67,9 @@ type LiveIngress struct {
 	directiveLoad      DirectiveLoadHandler
 	directiveSave      DirectiveSaveHandler
 	modeChange         ModeChangeHandler
+	automationList     AutomationListHandler
+	automationLoad     AutomationLoadHandler
+	automationSave     AutomationSaveHandler
 	reconnectHandler   ReconnectHandler
 	recoveryWG         sync.WaitGroup
 	stopping           bool
@@ -86,6 +99,14 @@ func (s *LiveIngress) SetDirectiveConfigurationHandlers(load DirectiveLoadHandle
 func (s *LiveIngress) SetModeChangeHandler(handler ModeChangeHandler) {
 	s.mu.Lock()
 	s.modeChange = handler
+	s.mu.Unlock()
+}
+
+func (s *LiveIngress) SetAutomationHandlers(list AutomationListHandler, load AutomationLoadHandler, save AutomationSaveHandler) {
+	s.mu.Lock()
+	s.automationList = list
+	s.automationLoad = load
+	s.automationSave = save
 	s.mu.Unlock()
 }
 
@@ -131,8 +152,7 @@ type deliveryAPI interface {
 	PostMessageContext(context.Context, string, ...slackapi.MsgOption) (string, string, error)
 	UpdateMessageContext(context.Context, string, string, ...slackapi.MsgOption) (string, string, string, error)
 	SetAssistantThreadsStatusContext(context.Context, slackapi.AssistantThreadsSetStatusParameters) error
-	StartStreamContext(context.Context, string, ...slackapi.MsgOption) (string, string, error)
-	AppendStreamContext(context.Context, string, string, ...slackapi.MsgOption) (string, string, error)
+	SetAssistantThreadsTitleContext(context.Context, slackapi.AssistantThreadsSetTitleParameters) error
 	StopStreamContext(context.Context, string, string, ...slackapi.MsgOption) (string, string, error)
 	AddReactionContext(context.Context, string, slackapi.ItemRef) error
 	GetConversationHistoryContext(context.Context, *slackapi.GetConversationHistoryParameters) (*slackapi.GetConversationHistoryResponse, error)
@@ -146,109 +166,88 @@ type LiveDelivery struct {
 	logger   *blackbox.Logger
 }
 
-func (d *LiveDelivery) StartProgress(ctx context.Context, request types.SlackProgressStartRequest) (types.SlackProgressResult, error) {
+func (d *LiveDelivery) SetAgentStatus(ctx context.Context, request types.SlackAgentStatusRequest) (types.SlackAgentStatusResult, error) {
 	started := time.Now()
 	logger := d.logger
 	if logger == nil {
 		logger = blackbox.New()
 	}
-	requestLogger := logger.WithCtx(blackbox.Ctx{"job_id": request.JobID, "channel_id": request.ChannelID, "thread_ts": request.ThreadTS, "progress_step_id": request.Step.ID})
-	requestLogger.Info("Slack Thinking Steps start requested")
+	requestLogger := logger.WithCtx(blackbox.Ctx{"job_id": request.JobID, "channel_id": request.ChannelID, "thread_ts": request.ThreadTS})
+	requestLogger.Info("Slack agent status update requested")
 	if request.TeamID != d.teamID {
-		return types.SlackProgressResult{}, errors.New("Slack progress team does not match the configured installation")
+		return types.SlackAgentStatusResult{}, errors.New("Slack agent status team does not match the configured installation")
 	}
-	if request.IdempotencyKey == "" || request.ChannelID == "" || request.ThreadTS == "" || request.JobID == "" || request.RecipientUserID == "" || request.Title == "" {
-		return types.SlackProgressResult{}, errors.New("invalid Slack progress start request")
+	if request.ChannelID == "" || request.ThreadTS == "" || request.JobID == "" || !validAgentStatus(request.Status) || len(request.LoadingMessages) > 10 {
+		return types.SlackAgentStatusResult{}, errors.New("invalid Slack agent status request")
 	}
-	chunk, err := slackTaskUpdate(request.Step)
-	if err != nil {
-		return types.SlackProgressResult{}, err
+	for _, message := range request.LoadingMessages {
+		if !validAgentStatus(message) {
+			return types.SlackAgentStatusResult{}, errors.New("invalid Slack agent loading message")
+		}
 	}
-	if timestamp, findErr := d.progressMessage(ctx, request.ChannelID, request.ThreadTS, request.IdempotencyKey); findErr != nil {
-		return types.SlackProgressResult{}, fmt.Errorf("reconcile Slack progress: %w", findErr)
-	} else if timestamp != "" {
-		requestLogger.WithCtx(blackbox.Ctx{"message_ts": timestamp, "duration_ms": time.Since(started).Milliseconds(), "duplicate": true}).Info("Slack Thinking Steps reconciled")
-		return types.SlackProgressResult{MessageTS: timestamp, UpdatedAt: time.Now().UTC(), Duplicate: true}, nil
-	}
-	// Use Slack's native transient agent status to bridge the handoff from the
-	// source-message acknowledgement reaction into the structured progress
-	// stream. This avoids exposing a literal message-like "Thinking..." state;
-	// failure is cosmetic and must not prevent the answer or its safe progress.
 	if err := d.api.SetAssistantThreadsStatusContext(ctx, slackapi.AssistantThreadsSetStatusParameters{
+		ChannelID:       request.ChannelID,
+		ThreadTS:        request.ThreadTS,
+		Status:          request.Status,
+		LoadingMessages: request.LoadingMessages,
+	}); err != nil {
+		requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err), "slack_error_code": slackAPIErrorCode(err)}).Warn("Slack agent status update failed")
+		return types.SlackAgentStatusResult{}, err
+	}
+	updatedAt := time.Now().UTC()
+	requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds()}).Info("Slack agent status updated")
+	return types.SlackAgentStatusResult{UpdatedAt: updatedAt}, nil
+}
+
+func (d *LiveDelivery) SetThreadTitle(ctx context.Context, request types.SlackThreadTitleRequest) (types.SlackThreadTitleResult, error) {
+	started := time.Now()
+	logger := d.logger
+	if logger == nil {
+		logger = blackbox.New()
+	}
+	requestLogger := logger.WithCtx(blackbox.Ctx{
+		"session_id": request.SessionID, "channel_id": request.ChannelID,
+		"thread_ts": request.ThreadTS, "title_length": len([]rune(request.Title)),
+	})
+	requestLogger.Info("Slack agent thread title update requested")
+	if request.TeamID != d.teamID {
+		return types.SlackThreadTitleResult{}, errors.New("Slack thread title team does not match the configured installation")
+	}
+	if !strings.HasPrefix(request.ChannelID, "D") || request.ThreadTS == "" || request.SessionID == "" || !validThreadTitle(request.Title) {
+		return types.SlackThreadTitleResult{}, errors.New("invalid Slack thread title request")
+	}
+	if err := d.api.SetAssistantThreadsTitleContext(ctx, slackapi.AssistantThreadsSetTitleParameters{
 		ChannelID: request.ChannelID,
 		ThreadTS:  request.ThreadTS,
-		Status:    "Organizing…",
+		Title:     request.Title,
 	}); err != nil {
-		requestLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "slack_error_code": slackAPIErrorCode(err)}).Warn("Slack agent status failed; continuing with progress stream")
-	} else {
-		requestLogger.Info("Slack agent status set")
+		requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err), "slack_error_code": slackAPIErrorCode(err)}).Warn("Slack agent thread title update failed")
+		return types.SlackThreadTitleResult{}, err
 	}
-	options := []slackapi.MsgOption{
-		slackapi.MsgOptionRecipientTeamID(request.TeamID),
-		slackapi.MsgOptionRecipientUserID(request.RecipientUserID),
-		slackapi.MsgOptionTaskDisplayMode(slackapi.TaskDisplayModePlan),
-		slackapi.MsgOptionChunks(slackapi.NewPlanUpdateChunk(request.Title), chunk),
-		slackapi.MsgOptionMetadata(slackapi.SlackMetadata{EventType: "tos_tag_progress", EventPayload: map[string]any{"job_id": string(request.JobID), "idempotency_key": request.IdempotencyKey}}),
-	}
-	options = append(options, slackapi.MsgOptionTS(request.ThreadTS))
-	_, timestamp, err := d.api.StartStreamContext(ctx, request.ChannelID, options...)
-	if err != nil {
-		requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err), "slack_error_code": slackAPIErrorCode(err)}).Error("Slack Thinking Steps start failed")
-		return types.SlackProgressResult{}, err
-	}
-	requestLogger.WithCtx(blackbox.Ctx{"message_ts": timestamp, "duration_ms": time.Since(started).Milliseconds()}).Info("Slack Thinking Steps started")
-	return types.SlackProgressResult{MessageTS: timestamp, UpdatedAt: time.Now().UTC()}, nil
+	updatedAt := time.Now().UTC()
+	requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds()}).Info("Slack agent thread title updated")
+	return types.SlackThreadTitleResult{UpdatedAt: updatedAt}, nil
 }
 
-func (d *LiveDelivery) UpdateProgress(ctx context.Context, request types.SlackProgressUpdateRequest) (types.SlackProgressResult, error) {
-	started := time.Now()
-	logger := d.logger
-	if logger == nil {
-		logger = blackbox.New()
-	}
-	requestLogger := logger.WithCtx(blackbox.Ctx{"job_id": request.JobID, "channel_id": request.ChannelID, "message_ts": request.MessageTS, "progress_step_id": request.Step.ID, "progress_status": request.Step.Status})
-	if request.TeamID != d.teamID {
-		return types.SlackProgressResult{}, errors.New("Slack progress team does not match the configured installation")
-	}
-	if request.ChannelID == "" || request.MessageTS == "" || request.JobID == "" {
-		return types.SlackProgressResult{}, errors.New("invalid Slack progress update request")
-	}
-	chunk, err := slackTaskUpdate(request.Step)
-	if err != nil {
-		return types.SlackProgressResult{}, err
-	}
-	_, timestamp, err := d.api.AppendStreamContext(ctx, request.ChannelID, request.MessageTS, slackapi.MsgOptionChunks(chunk))
-	if err != nil {
-		requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "error_type": fmt.Sprintf("%T", err), "slack_error_code": slackAPIErrorCode(err)}).Error("Slack Thinking Steps update failed")
-		return types.SlackProgressResult{}, err
-	}
-	if timestamp == "" {
-		timestamp = request.MessageTS
-	}
-	requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds()}).Info("Slack Thinking Steps updated")
-	return types.SlackProgressResult{MessageTS: timestamp, UpdatedAt: time.Now().UTC()}, nil
+func validAgentStatus(value string) bool {
+	length := len([]rune(strings.TrimSpace(value)))
+	return length > 0 && length <= 100
 }
 
-func slackTaskUpdate(step types.SlackProgressStep) (slackapi.TaskUpdateChunk, error) {
-	if step.ID == "" || step.Title == "" {
-		return slackapi.TaskUpdateChunk{}, errors.New("Slack progress step requires id and title")
+func validThreadTitle(value string) bool {
+	if value != strings.TrimSpace(value) {
+		return false
 	}
-	status := slackapi.TaskCardStatus(step.Status)
-	switch status {
-	case slackapi.TaskCardStatusPending, slackapi.TaskCardStatusInProgress, slackapi.TaskCardStatusComplete, slackapi.TaskCardStatusError:
-	default:
-		return slackapi.TaskUpdateChunk{}, errors.New("invalid Slack progress status")
+	runes := []rune(value)
+	if len(runes) == 0 || len(runes) > 80 {
+		return false
 	}
-	chunk := slackapi.NewTaskUpdateChunk(step.ID, step.Title)
-	chunk.Status, chunk.Details, chunk.Output = status, step.Details, step.Output
-	for _, source := range step.Sources {
-		parsed, err := url.Parse(source.URL)
-		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || source.Text == "" {
-			return slackapi.TaskUpdateChunk{}, errors.New("invalid Slack progress source")
+	for _, value := range runes {
+		if unicode.IsControl(value) || value == '<' || value == '>' || value == '`' {
+			return false
 		}
-		chunk.Sources = append(chunk.Sources, slackapi.NewTaskCardSource(source.URL, source.Text))
 	}
-	return chunk, nil
+	return true
 }
 
 // NewLive constructs the production adapters without opening a connection.
@@ -395,6 +394,29 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 					s.handleStatusCommand(ctx, eventLogger, event.Request.EnvelopeID, statusRequest)
 					continue
 				}
+				automationScope, automationEligible, automationErr := NormalizeAutomationCommand(s.options, event.Data)
+				if automationErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", automationErr)}).Error("Slack automations command rejected")
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralCommandResponse("Usage: `/tag-automations` — run it without arguments in the channel you want to manage."))
+					continue
+				}
+				if automationEligible {
+					s.mu.Lock()
+					listAutomations := s.automationList
+					s.mu.Unlock()
+					if listAutomations == nil {
+						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralCommandResponse("Channel automations are not available right now."))
+						continue
+					}
+					tasks, listErr := listAutomations(ctx, automationScope)
+					if listErr != nil {
+						eventLogger.WithCtx(blackbox.Ctx{"channel_id": automationScope.ChannelID, "actor_id": automationScope.ActorID, "error_type": fmt.Sprintf("%T", listErr)}).Warn("Slack channel automations list failed")
+						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralCommandResponse("Channel automations are not available in this channel right now."))
+						continue
+					}
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralAutomationResponse(tasks))
+					continue
+				}
 				command, eligible, normalizeErr := NormalizeDirectiveCommand(s.options, event.Data)
 				if normalizeErr != nil {
 					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", normalizeErr)}).Error("Slack directive command rejected")
@@ -433,6 +455,58 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 			case socketmode.EventTypeInteractive:
 				if event.Request == nil {
 					eventLogger.Error("Slack interaction missing request metadata")
+					continue
+				}
+				automationEdit, automationEditEligible, automationEditErr := NormalizeAutomationEditInteraction(s.options, event.Data)
+				if automationEditErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", automationEditErr)}).Error("Slack automation edit interaction rejected")
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, nil)
+					continue
+				}
+				if automationEditEligible {
+					s.mu.Lock()
+					loadAutomation := s.automationLoad
+					s.mu.Unlock()
+					if loadAutomation == nil || s.views == nil {
+						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, nil)
+						continue
+					}
+					task, loadErr := loadAutomation(ctx, automationEdit.Scope, automationEdit.Kind, automationEdit.ID)
+					if loadErr != nil {
+						eventLogger.WithCtx(blackbox.Ctx{"channel_id": automationEdit.ChannelID, "actor_id": automationEdit.ActorID, "error_type": fmt.Sprintf("%T", loadErr)}).Warn("Slack automation editor load failed")
+						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, nil)
+						continue
+					}
+					if ackErr := s.client.AckCtx(ctx, event.Request.EnvelopeID, nil); ackErr != nil {
+						continue
+					}
+					if _, openErr := s.views.OpenViewContext(ctx, automationEdit.TriggerID, automationModal(automationEdit.Scope, task)); openErr != nil {
+						eventLogger.WithCtx(blackbox.Ctx{"channel_id": automationEdit.ChannelID, "automation_id": task.ID, "error_type": fmt.Sprintf("%T", openErr)}).Error("Slack automation modal open failed")
+					}
+					continue
+				}
+				automationSave, automationSaveEligible, automationSaveErr := NormalizeAutomationSubmission(s.options, event.Data)
+				if automationSaveErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", automationSaveErr)}).Error("Slack automation submission rejected")
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, slackapi.NewErrorsViewSubmissionResponse(map[string]string{automationInstructionID: "The automation could not be validated. Check every field and try again."}))
+					continue
+				}
+				if automationSaveEligible {
+					s.mu.Lock()
+					saveAutomation := s.automationSave
+					s.mu.Unlock()
+					if saveAutomation == nil {
+						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, slackapi.NewErrorsViewSubmissionResponse(map[string]string{automationInstructionID: "Channel automations are unavailable right now."}))
+						continue
+					}
+					saved, saveErr := saveAutomation(ctx, automationSave)
+					if saveErr != nil {
+						eventLogger.WithCtx(blackbox.Ctx{"channel_id": automationSave.ChannelID, "automation_id": automationSave.ID, "actor_id": automationSave.ActorID, "error_type": fmt.Sprintf("%T", saveErr)}).Error("Slack automation submission persistence failed")
+						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, slackapi.NewErrorsViewSubmissionResponse(map[string]string{automationInstructionID: "The automation was not saved. Reopen the list to refresh it, then try again."}))
+						continue
+					}
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, nil)
+					eventLogger.WithCtx(blackbox.Ctx{"channel_id": automationSave.ChannelID, "automation_id": saved.ID, "automation_kind": string(saved.Kind), "version": saved.Version}).Info("Slack channel automation updated")
 					continue
 				}
 				directive, directiveEligible, directiveErr := NormalizeDirectiveSubmission(s.options, event.Data)
@@ -904,6 +978,20 @@ func NormalizeStatusCommand(options LiveOptions, data any) (ModeChangeRequest, b
 	}, true, nil
 }
 
+func NormalizeAutomationCommand(options LiveOptions, data any) (automations.Scope, bool, error) {
+	command, ok, err := normalizeSlashCommand(data)
+	if err != nil || !ok {
+		return automations.Scope{}, false, err
+	}
+	if command.Command != automationsSlashCommand {
+		return automations.Scope{}, false, nil
+	}
+	if command.TeamID != options.TeamID || (command.APIAppID != "" && command.APIAppID != options.AppID) || command.ChannelID == "" || command.UserID == "" || strings.TrimSpace(command.Text) != "" {
+		return automations.Scope{}, false, errors.New("Slack automations command scope is invalid")
+	}
+	return automations.Scope{OrganizationID: options.OrganizationID, WorkspaceID: command.TeamID, ChannelID: command.ChannelID, ActorID: command.UserID}, true, nil
+}
+
 func NormalizeDirectiveCommand(options LiveOptions, data any) (directiveCommand, bool, error) {
 	command, ok, err := normalizeSlashCommand(data)
 	if err != nil || !ok {
@@ -950,6 +1038,194 @@ func NormalizeDirectiveSubmission(options LiveOptions, data any) (DirectiveConfi
 		return DirectiveConfigurationRequest{}, false, errors.New("Slack directive prompt is invalid")
 	}
 	return DirectiveConfigurationRequest{OrganizationID: options.OrganizationID, WorkspaceID: metadata.WorkspaceID, ChannelID: metadata.ChannelID, UserID: callback.User.ID, Prompt: prompt, InteractionID: callback.View.ID}, true, nil
+}
+
+type automationActionValue struct {
+	Kind automations.Kind `json:"kind"`
+	ID   string           `json:"id"`
+}
+
+type automationEditInteraction struct {
+	automations.Scope
+	Kind      automations.Kind
+	ID        string
+	TriggerID string
+}
+
+type automationModalMetadata struct {
+	WorkspaceID string           `json:"workspace_id"`
+	ChannelID   string           `json:"channel_id"`
+	Kind        automations.Kind `json:"kind"`
+	ID          string           `json:"id"`
+	Version     int64            `json:"version"`
+}
+
+func NormalizeAutomationEditInteraction(options LiveOptions, data any) (automationEditInteraction, bool, error) {
+	callback, ok, err := normalizeInteractionCallback(data)
+	if err != nil || !ok || callback.Type != slackapi.InteractionTypeBlockActions {
+		return automationEditInteraction{}, false, err
+	}
+	if len(callback.ActionCallback.BlockActions) != 1 || callback.ActionCallback.BlockActions[0] == nil || callback.ActionCallback.BlockActions[0].ActionID != automationEditActionID {
+		return automationEditInteraction{}, false, nil
+	}
+	if (callback.APIAppID != "" && callback.APIAppID != options.AppID) || callback.Team.ID != options.TeamID || callback.User.ID == "" || callback.TriggerID == "" {
+		return automationEditInteraction{}, false, errors.New("Slack automation interaction scope is invalid")
+	}
+	channelID := callback.Channel.ID
+	if channelID == "" {
+		channelID = callback.Container.ChannelID
+	}
+	if channelID == "" {
+		return automationEditInteraction{}, false, errors.New("Slack automation interaction channel is missing")
+	}
+	var value automationActionValue
+	if err := json.Unmarshal([]byte(callback.ActionCallback.BlockActions[0].Value), &value); err != nil || value.ID == "" || !validAutomationKind(value.Kind) {
+		return automationEditInteraction{}, false, errors.New("Slack automation interaction value is invalid")
+	}
+	return automationEditInteraction{Scope: automations.Scope{OrganizationID: options.OrganizationID, WorkspaceID: callback.Team.ID, ChannelID: channelID, ActorID: callback.User.ID}, Kind: value.Kind, ID: value.ID, TriggerID: callback.TriggerID}, true, nil
+}
+
+func NormalizeAutomationSubmission(options LiveOptions, data any) (automations.SaveRequest, bool, error) {
+	callback, ok, err := normalizeInteractionCallback(data)
+	if err != nil || !ok || callback.Type != slackapi.InteractionTypeViewSubmission || callback.View.CallbackID != automationCallbackID {
+		return automations.SaveRequest{}, false, err
+	}
+	if (callback.APIAppID != "" && callback.APIAppID != options.AppID) || callback.Team.ID != options.TeamID || callback.User.ID == "" || callback.View.ID == "" || callback.View.State == nil {
+		return automations.SaveRequest{}, false, errors.New("Slack automation submission scope is invalid")
+	}
+	var metadata automationModalMetadata
+	if err := json.Unmarshal([]byte(callback.View.PrivateMetadata), &metadata); err != nil || metadata.WorkspaceID != options.TeamID || metadata.ChannelID == "" || metadata.ID == "" || metadata.Version <= 0 || !validAutomationKind(metadata.Kind) {
+		return automations.SaveRequest{}, false, errors.New("Slack automation modal metadata is invalid")
+	}
+	value := func(blockID string) slackapi.BlockAction {
+		return callback.View.State.Values[blockID][automationValueActionID]
+	}
+	instruction := strings.TrimSpace(value(automationInstructionID).Value)
+	cron := strings.TrimSpace(value(automationCronID).Value)
+	timezone := strings.TrimSpace(value(automationTimezoneID).Value)
+	if instruction == "" || len([]rune(instruction)) > 3000 || cron == "" || len(cron) > 100 || timezone == "" || len(timezone) > 100 {
+		return automations.SaveRequest{}, false, errors.New("Slack automation fields are invalid")
+	}
+	selectedState := value(automationEnabledID).SelectedOption.Value
+	if selectedState != "enabled" && selectedState != "paused" {
+		return automations.SaveRequest{}, false, errors.New("Slack automation state is invalid")
+	}
+	confidence := float64(0)
+	if metadata.Kind == automations.KindHeartbeat {
+		confidence, err = strconv.ParseFloat(strings.TrimSpace(value(automationConfidenceID).Value), 64)
+		if err != nil || confidence < 0 || confidence > 1 {
+			return automations.SaveRequest{}, false, errors.New("Slack automation confidence is invalid")
+		}
+	}
+	return automations.SaveRequest{
+		Scope: automations.Scope{OrganizationID: options.OrganizationID, WorkspaceID: metadata.WorkspaceID, ChannelID: metadata.ChannelID, ActorID: callback.User.ID},
+		Kind:  metadata.Kind, ID: metadata.ID, Version: metadata.Version, SourceID: callback.View.ID,
+		Instruction: instruction, Cron: cron, Timezone: timezone, MinConfidence: confidence, Enabled: selectedState == "enabled",
+	}, true, nil
+}
+
+func normalizeInteractionCallback(data any) (slackapi.InteractionCallback, bool, error) {
+	switch value := data.(type) {
+	case slackapi.InteractionCallback:
+		return value, true, nil
+	case *slackapi.InteractionCallback:
+		if value == nil {
+			return slackapi.InteractionCallback{}, false, errors.New("Slack interaction payload is nil")
+		}
+		return *value, true, nil
+	default:
+		return slackapi.InteractionCallback{}, false, nil
+	}
+}
+
+func validAutomationKind(kind automations.Kind) bool {
+	return kind == automations.KindRoutine || kind == automations.KindHeartbeat
+}
+
+func automationModal(scope automations.Scope, task automations.Task) slackapi.ModalViewRequest {
+	metadata, _ := json.Marshal(automationModalMetadata{WorkspaceID: scope.WorkspaceID, ChannelID: scope.ChannelID, Kind: task.Kind, ID: task.ID, Version: task.Version})
+	plainInput := func(placeholder, initial, actionID string, multiline bool, maxLength int) *slackapi.PlainTextInputBlockElement {
+		element := slackapi.NewPlainTextInputBlockElement(slackapi.NewTextBlockObject("plain_text", placeholder, false, false), actionID)
+		element.InitialValue = initial
+		element.Multiline = multiline
+		element.MinLength = 1
+		element.MaxLength = maxLength
+		return element
+	}
+	blocks := []slackapi.Block{
+		slackapi.NewAlertBlock(slackapi.NewTextBlockObject("plain_text", "This task is locked to the channel where you opened it. Saving cannot move it to another channel.", false, false), slackapi.AlertBlockOptionLevel(slackapi.AlertLevelInfo), slackapi.AlertBlockOptionBlockID("tos_tag_automation_scope")),
+		slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", "*"+escapeSlackText(task.ID)+"*\n"+automationKindLabel(task.Kind)+" · version "+strconv.FormatInt(task.Version, 10), false, false), nil, nil),
+		slackapi.NewInputBlock(automationInstructionID, slackapi.NewTextBlockObject("plain_text", "Automated task", false, false), slackapi.NewTextBlockObject("plain_text", "Describe what Tag should check when this schedule runs.", false, false), plainInput("What should Tag do?", task.Instruction, automationValueActionID, true, 3000)),
+		slackapi.NewInputBlock(automationCronID, slackapi.NewTextBlockObject("plain_text", "Cron schedule", false, false), slackapi.NewTextBlockObject("plain_text", "Five fields: minute, hour, day of month, month, day of week.", false, false), plainInput("0 9 * * 1-5", task.Cron, automationValueActionID, false, 100)),
+		slackapi.NewInputBlock(automationTimezoneID, slackapi.NewTextBlockObject("plain_text", "Timezone", false, false), slackapi.NewTextBlockObject("plain_text", "Use an IANA timezone such as America/Vancouver.", false, false), plainInput("UTC", task.Timezone, automationValueActionID, false, 100)),
+	}
+	if task.Kind == automations.KindHeartbeat {
+		blocks = append(blocks, slackapi.NewInputBlock(automationConfidenceID, slackapi.NewTextBlockObject("plain_text", "Minimum confidence", false, false), slackapi.NewTextBlockObject("plain_text", "A number from 0 to 1.", false, false), plainInput("0.8", strconv.FormatFloat(task.MinConfidence, 'f', -1, 64), automationValueActionID, false, 4)))
+	}
+	enabledOption := slackapi.NewOptionBlockObject("enabled", slackapi.NewTextBlockObject("plain_text", "Enabled", false, false), nil)
+	pausedOption := slackapi.NewOptionBlockObject("paused", slackapi.NewTextBlockObject("plain_text", "Paused", false, false), nil)
+	state := slackapi.NewOptionsSelectBlockElement(slackapi.OptTypeStatic, slackapi.NewTextBlockObject("plain_text", "Choose a state", false, false), automationValueActionID, enabledOption, pausedOption)
+	if task.Enabled {
+		state.InitialOption = enabledOption
+	} else {
+		state.InitialOption = pausedOption
+	}
+	blocks = append(blocks, slackapi.NewInputBlock(automationEnabledID, slackapi.NewTextBlockObject("plain_text", "State", false, false), nil, state))
+	return slackapi.ModalViewRequest{Type: slackapi.VTModal, Title: slackapi.NewTextBlockObject("plain_text", "Channel automation", false, false), Submit: slackapi.NewTextBlockObject("plain_text", "Save changes", false, false), Close: slackapi.NewTextBlockObject("plain_text", "Cancel", false, false), Blocks: slackapi.Blocks{BlockSet: blocks}, PrivateMetadata: string(metadata), CallbackID: automationCallbackID}
+}
+
+func ephemeralAutomationResponse(tasks []automations.Task) map[string]any {
+	header := slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", "*Channel automations*\nThese tasks are locked to this channel. Choose one to review or edit.", false, false), nil, nil)
+	blocks := []slackapi.Block{header}
+	const maxVisible = 20
+	for index, task := range tasks {
+		if index >= maxVisible {
+			break
+		}
+		var accessory *slackapi.Accessory
+		if task.Editable {
+			value, _ := json.Marshal(automationActionValue{Kind: task.Kind, ID: task.ID})
+			button := slackapi.NewButtonBlockElement(automationEditActionID, string(value), slackapi.NewTextBlockObject("plain_text", "Edit", false, false))
+			accessory = slackapi.NewAccessory(button)
+		}
+		state := "enabled"
+		if !task.Enabled {
+			state = "paused"
+		}
+		schedule := task.Cron
+		if schedule == "" {
+			schedule = "legacy interval " + task.Interval.String()
+		}
+		text := "*" + escapeSlackText(task.ID) + "* · " + automationKindLabel(task.Kind) + " · " + state + "\n`" + escapeSlackText(schedule) + "` · " + escapeSlackText(task.Timezone) + "\n" + escapeSlackText(boundedText(task.Instruction, 180))
+		blocks = append(blocks, slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", text, false, false), nil, accessory, slackapi.SectionBlockOptionBlockID("tos_tag_automation_"+strconv.Itoa(index))))
+	}
+	if len(tasks) == 0 {
+		blocks = append(blocks, slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", "No automated tasks are configured for this channel.", false, false), nil, nil))
+	} else if len(tasks) > maxVisible {
+		blocks = append(blocks, slackapi.NewContextBlock("tos_tag_automation_limit", slackapi.NewTextBlockObject("mrkdwn", fmt.Sprintf("Showing the first %d of %d tasks.", maxVisible, len(tasks)), false, false)))
+	}
+	return map[string]any{"response_type": "ephemeral", "text": fmt.Sprintf("%d channel automations", len(tasks)), "blocks": blocks}
+}
+
+func automationKindLabel(kind automations.Kind) string {
+	if kind == automations.KindHeartbeat {
+		return "classifier-gated schedule"
+	}
+	return "direct routine"
+}
+
+func escapeSlackText(value string) string {
+	value = strings.ReplaceAll(value, "&", "&amp;")
+	value = strings.ReplaceAll(value, "<", "&lt;")
+	return strings.ReplaceAll(value, ">", "&gt;")
+}
+
+func boundedText(value string, limit int) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit-1]) + "…"
 }
 
 func directiveModal(request DirectiveConfigurationRequest, current DirectiveConfiguration) slackapi.ModalViewRequest {
@@ -1009,7 +1285,7 @@ func ephemeralStatusResponse(policy ModeChangeResult, directive DirectiveConfigu
 	)
 	footer := slackapi.NewContextBlock(
 		"tos_tag_channel_status_controls",
-		slackapi.NewTextBlockObject("mrkdwn", "Controls: `/tag-assist` · `/tag-proactive` · `/tag-off` · `/tag-directive`", false, false),
+		slackapi.NewTextBlockObject("mrkdwn", "Controls: `/tag-assist` · `/tag-proactive` · `/tag-off` · `/tag-directive` · `/tag-automations`", false, false),
 	)
 	return map[string]any{
 		"response_type": "ephemeral",
@@ -1320,7 +1596,7 @@ func (d *LiveDelivery) Send(ctx context.Context, request types.SlackDeliveryRequ
 		}
 		var timestamp string
 		if request.Destination.StreamTS != "" && index == 0 {
-			// A Thinking Steps stream is opened in chunks mode, so its final
+			// A legacy pre-status-only Thinking Steps stream was opened in chunks mode, so its final
 			// content must remain in chunks mode as well. Sending markdown_text or
 			// top-level blocks here makes Slack reject the close with
 			// streaming_mode_mismatch. A blocks chunk preserves the renderer's
@@ -1392,41 +1668,6 @@ func (d *LiveDelivery) Send(ctx context.Context, request types.SlackDeliveryRequ
 	result := types.SlackDeliveryResult{MessageTS: firstTimestamp, DeliveredAt: time.Now().UTC(), Duplicate: len(existing) == len(payloads)}
 	requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "duplicate": result.Duplicate, "message_ts": result.MessageTS}).Info("Slack delivery completed")
 	return result, nil
-}
-
-// progressMessage reconciles a started Thinking Steps stream by immutable
-// metadata. This closes the crash window between Slack accepting startStream
-// and the job persisting the returned timestamp.
-func (d *LiveDelivery) progressMessage(ctx context.Context, channelID, threadTS, idempotencyKey string) (string, error) {
-	cursor := ""
-	for page := 0; page < 20; page++ {
-		var messages []slackapi.Message
-		var hasMore bool
-		var next string
-		if threadTS != "" {
-			var err error
-			messages, hasMore, next, err = d.api.GetConversationRepliesContext(ctx, &slackapi.GetConversationRepliesParameters{ChannelID: channelID, Timestamp: threadTS, Cursor: cursor, Limit: 100, IncludeAllMetadata: true})
-			if err != nil {
-				return "", err
-			}
-		} else {
-			response, err := d.api.GetConversationHistoryContext(ctx, &slackapi.GetConversationHistoryParameters{ChannelID: channelID, Cursor: cursor, Limit: 100, IncludeAllMetadata: true})
-			if err != nil {
-				return "", err
-			}
-			messages, hasMore, next = response.Messages, response.HasMore, response.ResponseMetaData.NextCursor
-		}
-		for _, message := range messages {
-			if message.Metadata.EventType == "tos_tag_progress" && fmt.Sprint(message.Metadata.EventPayload["idempotency_key"]) == idempotencyKey {
-				return message.Timestamp, nil
-			}
-		}
-		if !hasMore || next == "" {
-			break
-		}
-		cursor = next
-	}
-	return "", nil
 }
 
 func (d *LiveDelivery) React(ctx context.Context, request types.SlackReactionRequest) (types.SlackReactionResult, error) {
