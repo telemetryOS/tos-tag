@@ -52,6 +52,7 @@ type Bridge struct {
 	mu        sync.RWMutex
 	scopes    map[string]JobScope
 	artifacts map[string][]types.SlackFileUpload
+	curdsRuns map[string]bool
 	listener  net.Listener
 	server    *http.Server
 }
@@ -77,7 +78,7 @@ func NewBridge(gateway Gateway, queue jobs.Queue, approvalStore approvals.Reposi
 	if marketplaceConfigured && (gateway.Registry == nil || gateway.Secrets == nil || !gateway.Executor.Enabled) {
 		return nil, errors.New("marketplace tool gateway configuration is incomplete")
 	}
-	bridge := &Bridge{gateway: gateway, jobs: queue, approvals: approvalStore, audit: auditAppender, scopes: make(map[string]JobScope), artifacts: make(map[string][]types.SlackFileUpload)}
+	bridge := &Bridge{gateway: gateway, jobs: queue, approvals: approvalStore, audit: auditAppender, scopes: make(map[string]JobScope), artifacts: make(map[string][]types.SlackFileUpload), curdsRuns: make(map[string]bool)}
 	if len(coordinators) > 0 {
 		bridge.approvalCoordinator = coordinators[0]
 	}
@@ -106,6 +107,7 @@ func (b *Bridge) Stop(ctx context.Context) error {
 	b.server, b.listener = nil, nil
 	b.scopes = make(map[string]JobScope)
 	b.artifacts = make(map[string][]types.SlackFileUpload)
+	b.curdsRuns = make(map[string]bool)
 	b.mu.Unlock()
 	if server == nil {
 		return nil
@@ -140,6 +142,7 @@ func (b *Bridge) RevokeAttempt(_ context.Context, attemptID string) error {
 		}
 	}
 	delete(b.artifacts, attemptID)
+	delete(b.curdsRuns, attemptID)
 	b.mu.Unlock()
 	return nil
 }
@@ -244,6 +247,16 @@ func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		if json.Unmarshal([]byte(job.Input), &intent) != nil || !intent.ImageGenerationRequested {
 			writeBridge(w, http.StatusForbidden, map[string]any{"error": "explicit_image_generation_request_required"})
+			return
+		}
+		b.mu.Lock()
+		alreadyAttempted := b.curdsRuns[scope.AttemptID]
+		if !alreadyAttempted {
+			b.curdsRuns[scope.AttemptID] = true
+		}
+		b.mu.Unlock()
+		if alreadyAttempted {
+			writeBridge(w, http.StatusConflict, map[string]any{"error": "curds_generation_already_attempted"})
 			return
 		}
 	}

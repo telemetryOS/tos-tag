@@ -29,7 +29,6 @@ exec curds \
   -no-tui \
   -inline off \
   -provider openai \
-  -model gpt-image-2 \
   -number-of-images 1 \
   -output-format webp \
   -timeout 4m30s \
