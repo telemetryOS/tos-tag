@@ -1212,18 +1212,6 @@ func withAddressedSocialPolicyCorrections(decision types.ClassificationDecision,
 	return fallback
 }
 
-func explicitlyAddressesTag(text string) bool {
-	words := strings.Fields(strings.Map(func(character rune) rune {
-		switch character {
-		case ',', '.', '!', '?', ';', ':', '-', '—', '–':
-			return ' '
-		default:
-			return character
-		}
-	}, strings.ToLower(text)))
-	return slices.Contains(words, "tag")
-}
-
 func withAmbientPolicyCorrections(decision types.ClassificationDecision, target Target, pack types.ContextPackRevision, profiles []advertisedAgentProfile) types.ClassificationDecision {
 	if decision.DirectReply != "" || target.Envelope.IsMention || target.ActiveThread {
 		return decision

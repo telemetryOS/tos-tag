@@ -157,7 +157,7 @@ commands, tests, and active documentation have been removed.
 Current migration evidence:
 
 - full verification components: pass, including all Go packages, the race
-  detector, vet, security scans, and the expanded `50/50` deterministic
+  detector, vet, security scans, and the expanded `54/54` deterministic
   behavioral eval;
 - latest opt-in direct OpenAI classifier baseline: `48/48`, with `38` real provider calls
   and approximately `1.84s` mean case

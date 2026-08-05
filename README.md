@@ -450,6 +450,9 @@ without one of those grants is converted to `silent` with
 `policy.unsolicited_assist_work` before admission and checked again immediately
 before job creation. `proactive` channels retain classifier-gated incident
 initiative.
+For this deterministic boundary, URL query punctuation is ignored, repeated
+`??` is not a question grant, and the ordinary noun `tag` is not treated as an
+explicit address unless it appears in a genuine vocative position.
 
 For ambient team alignment, the classifier may surface a material conflict
 between the current statement and a recent destination-safe public report from
@@ -769,7 +772,7 @@ govulncheck.
 Latest local baseline (2026-08-04):
 
 - all Go tests, race tests, and `go vet`: pass;
-- deterministic behavioral evaluation: `50/50` (48 natural classifier messages
+- deterministic behavioral evaluation: `54/54` (52 natural classifier messages
   plus context-cap and deduplication invariants), including silence, placement,
   privacy, routing, reaction, source-write intake, mandatory product retrieval,
   conversational-reference, active-thread human handoffs, Wiki CRUD, ambient
@@ -825,8 +828,8 @@ separately, and inspect only redacted structured logs.
 ```bash
 make test                 # deterministic test suite
 make race                 # race detector
-make eval                 # deterministic 50-case behavioral gate
-make eval-live            # opt-in 50-case live OpenAI classifier gate
+make eval                 # deterministic 54-case behavioral gate
+make eval-live            # opt-in 54-case live OpenAI classifier gate
 make security             # gosec + govulncheck
 make verify               # full local gate
 make run-live             # host live runtime from ignored runtime.env

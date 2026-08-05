@@ -147,7 +147,7 @@ Current local regression baseline (2026-08-04): direct classifier and ambient
 silence/social placement, native Tables/Data Tables, presentation-only
 Cards/Carousels, approval/resume, Wiki and reviewed
 source access, three overlapping jobs on the eight-worker pool, private-context
-isolation, the deterministic 50-case eval, the latest opt-in live OpenAI
+isolation, the deterministic 54-case eval, the latest opt-in live OpenAI
 48-case baseline (before the ambient Wiki report-link regression was added),
 and full `make verify` all passed. `make eval-live` must use only natural message
 text; evaluator outcomes, placement, reactions, model, and effort remain outside

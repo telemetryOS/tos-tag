@@ -16,7 +16,13 @@ import (
 
 var ErrInvalidClassifierDecision = errors.New("invalid classifier decision")
 
-var leadingSlackUserAddressPattern = regexp.MustCompile(`^\s*<@U[A-Z0-9]+>(?:[\s,;:!?.]|$)`)
+var (
+	leadingSlackUserAddressPattern = regexp.MustCompile(`^\s*<@U[A-Z0-9]+>(?:[\s,;:!?.]|$)`)
+	questionURLPattern             = regexp.MustCompile(`(?i)(?:<https?://[^>\s]+(?:\|[^>]*)?>|https?://[^\s>]+)`)
+	coAddressedTagPattern          = regexp.MustCompile(`(?i)^\s*<@U[A-Z0-9]+>\s*,\s*tag\s*[,;:]`)
+	trailingTagAddressPattern      = regexp.MustCompile(`(?i),\s*tag\s*[!?.]*\s*$`)
+	socialTagTokenPattern          = regexp.MustCompile(`(?i)(?:^|[\s,])tag(?:$|[\s,;:!?.—–-])`)
+)
 
 type Classifier interface {
 	Decide(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error)
@@ -152,12 +158,12 @@ func assistInitiativeAuthorized(target Target, pack types.ContextPackRevision, d
 }
 
 func looksLikeQuestion(text string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(text))
+	// URL query strings are data, not conversational punctuation. Remove both
+	// plain and Slack-formatted links before recognizing a question so a status
+	// declaration containing `...?id=427` cannot acquire assist authority.
+	normalized := strings.ToLower(strings.TrimSpace(questionURLPattern.ReplaceAllString(text, " ")))
 	if normalized == "" {
 		return false
-	}
-	if strings.Contains(normalized, "?") {
-		return true
 	}
 	for _, prefix := range []string{
 		"what ", "why ", "how ", "when ", "where ", "who ", "which ",
@@ -168,7 +174,62 @@ func looksLikeQuestion(text string) bool {
 			return true
 		}
 	}
-	return false
+	// Natural questions may use declarative word order, but only a single final
+	// question mark is a reliable grant. Embedded URL punctuation and repeated
+	// marks such as a bare failure followed by `??` fail closed.
+	return strings.HasSuffix(normalized, "?") && !strings.HasSuffix(normalized, "??")
+}
+
+func explicitlyAddressesTag(text string) bool {
+	normalized := strings.TrimSpace(strings.ToLower(text))
+	if normalized == "" {
+		return false
+	}
+	unpunctuatedSocial := strings.TrimRight(normalized, " \t\r\n.!?")
+	for _, addressed := range []string{
+		"thanks tag", "thank you tag", "nice work tag", "great work tag",
+		"good work tag", "well done tag", "appreciate it tag",
+		"morning tag", "good morning tag", "afternoon tag", "good afternoon tag",
+		"evening tag", "good evening tag",
+	} {
+		if unpunctuatedSocial == addressed {
+			return true
+		}
+	}
+	if socialTagTokenPattern.MatchString(normalized) && isDirectSocialCandidate(normalized) {
+		return true
+	}
+	if coAddressedTagPattern.MatchString(normalized) || trailingTagAddressPattern.MatchString(normalized) {
+		return true
+	}
+	for _, greeting := range []string{"hey ", "hi ", "hello "} {
+		if strings.HasPrefix(normalized, greeting) {
+			normalized = strings.TrimSpace(strings.TrimPrefix(normalized, greeting))
+			break
+		}
+	}
+	if normalized == "tag" {
+		return true
+	}
+	if !strings.HasPrefix(normalized, "tag") || len(normalized) == len("tag") {
+		return false
+	}
+	remainder := strings.TrimSpace(normalized[len("tag"):])
+	if remainder == "" {
+		return true
+	}
+	first, _ := utf8.DecodeRuneInString(remainder)
+	if strings.ContainsRune(",!—–-", first) {
+		return true
+	}
+	if strings.ContainsRune(":;", first) {
+		_, size := utf8.DecodeRuneInString(remainder)
+		remainder = strings.TrimSpace(remainder[size:])
+	}
+	// Unpunctuated leading addresses remain natural when followed by an actual
+	// question or request ("Tag can you check this"). Merely using the ordinary
+	// noun "tag" elsewhere in a sentence grants no authority.
+	return looksLikeQuestion(remainder) || looksLikeExplicitRequest(remainder)
 }
 
 func looksLikeExplicitRequest(text string) bool {

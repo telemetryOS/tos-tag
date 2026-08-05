@@ -199,6 +199,9 @@ The classifier service suppresses an unauthorized recommendation with
 `policy.unsolicited_assist_work`, and the pipeline applies the same check again
 immediately before admission. Proactive channels retain classifier-gated
 initiative for declarative failures and incidents.
+The invocation parser strips URL query punctuation before recognizing
+questions, rejects repeated `??` as malformed authority, and distinguishes a
+vocative Tag address from ordinary uses of the noun `tag`.
 
 Natural messages are evaluated without prompt-like hints such as “stay silent”
 or “reply in a thread.” Those phrases are tested only when they are the user's
@@ -620,7 +623,7 @@ tests, vet, behavioral evals, gosec, and govulncheck. Network and credential
 tests are opt-in. `integration/codex_live_test.go` verifies the installed App
 Server handshake, dynamic-tool registration, model/effort routing, structured
 output, event normalization, and teardown against a real authenticated Codex
-runtime. `make eval-live` sends the 48 natural classifier messages through the
+runtime. `make eval-live` sends the 52 natural classifier messages through the
 configured direct OpenAI provider and scores outcomes, source grounding,
 restricted disclosure, placement, reaction semantics, and model/effort routing;
 fixture names and expected results are never part of the provider request.

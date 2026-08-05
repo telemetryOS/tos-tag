@@ -65,7 +65,7 @@ Only mark an item complete when source and verification evidence exist.
   infrastructure invariants) plus a zero-reply/zero-job `#tos-tag` canary.
 - [x] Require text-confirmed source mutation intent before applying the Linear
   redirect, keep ambient Agent Wiki report links silent, and suppress leading
-  third-party handoffs in active Tag threads before classification (`50/50`
+  third-party handoffs in active Tag threads before classification (`54/54`
   deterministic matrix with infrastructure invariants).
 - [x] Persist content-free classifier input/output/context/failure dimensions,
   record deterministic avoided calls by reason, and expose organization-scoped

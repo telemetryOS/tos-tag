@@ -97,6 +97,9 @@ for audit, suppress its effective action with
 `policy.unsolicited_assist_work`, and apply the same gate again immediately
 before pipeline admission. Only `proactive` mode may treat an unaddressed
 declarative failure or incident as initiative by itself.
+Question grants ignore URL query punctuation and require an interrogative form
+or one terminal question mark; repeated `??` fails closed. An explicit Tag
+address must use a vocative position rather than the ordinary noun `tag`.
 
 Admitted full-agent thread jobs that remain active after the configured progress
 grace period use a collapsed Slack Thinking Steps timeline. The immediate
@@ -327,7 +330,7 @@ Before completion:
 make verify
 ```
 
-The deterministic classifier gate contains 48 natural messages plus context-cap
+The deterministic classifier gate contains 52 natural messages plus context-cap
 and deduplication invariants. To run the same cases through the configured real
 OpenAI classifier, with expected behavior kept outside provider input:
 

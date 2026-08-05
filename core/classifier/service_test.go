@@ -734,6 +734,85 @@ func TestAssistInitiativeRequiresARealInvocationSignal(t *testing.T) {
 	}
 }
 
+func TestQuestionGrantRejectsURLAndRepeatedPunctuation(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		text string
+		want bool
+	}{
+		"interrogative prefix":     {text: "Can you check checkout", want: true},
+		"single terminal question": {text: "Checkout is unavailable?", want: true},
+		"embedded question":        {text: "Can anyone help? Checkout is unavailable.", want: true},
+		"bare declaration":         {text: "Checkout is unavailable.", want: false},
+		"repeated punctuation":     {text: "Checkout is unavailable??", want: false},
+		"plain URL query":          {text: "Checkout is unavailable; status: https://status.example/incidents?id=427", want: false},
+		"Slack URL query":          {text: "Checkout is unavailable; status: <https://status.example/incidents?id=427|incident 427>", want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := looksLikeQuestion(testCase.text); got != testCase.want {
+				t.Fatalf("looksLikeQuestion(%q)=%v want %v", testCase.text, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestExplicitTagAddressRequiresVocativeUse(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		text string
+		want bool
+	}{
+		"leading punctuation":         {text: "Tag, checkout is unavailable.", want: true},
+		"leading natural question":    {text: "Tag can you check checkout", want: true},
+		"leading greeting":            {text: "Hey Tag: check checkout", want: true},
+		"mid-sentence greeting":       {text: "Morning, Tag. Hope your queues are behaving.", want: true},
+		"mid-sentence praise":         {text: "Nice work, Tag — thanks for sticking with it.", want: true},
+		"co-address after user":       {text: "<@U03404W4Z>, Tag, summarize this for both of us.", want: true},
+		"trailing vocative":           {text: "Checkout is unavailable, Tag!", want: true},
+		"unpunctuated social address": {text: "Thanks Tag!", want: true},
+		"colon request":               {text: "Tag: can you check checkout", want: true},
+		"ordinary noun":               {text: "Add the incident tag; checkout is unavailable.", want: false},
+		"ordinary trailing noun":      {text: "Apply the incident tag.", want: false},
+		"ordinary noun in list":       {text: "The required fields are owner, tag, priority.", want: false},
+		"field label":                 {text: "Tag: incident", want: false},
+		"embedded product name":       {text: "The tagging service is unavailable.", want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := explicitlyAddressesTag(testCase.text); got != testCase.want {
+				t.Fatalf("explicitlyAddressesTag(%q)=%v want %v", testCase.text, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestAssistRejectsMalformedSignalsThatProactiveMayActOn(t *testing.T) {
+	decision := types.ClassificationDecision{
+		Outcome: types.OutcomeStartBackgroundJob, Confidence: .99,
+		ReasonCodes: []string{"active_incident"}, ResponseIntent: "investigate the incident",
+		DisclosureClass: types.DisclosureDestinationSafe, RequiresFullAgent: true,
+		Reaction: "rotating_light", AgentModelProfile: "standard", AgentModelStrength: "standard", AgentReasoningEffort: "medium",
+	}
+	for _, text := range []string{
+		"Checkout is unavailable??",
+		"Checkout is unavailable; status: https://status.example/incidents?id=427",
+		"Checkout is unavailable; status: <https://status.example/incidents?id=427|incident 427>",
+		"Add the incident tag; checkout is unavailable.",
+	} {
+		t.Run(text, func(t *testing.T) {
+			assist := Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Text: text}}
+			assistResult := EnforceParticipation(Result{Predicted: decision, Effective: decision}, assist, types.ContextPackRevision{})
+			if assistResult.Effective.Outcome != types.OutcomeSilent || !assistResult.Shadowed || !slices.Contains(assistResult.Effective.ReasonCodes, "policy.unsolicited_assist_work") {
+				t.Fatalf("malformed assist signal was admitted: %#v", assistResult)
+			}
+
+			proactive := assist
+			proactive.Mode = types.ModeProactive
+			proactiveResult := EnforceParticipation(Result{Predicted: decision, Effective: decision}, proactive, types.ContextPackRevision{})
+			if proactiveResult.Effective.Outcome != types.OutcomeStartBackgroundJob || proactiveResult.Shadowed {
+				t.Fatalf("proactive incident initiative was suppressed: %#v", proactiveResult)
+			}
+		})
+	}
+}
+
 func TestTimeProximateConversationalFollowupRequestIsAdmitted(t *testing.T) {
 	decision := types.ClassificationDecision{
 		Outcome: types.OutcomeReplyInChannel, Confidence: .99,
