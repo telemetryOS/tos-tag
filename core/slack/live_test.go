@@ -459,10 +459,12 @@ type fakePostMessage struct {
 	channel   string
 	calls     int
 	updates   int
+	statuses  int
 	starts    int
 	appends   int
 	stops     int
 	stopErr   error
+	statusErr error
 	updateTS  string
 	messages  []slackapi.Message
 	reactions []slackapi.ItemRef
@@ -489,6 +491,11 @@ func (f *fakePostMessage) PostMessageContext(_ context.Context, channel string, 
 func (f *fakePostMessage) UpdateMessageContext(_ context.Context, channel, timestamp string, _ ...slackapi.MsgOption) (string, string, string, error) {
 	f.channel, f.updateTS, f.updates = channel, timestamp, f.updates+1
 	return channel, timestamp, "", nil
+}
+
+func (f *fakePostMessage) SetAssistantThreadsStatusContext(_ context.Context, _ slackapi.AssistantThreadsSetStatusParameters) error {
+	f.statuses++
+	return f.statusErr
 }
 
 func (f *fakePostMessage) StartStreamContext(_ context.Context, channel string, _ ...slackapi.MsgOption) (string, string, error) {
@@ -576,8 +583,8 @@ func TestLiveDeliveryStartsUpdatesAndFinalizesThinkingSteps(t *testing.T) {
 		IdempotencyKey: "job-1/progress", TeamID: "team", ChannelID: "channel", ThreadTS: "100.1", JobID: "job-1", RecipientUserID: "user-1", Title: "Tag is working",
 		Step: types.SlackProgressStep{ID: "agent-work", Title: "Working on the request", Status: types.SlackProgressInProgress},
 	})
-	if err != nil || started.MessageTS != "stream.1" || fake.starts != 1 {
-		t.Fatalf("start=%#v starts=%d err=%v", started, fake.starts, err)
+	if err != nil || started.MessageTS != "stream.1" || fake.statuses != 1 || fake.starts != 1 {
+		t.Fatalf("start=%#v statuses=%d starts=%d err=%v", started, fake.statuses, fake.starts, err)
 	}
 	updated, err := delivery.UpdateProgress(context.Background(), types.SlackProgressUpdateRequest{TeamID: "team", ChannelID: "channel", MessageTS: started.MessageTS, JobID: "job-1", Step: types.SlackProgressStep{ID: "tool-wiki", Title: "Read Agent Wiki", Status: types.SlackProgressComplete, Sources: []types.SlackProgressSource{{URL: "https://wiki.example/page", Text: "Wiki page"}}}})
 	if err != nil || updated.MessageTS != started.MessageTS || fake.appends != 1 {
@@ -592,17 +599,27 @@ func TestLiveDeliveryStartsUpdatesAndFinalizesThinkingSteps(t *testing.T) {
 func TestLiveDeliverySendsRequiredRecipientTeamForThinkingSteps(t *testing.T) {
 	recipientTeam := ""
 	recipientUser := ""
+	status := ""
+	statusThread := ""
+	displayMode := ""
 	httpClient := fakeSlackHTTPClient{do: func(request *http.Request) (*http.Response, error) {
 		body := `{"ok":false,"error":"unexpected_endpoint"}`
 		switch request.URL.Path {
 		case "/conversations.replies":
 			body = `{"ok":true,"messages":[],"has_more":false,"response_metadata":{"next_cursor":""}}`
+		case "/assistant.threads.setStatus":
+			if err := request.ParseForm(); err != nil {
+				t.Errorf("parse thread-status form: %v", err)
+			}
+			status, statusThread = request.Form.Get("status"), request.Form.Get("thread_ts")
+			body = `{"ok":true}`
 		case "/chat.startStream":
 			if err := request.ParseForm(); err != nil {
 				t.Errorf("parse stream form: %v", err)
 			}
 			recipientTeam = request.Form.Get("recipient_team_id")
 			recipientUser = request.Form.Get("recipient_user_id")
+			displayMode = request.Form.Get("task_display_mode")
 			body = `{"ok":true,"channel":"channel","ts":"stream.1"}`
 		default:
 			t.Errorf("unexpected Slack endpoint %s", request.URL.Path)
@@ -619,6 +636,24 @@ func TestLiveDeliverySendsRequiredRecipientTeamForThinkingSteps(t *testing.T) {
 	}
 	if recipientUser != "user-1" {
 		t.Fatalf("recipient_user_id=%q", recipientUser)
+	}
+	if status != "Organizing…" || statusThread != "100.1" {
+		t.Fatalf("status=%q status_thread=%q", status, statusThread)
+	}
+	if displayMode != "plan" {
+		t.Fatalf("task_display_mode=%q", displayMode)
+	}
+}
+
+func TestLiveDeliveryContinuesWhenTransientAgentStatusFails(t *testing.T) {
+	fake := &fakePostMessage{statusErr: errors.New("status unavailable")}
+	delivery := &LiveDelivery{teamID: "team", api: fake, renderer: deliveries.NewRenderer()}
+	result, err := delivery.StartProgress(context.Background(), types.SlackProgressStartRequest{
+		IdempotencyKey: "job-1/progress", TeamID: "team", ChannelID: "channel", ThreadTS: "100.1", JobID: "job-1", RecipientUserID: "user-1", Title: "Tag is working",
+		Step: types.SlackProgressStep{ID: "agent-work", Title: "Working", Status: types.SlackProgressInProgress},
+	})
+	if err != nil || result.MessageTS != "stream.1" || fake.statuses != 1 || fake.starts != 1 {
+		t.Fatalf("result=%#v statuses=%d starts=%d err=%v", result, fake.statuses, fake.starts, err)
 	}
 }
 

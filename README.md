@@ -34,8 +34,9 @@ influence an answer sent elsewhere.
   downgrade them to equivalent standard Sections/Tables for compatibility.
 - Uses the classifier reaction as the immediate acknowledgement and starts
   Slack-native Thinking Steps only when admitted full-agent thread work remains
-  active after the configured grace period, then finalizes that same streamed
-  message with the validated answer. Quick answers skip the generic
+  active after the configured grace period. Slower jobs transition through
+  Slack's transient native `Organizing…` thread status into a plan-mode stream,
+  then finalize that same streamed message with the validated answer. Quick answers skip the generic
   `Thinking...` placeholder. Every native
   or reviewed tool and dynamically declared active skill updates one rotating
   current-action card, so completed work does not leave a stack of task cards. The
@@ -107,7 +108,8 @@ work (a channel or thread reply), the control plane immediately applies the
 classifier-selected emoji to the source message as an acknowledgement that a
 response is coming. If admitted thread work remains active after the configured
 progress grace period, it uses Slack's
-[Thinking Steps](https://slack.dev/slack-thinking-steps-ai-agents/) timeline;
+[Thinking Steps](https://slack.dev/slack-thinking-steps-ai-agents/) plan display,
+preceded by Slack's transient native thread status;
 quick answers deliver directly after the reaction without opening a stream.
 Brief classifier-selected in-channel answers remain direct because Slack
 requires streamed agent responses to have a `thread_ts`. Background and

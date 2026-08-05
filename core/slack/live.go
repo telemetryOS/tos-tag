@@ -108,6 +108,7 @@ func (t managedSocketModeTransport) EventsChannel() <-chan socketmode.Event {
 type deliveryAPI interface {
 	PostMessageContext(context.Context, string, ...slackapi.MsgOption) (string, string, error)
 	UpdateMessageContext(context.Context, string, string, ...slackapi.MsgOption) (string, string, string, error)
+	SetAssistantThreadsStatusContext(context.Context, slackapi.AssistantThreadsSetStatusParameters) error
 	StartStreamContext(context.Context, string, ...slackapi.MsgOption) (string, string, error)
 	AppendStreamContext(context.Context, string, string, ...slackapi.MsgOption) (string, string, error)
 	StopStreamContext(context.Context, string, string, ...slackapi.MsgOption) (string, string, error)
@@ -147,10 +148,23 @@ func (d *LiveDelivery) StartProgress(ctx context.Context, request types.SlackPro
 		requestLogger.WithCtx(blackbox.Ctx{"message_ts": timestamp, "duration_ms": time.Since(started).Milliseconds(), "duplicate": true}).Info("Slack Thinking Steps reconciled")
 		return types.SlackProgressResult{MessageTS: timestamp, UpdatedAt: time.Now().UTC(), Duplicate: true}, nil
 	}
+	// Use Slack's native transient agent status to bridge the handoff from the
+	// source-message acknowledgement reaction into the structured progress
+	// stream. This avoids exposing a literal message-like "Thinking..." state;
+	// failure is cosmetic and must not prevent the answer or its safe progress.
+	if err := d.api.SetAssistantThreadsStatusContext(ctx, slackapi.AssistantThreadsSetStatusParameters{
+		ChannelID: request.ChannelID,
+		ThreadTS:  request.ThreadTS,
+		Status:    "Organizing…",
+	}); err != nil {
+		requestLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "slack_error_code": slackAPIErrorCode(err)}).Warn("Slack agent status failed; continuing with progress stream")
+	} else {
+		requestLogger.Info("Slack agent status set")
+	}
 	options := []slackapi.MsgOption{
 		slackapi.MsgOptionRecipientTeamID(request.TeamID),
 		slackapi.MsgOptionRecipientUserID(request.RecipientUserID),
-		slackapi.MsgOptionTaskDisplayMode(slackapi.TaskDisplayModeTimeline),
+		slackapi.MsgOptionTaskDisplayMode(slackapi.TaskDisplayModePlan),
 		slackapi.MsgOptionChunks(slackapi.NewPlanUpdateChunk(request.Title), chunk),
 		slackapi.MsgOptionMetadata(slackapi.SlackMetadata{EventType: "tos_tag_progress", EventPayload: map[string]any{"job_id": string(request.JobID), "idempotency_key": request.IdempotencyKey}}),
 	}

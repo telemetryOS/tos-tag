@@ -199,7 +199,8 @@ Only mark an item complete when source and verification evidence exist.
   placement.
 - [x] Use immediate reactions for admitted answer acknowledgement, delay
   Slack-native Thinking Steps until a full-agent thread job outlives the
-  configured grace period, persist and reconcile the stream timestamp, expose
+  configured grace period, transition through a best-effort native thread
+  status into a plan-mode stream, persist and reconcile the stream timestamp, expose
   only safe operational milestones, and
   finalize the same message with a durable validated result.
 

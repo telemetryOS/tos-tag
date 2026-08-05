@@ -45,7 +45,10 @@ Current initiative constraints:
 - Use the immediate classifier-selected reaction as the acknowledgement for
   admitted answer work. Start Slack Thinking Steps only when a full-agent
   thread job remains active after the configured progress grace period, so
-  quick answers do not flash Slack's generic `Thinking...` placeholder. Reuse
+  quick answers do not flash Slack's generic `Thinking...` placeholder. For
+  work that outlives the grace period, set Slack's transient native thread
+  status before opening a plan-mode stream; keep status failure cosmetic and
+  continue delivery. Reuse
   one transient current-action task card for every native or
   reviewed tool and dynamically declared validated skill, replacing it as work
   advances instead of accumulating completed cards. Keep titles to safe operational facts from reviewed control-plane

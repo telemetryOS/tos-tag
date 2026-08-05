@@ -94,7 +94,8 @@ commands, tests, and active documentation have been removed.
   replies remain unadorned.
 - Durable delivery reconciliation and special-mention rejection.
 - Immediate classifier reactions plus grace-delayed Slack Thinking Steps for
-  full-agent thread jobs that remain active, with durable stream timestamps,
+  full-agent thread jobs that remain active, with a best-effort transient native
+  thread status, plan-mode display, durable stream timestamps,
   one rotating current-action card for validated skills and every
   native or reviewed tool call, same-message finalization, and ordinary-delivery
   fallback. Intentional reaction-only/direct classifier outcomes remain outside
