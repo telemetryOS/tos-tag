@@ -171,6 +171,7 @@ func RequiredIndexes() []IndexSpec {
 		{models.CollectionNoteRevisions, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "public_id", Value: 1}}, Options: unique("channel_note_public_unique")}},
 		{models.CollectionNoteRevisions, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "channel_id", Value: 1}, {Key: "state", Value: 1}}, Options: named("channel_note_active")}},
 		{models.CollectionUsage, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "created_at", Value: -1}}, Options: named("usage_recent")}},
+		{models.CollectionUsage, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "category", Value: 1}, {Key: "created_at", Value: -1}}, Options: named("usage_efficiency")}},
 		{models.CollectionSecrets, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "name", Value: 1}}, Options: unique("secret_name_unique")}},
 		{models.CollectionSecrets, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "public_id", Value: 1}}, Options: unique("secret_public_unique")}},
 		{models.CollectionAdmissionStates, mongo.IndexModel{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "team_id", Value: 1}, {Key: "channel_id", Value: 1}}, Options: unique("admission_scope_unique")}},

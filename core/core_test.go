@@ -14,6 +14,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/config"
 	"github.com/telemetryos/tos-tag/core/orgconfig"
 	"github.com/telemetryos/tos-tag/core/slack"
+	"github.com/telemetryos/tos-tag/core/usage"
 	"github.com/telemetryos/tos-tag/types"
 )
 
@@ -72,13 +73,40 @@ func (failingClassifier) Decide(context.Context, classifier.Target, types.Contex
 }
 
 func TestLoggedClassifierUsesConservativeDeterministicFallback(t *testing.T) {
-	logged := loggedClassifier{next: failingClassifier{}, logger: blackbox.New()}
-	decision, err := logged.Decide(context.Background(), classifier.Target{Envelope: types.SlackEnvelope{Text: "Can you help?"}, Mode: types.ModeAssist}, types.ContextPackRevision{})
+	usageStore := usage.NewMemory()
+	logged := loggedClassifier{next: failingClassifier{}, logger: blackbox.New(), usage: usageStore, providerID: "openai", modelID: "classifier-test"}
+	decision, err := logged.Decide(context.Background(), classifier.Target{Envelope: types.SlackEnvelope{OrganizationID: "org", Text: "Can you help?"}, Mode: types.ModeAssist}, types.ContextPackRevision{TotalTokens: 42})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if decision.Outcome != types.OutcomeReplyInThread || len(decision.ReasonCodes) < 2 || decision.ReasonCodes[0] != "classifier.deterministic_fallback" {
 		t.Fatalf("fallback decision = %#v", decision)
+	}
+	events, err := usageStore.List(context.Background(), "org", 10)
+	if err != nil || len(events) != 1 || events[0].EfficiencyAccountingVersion != usage.ClassifierEfficiencyAccountingVersion || events[0].Calls != 1 || events[0].FailedCalls != 1 || events[0].ContextPackTokens != 42 || events[0].Outcome != "provider_error" {
+		t.Fatalf("failure usage events=%#v err=%v", events, err)
+	}
+}
+
+type successfulClassifier struct{}
+
+func (successfulClassifier) Decide(context.Context, classifier.Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+	return types.ClassificationDecision{Outcome: types.OutcomeSilent, ReasonCodes: []string{"ambient.no_action"}, ClassifierInputTokens: 125, ClassifierOutputTokens: 7}, nil
+}
+
+func TestLoggedClassifierRecordsTokenEfficiencyDimensions(t *testing.T) {
+	usageStore := usage.NewMemory()
+	logged := loggedClassifier{next: successfulClassifier{}, logger: blackbox.New(), usage: usageStore, providerID: "openai", modelID: "classifier-test"}
+	if _, err := logged.Decide(context.Background(), classifier.Target{Envelope: types.SlackEnvelope{OrganizationID: "org"}}, types.ContextPackRevision{TotalTokens: 25}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := usageStore.List(context.Background(), "org", 10)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("usage events=%#v err=%v", events, err)
+	}
+	event := events[0]
+	if event.Category != usage.CategoryClassifier || event.EfficiencyAccountingVersion != usage.ClassifierEfficiencyAccountingVersion || event.Calls != 1 || event.FailedCalls != 0 || event.InputTokens != 125 || event.OutputTokens != 7 || event.ContextPackTokens != 25 || event.Outcome != "silent" || event.ReasonCode != "" {
+		t.Fatalf("usage event = %#v", event)
 	}
 }
 

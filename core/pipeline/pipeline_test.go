@@ -33,6 +33,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/sessions"
 	"github.com/telemetryos/tos-tag/core/slack"
 	"github.com/telemetryos/tos-tag/core/triggers"
+	"github.com/telemetryos/tos-tag/core/usage"
 	"github.com/telemetryos/tos-tag/models"
 	"github.com/telemetryos/tos-tag/types"
 )
@@ -550,6 +551,8 @@ func TestLongMentionStartsThinkingStepsAfterReactionGrace(t *testing.T) {
 
 func TestClassifierFloodProtectionDropsBeforeProviderOrAgent(t *testing.T) {
 	system := newTestSystem(t)
+	usageStore := usage.NewMemory()
+	system.pipeline.deps.Usage = usageStore
 	gate, err := flood.NewMemory(1, time.Hour, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -597,6 +600,10 @@ func TestClassifierFloodProtectionDropsBeforeProviderOrAgent(t *testing.T) {
 	if len(system.transport.Requests()) != 0 || len(system.transport.ReactionRequests()) != 0 {
 		t.Fatalf("flooded messages produced Slack output: requests=%#v reactions=%#v", system.transport.Requests(), system.transport.ReactionRequests())
 	}
+	events, err := usageStore.List(context.Background(), "org-test", 10)
+	if err != nil || len(events) != 1 || events[0].Category != usage.CategoryClassifierAvoided || events[0].EfficiencyAccountingVersion != usage.ClassifierEfficiencyAccountingVersion || events[0].AvoidedProviderCalls != 1 || events[0].ReasonCode != "safety.classifier_flood_limit" {
+		t.Fatalf("flood usage events=%#v err=%v", events, err)
+	}
 }
 
 type countingIntelligenceProjector struct{ calls atomic.Int64 }
@@ -608,6 +615,8 @@ func (p *countingIntelligenceProjector) Project(context.Context, models.Observat
 
 func TestAmbientLinkOnlyAndDeletedTurnsStopBeforeContextOrProvider(t *testing.T) {
 	system := newTestSystem(t)
+	usageStore := usage.NewMemory()
+	system.pipeline.deps.Usage = usageStore
 	var providerCalls atomic.Int64
 	service, err := classifier.New(classifierFunc(func(context.Context, classifier.Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
 		providerCalls.Add(1)
@@ -664,6 +673,15 @@ func TestAmbientLinkOnlyAndDeletedTurnsStopBeforeContextOrProvider(t *testing.T)
 		}
 		if decision.Result.Effective.Outcome != types.OutcomeSilent || decision.Result.Effective.ReasonCodes[0] != tests[index].reason {
 			t.Fatalf("decision %d = %#v", index, decision.Result.Effective)
+		}
+	}
+	events, err := usageStore.List(context.Background(), "org-test", 10)
+	if err != nil || len(events) != len(tests) {
+		t.Fatalf("avoidance usage events=%#v err=%v", events, err)
+	}
+	for _, event := range events {
+		if event.Category != usage.CategoryClassifierAvoided || event.EfficiencyAccountingVersion != usage.ClassifierEfficiencyAccountingVersion || event.AvoidedProviderCalls != 1 || event.Calls != 0 || event.ContextPackTokens != 0 {
+			t.Fatalf("avoidance usage event = %#v", event)
 		}
 	}
 }

@@ -678,6 +678,32 @@ provider bodies, tool arguments/results, or credentials. Durable authority
 remains Mongo audit/usage state plus the separately configured owner-readable
 JSONL log.
 
+Classifier usage records retain content-free efficiency dimensions for every
+provider attempt: exact provider input/output tokens, the context-pack token
+estimate, latency, outcome, bounded failure code, and failure count. Deterministic
+pre-classification gates record a separate `classifier_avoided` event with the
+reason and avoided-call count; message text and provider bodies are never
+copied into usage.
+
+For the daily token-efficiency check, query:
+
+```text
+GET /admin/api/usage/classifier-efficiency?organization_id=<organization>&days=14&timezone=America%2FVancouver
+```
+
+The organization-scoped report returns daily and period totals for candidate
+decisions, provider calls/failures, calls avoided by deterministic gates,
+input/output/context tokens, average and maximum classifier input, silent
+provider recommendations, and avoided reasons. Provider token counts are exact.
+Calls recorded before efficiency accounting was deployed retain their exact
+input/output totals but are reported as `uninstrumented_provider_calls`; they
+are never guessed to be successful and have no context/outcome coverage.
+`estimated_avoided_input_tokens` is deliberately labeled as an estimate: it is
+the avoided-call count multiplied by the measured classifier input average in
+the same day or total period, and is zero when that bucket has no measured call.
+The endpoint accepts 1–31 days and a valid IANA timezone; the default is 14 days
+in UTC.
+
 Use the secondary **Agent memory** page to inspect source-linked summaries and
 facts or to correct, pin, and forget them. Memory model calls are recorded as
 content-free `memory_curation` usage and lifecycle logs; prompts and results do

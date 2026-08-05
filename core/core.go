@@ -367,7 +367,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	srv, err := server.New(server.Dependencies{
 		Config: cfg, Logger: logger, Activity: activityFeed, Health: db, Ingress: statusIngress, Transport: statusTransport,
 		Jobs: jobQueue, Deliveries: deliveryQueue, Decisions: decisionStore, Version: Version,
-		Routes: responseRouter, Organizations: organizationStore, Retention: retentionJanitor, Records: managementRecords, ChannelConfig: channelConfiguration, Marketplaces: marketplaceRegistry, ToolMarketplaces: toolMarketplaceRegistry, Intelligence: intelligenceProjector, Memory: memoryStore, Secrets: secretStore, Audit: auditChain, Approvals: approvalStore, ApprovalCoordinator: approvalCoordinator, Routines: routineStore, Triggers: triggerStore, Sessions: sessionStore,
+		Routes: responseRouter, Organizations: organizationStore, Retention: retentionJanitor, Records: managementRecords, ChannelConfig: channelConfiguration, Marketplaces: marketplaceRegistry, ToolMarketplaces: toolMarketplaceRegistry, Intelligence: intelligenceProjector, Memory: memoryStore, Secrets: secretStore, Audit: auditChain, Approvals: approvalStore, ApprovalCoordinator: approvalCoordinator, Routines: routineStore, Triggers: triggerStore, Sessions: sessionStore, Usage: usageRecorder,
 	})
 	if err != nil {
 		return nil, err
@@ -474,17 +474,23 @@ func (c loggedClassifier) Decide(ctx context.Context, target classifier.Target, 
 	decision, err := c.next.Decide(ctx, target, pack)
 	if err != nil {
 		duration := time.Since(started)
+		classifierCode := classifier.ErrorCode(err)
 		c.logger.WithCtx(blackbox.Ctx{
-			"organization_id":  target.Envelope.OrganizationID,
-			"channel_id":       target.Envelope.ChannelID,
-			"observation_id":   target.ObservationID,
-			"classifier_stage": classifier.ErrorStage(err),
-			"classifier_code":  classifier.ErrorCode(err),
-			"error_type":       fmt.Sprintf("%T", err),
-			"duration_ms":      duration.Milliseconds(),
+			"organization_id":       target.Envelope.OrganizationID,
+			"channel_id":            target.Envelope.ChannelID,
+			"observation_id":        target.ObservationID,
+			"classifier_stage":      classifier.ErrorStage(err),
+			"classifier_code":       classifierCode,
+			"error_type":            fmt.Sprintf("%T", err),
+			"duration_ms":           duration.Milliseconds(),
+			"context_pack_tokens":   pack.TotalTokens,
+			"provider_calls":        1,
+			"failed_provider_calls": 1,
 		}).Warn("OpenAI classifier failed; deterministic fallback selected")
 		if c.usage != nil {
-			_ = c.usage.Record(ctx, usage.Event{OrganizationID: target.Envelope.OrganizationID, Category: "classifier", ProviderID: c.providerID, ModelID: c.modelID, Calls: 1, DurationMS: duration.Milliseconds()})
+			if usageErr := c.usage.Record(ctx, usage.Event{OrganizationID: target.Envelope.OrganizationID, Category: usage.CategoryClassifier, ProviderID: c.providerID, ModelID: c.modelID, ContextPackTokens: int64(pack.TotalTokens), EfficiencyAccountingVersion: usage.ClassifierEfficiencyAccountingVersion, Calls: 1, FailedCalls: 1, Outcome: "provider_error", ReasonCode: classifierCode, DurationMS: duration.Milliseconds()}); usageErr != nil {
+				c.logger.WithCtx(blackbox.Ctx{"organization_id": target.Envelope.OrganizationID, "error_type": fmt.Sprintf("%T", usageErr)}).Warn("classifier usage accounting failed")
+			}
 		}
 		fallback, fallbackErr := (classifier.DeterministicClassifier{}).Decide(ctx, target, pack)
 		if fallbackErr != nil {
@@ -494,25 +500,35 @@ func (c loggedClassifier) Decide(ctx context.Context, target classifier.Target, 
 		return fallback, nil
 	}
 	duration := time.Since(started)
+	estimatedNonContextInputTokens := decision.ClassifierInputTokens - int64(pack.TotalTokens)
+	if estimatedNonContextInputTokens < 0 {
+		estimatedNonContextInputTokens = 0
+	}
 	c.logger.WithCtx(blackbox.Ctx{
-		"organization_id":             target.Envelope.OrganizationID,
-		"channel_id":                  target.Envelope.ChannelID,
-		"observation_id":              target.ObservationID,
-		"recommended_outcome":         decision.Outcome,
-		"recommended_confidence":      decision.Confidence,
-		"recommended_reaction":        decision.Reaction,
-		"recommended_agent_profile":   decision.AgentModelProfile,
-		"recommended_agent_strength":  decision.AgentModelStrength,
-		"recommended_agent_effort":    decision.AgentReasoningEffort,
-		"classifier_response_id":      decision.ClassifierResponseID,
-		"classifier_model":            decision.ClassifierModel,
-		"classifier_reasoning_effort": decision.ClassifierReasoningEffort,
-		"input_tokens":                decision.ClassifierInputTokens,
-		"output_tokens":               decision.ClassifierOutputTokens,
-		"duration_ms":                 duration.Milliseconds(),
+		"organization_id":                    target.Envelope.OrganizationID,
+		"channel_id":                         target.Envelope.ChannelID,
+		"observation_id":                     target.ObservationID,
+		"recommended_outcome":                decision.Outcome,
+		"recommended_confidence":             decision.Confidence,
+		"recommended_reaction":               decision.Reaction,
+		"recommended_agent_profile":          decision.AgentModelProfile,
+		"recommended_agent_strength":         decision.AgentModelStrength,
+		"recommended_agent_effort":           decision.AgentReasoningEffort,
+		"classifier_response_id":             decision.ClassifierResponseID,
+		"classifier_model":                   decision.ClassifierModel,
+		"classifier_reasoning_effort":        decision.ClassifierReasoningEffort,
+		"input_tokens":                       decision.ClassifierInputTokens,
+		"output_tokens":                      decision.ClassifierOutputTokens,
+		"context_pack_tokens":                pack.TotalTokens,
+		"estimated_non_context_input_tokens": estimatedNonContextInputTokens,
+		"provider_calls":                     1,
+		"failed_provider_calls":              0,
+		"duration_ms":                        duration.Milliseconds(),
 	}).Info("OpenAI classifier request completed")
 	if c.usage != nil {
-		_ = c.usage.Record(ctx, usage.Event{OrganizationID: target.Envelope.OrganizationID, Category: "classifier", ProviderID: c.providerID, ModelID: c.modelID, InputTokens: decision.ClassifierInputTokens, OutputTokens: decision.ClassifierOutputTokens, Calls: 1, DurationMS: duration.Milliseconds()})
+		if usageErr := c.usage.Record(ctx, usage.Event{OrganizationID: target.Envelope.OrganizationID, Category: usage.CategoryClassifier, ProviderID: c.providerID, ModelID: c.modelID, InputTokens: decision.ClassifierInputTokens, OutputTokens: decision.ClassifierOutputTokens, ContextPackTokens: int64(pack.TotalTokens), EfficiencyAccountingVersion: usage.ClassifierEfficiencyAccountingVersion, Calls: 1, Outcome: string(decision.Outcome), DurationMS: duration.Milliseconds()}); usageErr != nil {
+			c.logger.WithCtx(blackbox.Ctx{"organization_id": target.Envelope.OrganizationID, "error_type": fmt.Sprintf("%T", usageErr)}).Warn("classifier usage accounting failed")
+		}
 	}
 	return decision, err
 }

@@ -67,6 +67,10 @@ Only mark an item complete when source and verification evidence exist.
   redirect, keep ambient Agent Wiki report links silent, and suppress leading
   third-party handoffs in active Tag threads before classification (`50/50`
   deterministic matrix with infrastructure invariants).
+- [x] Persist content-free classifier input/output/context/failure dimensions,
+  record deterministic avoided calls by reason, and expose organization-scoped
+  daily efficiency totals with estimates kept distinct from exact provider
+  token usage.
 - [x] Fall back conservatively on timeout or malformed output.
 
 ## 4. Durable jobs and concurrency

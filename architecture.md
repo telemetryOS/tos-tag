@@ -556,6 +556,18 @@ run, and usage record carries correlation identifiers. Operator diagnostics can
 be written to an owner-readable JSONL file, while durable audit receipts remain
 in MongoDB.
 
+Classifier accounting distinguishes provider work from deterministic avoidance.
+Each provider attempt records exact input/output tokens, the context-pack token
+estimate, outcome, bounded failure code, latency, and failure count. A turn
+stopped before context retrieval or by the organization flood gate records a
+content-free `classifier_avoided` event instead of a provider call. The
+organization-scoped daily efficiency projection groups those durable events in
+an operator-selected IANA timezone. Exact counters remain separate from the
+explicitly labeled avoided-token estimate, which uses the measured average
+classifier input for the same reporting bucket. Pre-rollout rows retain exact
+input/output totals but are counted as uninstrumented; the projection does not
+infer their success, context size, or recommended outcome.
+
 The management home page is an organization-scoped real-time activity feed.
 A bounded in-memory hub receives safe structured lifecycle logs plus explicit
 classifier and Codex protocol events, replays its recent window, and streams new

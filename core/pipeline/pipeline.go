@@ -898,13 +898,24 @@ func (p *Pipeline) recordPreclassificationSuppression(ctx context.Context, obser
 		return fmt.Errorf("record preclassification suppression: %w", err)
 	}
 	p.deps.Logger.WithCtx(blackbox.Ctx{
-		"organization_id": target.Envelope.OrganizationID,
-		"team_id":         target.Envelope.TeamID,
-		"channel_id":      target.Envelope.ChannelID,
-		"observation_id":  observation.PublicID,
-		"decision_id":     recorded.ID,
-		"reason_codes":    recorded.Result.Effective.ReasonCodes,
+		"organization_id":        target.Envelope.OrganizationID,
+		"team_id":                target.Envelope.TeamID,
+		"channel_id":             target.Envelope.ChannelID,
+		"observation_id":         observation.PublicID,
+		"decision_id":            recorded.ID,
+		"reason_codes":           recorded.Result.Effective.ReasonCodes,
+		"avoided_provider_calls": 1,
+		"context_pack_tokens":    0,
 	}).Info("observation deterministically suppressed before context retrieval")
+	if p.deps.Usage != nil {
+		reasonCode := ""
+		if len(recorded.Result.Effective.ReasonCodes) > 0 {
+			reasonCode = recorded.Result.Effective.ReasonCodes[0]
+		}
+		if usageErr := p.deps.Usage.Record(ctx, usage.Event{OrganizationID: target.Envelope.OrganizationID, Category: usage.CategoryClassifierAvoided, EfficiencyAccountingVersion: usage.ClassifierEfficiencyAccountingVersion, AvoidedProviderCalls: 1, Outcome: string(types.OutcomeSilent), ReasonCode: reasonCode}); usageErr != nil {
+			p.deps.Logger.WithCtx(blackbox.Ctx{"organization_id": target.Envelope.OrganizationID, "observation_id": observation.PublicID, "error_type": fmt.Sprintf("%T", usageErr)}).Warn("classifier avoidance accounting failed")
+		}
+	}
 	p.publishClassificationActivity(target.Envelope, recorded)
 	p.appendReceipt(ctx, audit.AppendRequest{
 		OrganizationID: target.Envelope.OrganizationID,
@@ -933,14 +944,16 @@ func (p *Pipeline) recordFloodDrop(ctx context.Context, observation models.Obser
 		return fmt.Errorf("record classifier flood-protection drop: %w", err)
 	}
 	logContext := blackbox.Ctx{
-		"organization_id": envelope.OrganizationID,
-		"team_id":         envelope.TeamID,
-		"channel_id":      envelope.ChannelID,
-		"observation_id":  observation.PublicID,
-		"decision_id":     recorded.ID,
-		"reason_code":     reason,
-		"bucket_count":    budget.Count,
-		"bucket_limit":    budget.Limit,
+		"organization_id":        envelope.OrganizationID,
+		"team_id":                envelope.TeamID,
+		"channel_id":             envelope.ChannelID,
+		"observation_id":         observation.PublicID,
+		"decision_id":            recorded.ID,
+		"reason_code":            reason,
+		"bucket_count":           budget.Count,
+		"bucket_limit":           budget.Limit,
+		"avoided_provider_calls": 1,
+		"context_pack_tokens":    0,
 	}
 	if !budget.WindowStart.IsZero() {
 		logContext["window_start"] = budget.WindowStart.Format(time.RFC3339)
@@ -950,6 +963,11 @@ func (p *Pipeline) recordFloodDrop(ctx context.Context, observation models.Obser
 		logContext["error_type"] = fmt.Sprintf("%T", gateErr)
 	}
 	p.deps.Logger.WithCtx(logContext).Warn("classifier flood protection dropped observation before model call")
+	if p.deps.Usage != nil {
+		if usageErr := p.deps.Usage.Record(ctx, usage.Event{OrganizationID: envelope.OrganizationID, Category: usage.CategoryClassifierAvoided, EfficiencyAccountingVersion: usage.ClassifierEfficiencyAccountingVersion, AvoidedProviderCalls: 1, Outcome: string(types.OutcomeSilent), ReasonCode: reason}); usageErr != nil {
+			p.deps.Logger.WithCtx(blackbox.Ctx{"organization_id": envelope.OrganizationID, "observation_id": observation.PublicID, "error_type": fmt.Sprintf("%T", usageErr)}).Warn("classifier avoidance accounting failed")
+		}
+	}
 	p.publishClassificationActivity(envelope, recorded)
 	p.appendReceipt(ctx, audit.AppendRequest{
 		OrganizationID: envelope.OrganizationID,

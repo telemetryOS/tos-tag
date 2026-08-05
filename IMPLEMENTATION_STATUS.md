@@ -133,7 +133,10 @@ commands, tests, and active documentation have been removed.
 - Correlated redacted file logging, usage records, audit chains, TTL cleanup,
   and an activity-first management UI. Its organization-scoped SSE feed pairs
   bounded public Slack excerpts with classifier outcomes and shows payload-free
-  Codex protocol lifecycle; restricted content remains hidden.
+  Codex protocol lifecycle; restricted content remains hidden. Durable
+  classifier usage separates exact provider calls/tokens/failures from
+  deterministic avoided calls and exposes a timezone-aware 1–31 day efficiency
+  report with explicitly labeled avoided-token estimates.
 - Persistent Compose workspace/home/Mongo with disposable per-job roots.
 - Graduated response delivery: short/medium answers remain Slack-native, while
   genuinely document-sized expository work is published to Agent Wiki
