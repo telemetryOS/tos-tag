@@ -97,6 +97,11 @@ var (
 	errExecutionRevoked   = errors.New("job execution authorization revoked")
 )
 
+const (
+	maxProducedFiles     = 4
+	maxProducedFileBytes = 12 << 20
+)
+
 const currentAgentRuntimeContract = `Current tos-tag runtime facts are authoritative over Slack history:
 - Ambient classification is a direct, stateless, tool-free OpenAI Responses API call.
 - Admitted full-agent work runs through Codex App Server in a disposable worker.
@@ -2106,6 +2111,7 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 	var output strings.Builder
 	producedArtifactURLs := make(map[string]struct{})
 	var producedFiles []types.SlackFileUpload
+	producedFileBytes := 0
 	resolvedWikiReferenceURLs := make(map[string]string)
 	completedToolOperations := make(map[string]struct{})
 	reportedToolStatuses := make(map[string]string)
@@ -2199,7 +2205,11 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 				}
 			} else if event.Type == "file.produced" {
 				if file, ok := event.Data["file"].(types.SlackFileUpload); ok && len(file.Data) > 0 {
+					if len(producedFiles) >= maxProducedFiles || producedFileBytes+len(file.Data) > maxProducedFileBytes {
+						return types.SlackResult{}, errors.New("generated images exceed the durable delivery limit")
+					}
 					producedFiles = append(producedFiles, file)
+					producedFileBytes += len(file.Data)
 					setAgentStatus("Preparing the generated image…")
 				}
 			} else if event.Type == "wiki.reference.resolved" {
