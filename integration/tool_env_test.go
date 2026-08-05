@@ -1,16 +1,29 @@
 package integration
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestToolEnvironmentSyncIsNarrowAndDoesNotPrintValues(t *testing.T) {
 	runtimeFile := filepath.Join(t.TempDir(), "runtime.env")
 	codeRoot := t.TempDir()
+	semanticBin := filepath.Join(t.TempDir(), "semble")
+	modelRoot := t.TempDir()
+	githubConfig := t.TempDir()
+	snapshotRoot := t.TempDir()
+	indexRoot := t.TempDir()
+	if err := os.WriteFile(semanticBin, []byte("#!/bin/sh\nprintf '0.5.3\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modelRoot, ".tos-tag-model-revision"), []byte("e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(runtimeFile, []byte("TAG__KEYSTORE__MASTER_KEY='test-master-key-placeholder'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -24,6 +37,11 @@ func TestToolEnvironmentSyncIsNarrowAndDoesNotPrintValues(t *testing.T) {
 		"DLA_API_KEY":             "dla-fixture-secret",
 		"DLA_ENV":                 "qa",
 		"TAG_AION_DEVELOPER_PATH": codeRoot,
+		"TAG_CODE_SEMBLE_BIN":     semanticBin,
+		"TAG_CODE_SNAPSHOT_ROOT":  snapshotRoot,
+		"TAG_CODE_INDEX_ROOT":     indexRoot,
+		"TAG_CODE_MODEL_PATH":     modelRoot,
+		"TAG_CODE_GH_CONFIG_DIR":  githubConfig,
 	}
 	command := exec.Command("bash", filepath.Join("..", "scripts", "sync-tool-env.sh"), runtimeFile)
 	command.Env = filteredEnvironment(fixtures)
@@ -41,6 +59,9 @@ func TestToolEnvironmentSyncIsNarrowAndDoesNotPrintValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name := range fixtures {
+		if name == "TAG_CODE_SEMBLE_BIN" {
+			continue
+		}
 		if !strings.Contains(string(contents), name+"=") {
 			t.Fatalf("runtime file missing %s", name)
 		}
@@ -50,6 +71,10 @@ func TestToolEnvironmentSyncIsNarrowAndDoesNotPrintValues(t *testing.T) {
 		"TAG__MARKETPLACES__TOOLS_ENABLED='true'",
 		"TAG__KEYSTORE__ENABLED='true'",
 		"TAG_AION_DEVELOPER_PATH=",
+		"TAG_CODE_SNAPSHOT_ROOT=",
+		"TAG_CODE_INDEX_ROOT=",
+		"TAG_CODE_MODEL_PATH=",
+		"TAG_CODE_GH_CONFIG_DIR=",
 	} {
 		if !strings.Contains(string(contents), expected) {
 			t.Fatalf("runtime file missing %s", expected)
@@ -83,13 +108,51 @@ func TestReviewedCodeToolReadsSourceAndRejectsSensitivePaths(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(repository, "escape")); err != nil {
 		t.Fatal(err)
 	}
+	if output, err := exec.Command("git", "init", "--quiet", repository).CombinedOutput(); err != nil {
+		t.Fatalf("init source repository: %v: %s", err, output)
+	}
+	snapshotRoot := t.TempDir()
+	indexRoot := t.TempDir()
+	modelRoot := t.TempDir()
+	githubConfig := t.TempDir()
+	fakeBin := t.TempDir()
+	commit := strings.Repeat("a", 40)
+	snapshotRepository := filepath.Join(snapshotRoot, "repos", "Repo", commit)
+	if err := os.MkdirAll(snapshotRepository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string]string{"main.go": "package main\n\nconst needle = true\n", ".env": "SECRET=never-read\n"} {
+		if err := os.WriteFile(filepath.Join(snapshotRepository, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(outside, filepath.Join(snapshotRepository, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(snapshotRoot, "receipts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	receipt := fmt.Sprintf(`{"repository":"Repo","default_branch":"main","commit":"%s","fetched_at":"%s","fetched_at_epoch":%d,"status":"current"}`+"\n", commit, time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Unix())
+	if err := os.WriteFile(filepath.Join(snapshotRoot, "receipts", "Repo.json"), []byte(receipt), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modelRoot, ".tos-tag-model-revision"), []byte("e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "semble"), []byte("#!/bin/sh\nprintf '0.5.3\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join("..", "tool-marketplace", "tools", "code", "run.sh")
 	run := func(arguments ...string) ([]byte, error) {
 		command := exec.Command(path, arguments...)
 		command.Env = filteredEnvironment(map[string]string{
 			"TOS_TAG_OPERATION_ID":    "read",
 			"TAG_AION_DEVELOPER_PATH": root,
-			"PATH":                    "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+			"TAG_CODE_SNAPSHOT_ROOT":  snapshotRoot,
+			"TAG_CODE_INDEX_ROOT":     indexRoot,
+			"TAG_CODE_MODEL_PATH":     modelRoot,
+			"TAG_CODE_GH_CONFIG_DIR":  githubConfig,
+			"PATH":                    fakeBin + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
 		})
 		return command.CombinedOutput()
 	}
@@ -144,6 +207,9 @@ func TestReviewedToolWrappersRejectBoundaryOverrides(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "semble"), []byte("#!/bin/sh\nif [ \"${1:-}\" = --version ]; then printf '0.5.3\\n'; fi\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	cases := []struct {
 		name      string
 		tool      string
@@ -170,6 +236,13 @@ func TestReviewedToolWrappersRejectBoundaryOverrides(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			snapshotRoot := t.TempDir()
+			indexRoot := t.TempDir()
+			modelRoot := t.TempDir()
+			githubConfig := t.TempDir()
+			if err := os.WriteFile(filepath.Join(modelRoot, ".tos-tag-model-revision"), []byte("e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			path := filepath.Join("..", "tool-marketplace", "tools", tc.tool, "run.sh")
 			command := exec.Command(path, tc.args...)
 			command.Env = filteredEnvironment(map[string]string{
@@ -177,6 +250,10 @@ func TestReviewedToolWrappersRejectBoundaryOverrides(t *testing.T) {
 				"WIKI_URL":                "https://wiki.example.test",
 				"WIKI_TOKEN":              "wiki-fixture-secret",
 				"TAG_AION_DEVELOPER_PATH": t.TempDir(),
+				"TAG_CODE_SNAPSHOT_ROOT":  snapshotRoot,
+				"TAG_CODE_INDEX_ROOT":     indexRoot,
+				"TAG_CODE_MODEL_PATH":     modelRoot,
+				"TAG_CODE_GH_CONFIG_DIR":  githubConfig,
 				"PATH":                    fakeBin + ":/usr/bin:/bin",
 			})
 			output, err := command.CombinedOutput()

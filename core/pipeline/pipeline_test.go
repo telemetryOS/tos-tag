@@ -25,6 +25,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/deliveries"
 	"github.com/telemetryos/tos-tag/core/flood"
 	"github.com/telemetryos/tos-tag/core/harness"
+	"github.com/telemetryos/tos-tag/core/intelligence"
 	"github.com/telemetryos/tos-tag/core/jobs"
 	agentmemory "github.com/telemetryos/tos-tag/core/memory"
 	"github.com/telemetryos/tos-tag/core/observer"
@@ -32,6 +33,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/sessions"
 	"github.com/telemetryos/tos-tag/core/slack"
 	"github.com/telemetryos/tos-tag/core/triggers"
+	"github.com/telemetryos/tos-tag/core/usage"
 	"github.com/telemetryos/tos-tag/models"
 	"github.com/telemetryos/tos-tag/types"
 )
@@ -382,10 +384,15 @@ type testSystem struct {
 }
 
 func newTestSystem(t *testing.T) testSystem {
+	return newTestSystemWithHarness(t, nil, config.DefaultConfiguration.Jobs.ProgressDelay)
+}
+
+func newTestSystemWithHarness(t *testing.T, workerHarness harness.Harness, progressDelay time.Duration) testSystem {
 	t.Helper()
 	cfg := config.DefaultConfiguration
 	cfg.Jobs.Poll = 2 * time.Millisecond
 	cfg.Jobs.Lease = time.Second
+	cfg.Jobs.ProgressDelay = progressDelay
 	builder, err := contextpacks.New(cfg.ContextPacks, contextpacks.WordTokenizer{})
 	if err != nil {
 		t.Fatal(err)
@@ -418,6 +425,7 @@ func newTestSystem(t *testing.T) testSystem {
 		Classifier:      classificationService,
 		FloodProtection: floodGate,
 		Renderer:        deliveries.NewRenderer(),
+		Harness:         workerHarness,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -466,8 +474,8 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 	if reactions := system.transport.ReactionRequests(); len(reactions) != 1 || reactions[0].Emoji == "" || reactions[0].ChannelID != message.ChannelID || reactions[0].MessageTS != message.MessageTS {
 		t.Fatalf("admitted answer work did not immediately acknowledge the source message with a classifier reaction: %#v", reactions)
 	}
-	if starts := system.transport.ProgressStarts(); len(starts) != 1 || starts[0].ChannelID != message.ChannelID || starts[0].ThreadTS != message.MessageTS || starts[0].Step.Status != types.SlackProgressInProgress {
-		t.Fatalf("Thinking Steps starts = %#v", starts)
+	if starts := system.transport.ProgressStarts(); len(starts) != 0 {
+		t.Fatalf("quick answer incorrectly started Thinking Steps: %#v", starts)
 	}
 	activityRecords := system.activity.Snapshot(message.OrganizationID, 10)
 	if len(activityRecords) != 1 || activityRecords[0].Category != "classifier" || activityRecords[0].Message != message.Text || activityRecords[0].Details["outcome"] != string(types.OutcomeReplyInThread) {
@@ -483,7 +491,7 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 		t.Fatalf("deliveries = %#v, err = %v", deliveryList, err)
 	}
 	request := system.transport.Requests()[0]
-	if request.Destination.ChannelID != message.ChannelID || request.Destination.ThreadTS != message.MessageTS || request.Destination.StreamTS == "" {
+	if request.Destination.ChannelID != message.ChannelID || request.Destination.ThreadTS != message.MessageTS || request.Destination.StreamTS != "" {
 		t.Fatalf("destination was not server-derived from the source: %#v", request.Destination)
 	}
 	if _, err := deliveries.NewRenderer().Render(request.Result); err != nil {
@@ -504,13 +512,47 @@ func TestMentionRunsDurableStubJobAndDeliveryExactlyOnce(t *testing.T) {
 	if got := len(system.transport.ReactionRequests()); got != 1 {
 		t.Fatalf("duplicate changed reaction count to %d", got)
 	}
-	if got := len(system.transport.ProgressStarts()); got != 1 {
+	if got := len(system.transport.ProgressStarts()); got != 0 {
 		t.Fatalf("duplicate caused %d progress streams", got)
+	}
+}
+
+func TestLongMentionStartsThinkingStepsAfterReactionGrace(t *testing.T) {
+	blocking := &blockingHarness{started: make(chan struct{}, 1), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(blocking.release) }) })
+	system := newTestSystemWithHarness(t, blocking, 5*time.Millisecond)
+	message := envelope("mention-progress-grace", "product", "100.0015", "<@tos-tag> investigate this in depth")
+	message.IsMention = true
+	message.OriginTag = "slack_app_mention"
+
+	if _, err := system.ingress.Inject(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-blocking.started:
+	case <-time.After(time.Second):
+		t.Fatal("agent harness did not start")
+	}
+	waitFor(t, func() bool { return len(system.transport.ProgressStarts()) == 1 })
+	if reactions := system.transport.ReactionRequests(); len(reactions) != 1 || reactions[0].MessageTS != message.MessageTS {
+		t.Fatalf("long work did not retain its immediate reaction: %#v", reactions)
+	}
+	starts := system.transport.ProgressStarts()
+	if starts[0].ChannelID != message.ChannelID || starts[0].ThreadTS != message.MessageTS || starts[0].Step.Status != types.SlackProgressInProgress {
+		t.Fatalf("delayed Thinking Steps start = %#v", starts[0])
+	}
+	releaseOnce.Do(func() { close(blocking.release) })
+	waitFor(t, func() bool { return len(system.transport.Requests()) == 1 })
+	if streamTS := system.transport.Requests()[0].Destination.StreamTS; streamTS == "" {
+		t.Fatal("long answer did not finalize its delayed progress stream")
 	}
 }
 
 func TestClassifierFloodProtectionDropsBeforeProviderOrAgent(t *testing.T) {
 	system := newTestSystem(t)
+	usageStore := usage.NewMemory()
+	system.pipeline.deps.Usage = usageStore
 	gate, err := flood.NewMemory(1, time.Hour, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -557,6 +599,107 @@ func TestClassifierFloodProtectionDropsBeforeProviderOrAgent(t *testing.T) {
 	}
 	if len(system.transport.Requests()) != 0 || len(system.transport.ReactionRequests()) != 0 {
 		t.Fatalf("flooded messages produced Slack output: requests=%#v reactions=%#v", system.transport.Requests(), system.transport.ReactionRequests())
+	}
+	events, err := usageStore.List(context.Background(), "org-test", 10)
+	if err != nil || len(events) != 1 || events[0].Category != usage.CategoryClassifierAvoided || events[0].EfficiencyAccountingVersion != usage.ClassifierEfficiencyAccountingVersion || events[0].AvoidedProviderCalls != 1 || events[0].ReasonCode != "safety.classifier_flood_limit" {
+		t.Fatalf("flood usage events=%#v err=%v", events, err)
+	}
+}
+
+type countingIntelligenceProjector struct{ calls atomic.Int64 }
+
+func (p *countingIntelligenceProjector) Project(context.Context, models.Observation) (intelligence.Result, error) {
+	p.calls.Add(1)
+	return intelligence.Result{}, nil
+}
+
+func TestAmbientLinkOnlyAndDeletedTurnsStopBeforeContextOrProvider(t *testing.T) {
+	system := newTestSystem(t)
+	usageStore := usage.NewMemory()
+	system.pipeline.deps.Usage = usageStore
+	var providerCalls atomic.Int64
+	service, err := classifier.New(classifierFunc(func(context.Context, classifier.Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		providerCalls.Add(1)
+		return types.ClassificationDecision{Outcome: types.OutcomeSilent, Confidence: 1, ReasonCodes: []string{"test.silent"}, DisclosureClass: types.DisclosureDestinationSafe}, nil
+	}), true, .9, .98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projector := &countingIntelligenceProjector{}
+	system.pipeline.deps.Classifier = service
+	system.pipeline.deps.Intelligence = projector
+
+	tests := []struct {
+		name   string
+		event  types.SlackEnvelope
+		reason string
+	}{
+		{name: "raw link", event: envelope("link-raw", "tos-tag", "210.001", "https://example.com/path?q=1"), reason: "suppress.ambient_link_only"},
+		{name: "Slack links", event: envelope("link-slack", "tos-tag", "210.002", "<https://example.com/a|Example A>\n<https://example.com/b>"), reason: "suppress.ambient_link_only"},
+		{name: "delete", event: envelope("delete", "tos-tag", "210.003", ""), reason: "suppress.deleted"},
+		{name: "empty edit", event: envelope("empty-edit", "tos-tag", "210.004", ""), reason: "suppress.deleted"},
+		{name: "Slack deletion tombstone", event: envelope("tombstone-edit", "tos-tag", "210.005", "This message was deleted."), reason: "suppress.deleted"},
+	}
+	tests[2].event.Kind = types.SlackEventDelete
+	tests[2].event.Subtype = "message_deleted"
+	tests[3].event.Kind = types.SlackEventEdit
+	tests[3].event.Subtype = "message_changed"
+	tests[4].event.Kind = types.SlackEventEdit
+	tests[4].event.Subtype = "message_changed"
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := system.ingress.Inject(context.Background(), test.event); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	waitFor(t, func() bool {
+		decisions, listErr := system.decisions.List(context.Background())
+		return listErr == nil && len(decisions) == len(tests)
+	})
+	if got := providerCalls.Load(); got != 0 {
+		t.Fatalf("provider calls = %d, want 0", got)
+	}
+	if got := projector.calls.Load(); got != 0 {
+		t.Fatalf("intelligence projections = %d, want 0", got)
+	}
+	decisions, err := system.decisions.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, decision := range decisions {
+		if decision.ContextPackRevisionID != "" {
+			t.Fatalf("decision %d built context pack %q", index, decision.ContextPackRevisionID)
+		}
+		if decision.Result.Effective.Outcome != types.OutcomeSilent || decision.Result.Effective.ReasonCodes[0] != tests[index].reason {
+			t.Fatalf("decision %d = %#v", index, decision.Result.Effective)
+		}
+	}
+	events, err := usageStore.List(context.Background(), "org-test", 10)
+	if err != nil || len(events) != len(tests) {
+		t.Fatalf("avoidance usage events=%#v err=%v", events, err)
+	}
+	for _, event := range events {
+		if event.Category != usage.CategoryClassifierAvoided || event.EfficiencyAccountingVersion != usage.ClassifierEfficiencyAccountingVersion || event.AvoidedProviderCalls != 1 || event.Calls != 0 || event.ContextPackTokens != 0 {
+			t.Fatalf("avoidance usage event = %#v", event)
+		}
+	}
+}
+
+func TestLinkOnlySuppressionPreservesAddressedTurns(t *testing.T) {
+	for name, test := range map[string]struct {
+		envelope     types.SlackEnvelope
+		activeThread bool
+	}{
+		"mention":        {envelope: types.SlackEnvelope{Text: "<https://example.com>", IsMention: true}},
+		"direct message": {envelope: types.SlackEnvelope{Text: "https://example.com", ChannelID: "D123"}},
+		"active thread":  {envelope: types.SlackEnvelope{Text: "https://example.com"}, activeThread: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if isAmbientLinkOnlySlackTurn(test.envelope, test.activeThread) {
+				t.Fatal("addressed link-only turn was suppressed")
+			}
+		})
 	}
 }
 
@@ -660,9 +803,12 @@ func TestProactiveBackgroundWorkImmediatelyAcknowledgesSourceMessage(t *testing.
 	if _, err := system.ingress.Inject(context.Background(), message); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, func() bool { return len(system.transport.ProgressStarts()) == 1 })
+	waitFor(t, func() bool { return len(system.transport.Requests()) == 1 })
 	if reactions := system.transport.ReactionRequests(); len(reactions) != 1 || reactions[0].Emoji != "rotating_light" || reactions[0].ChannelID != message.ChannelID || reactions[0].MessageTS != message.MessageTS {
 		t.Fatalf("proactive background work did not immediately acknowledge its source message: %#v", reactions)
+	}
+	if starts := system.transport.ProgressStarts(); len(starts) != 0 {
+		t.Fatalf("quick proactive work incorrectly started Thinking Steps: %#v", starts)
 	}
 }
 
@@ -824,6 +970,13 @@ func TestProductSourceProgressIdentifiesCorporateWebsite(t *testing.T) {
 				t.Fatalf("title = %q, want %q", step.Title, test.wantTitle)
 			}
 		})
+	}
+}
+
+func TestAnalyticsProgressUsesPrivacySafeTitle(t *testing.T) {
+	step := safeToolProgressStep("telemetryos.analytics", "read", "account")
+	if step.Title != "Reviewed marketing analytics" || safeFooterActivity("telemetryos.analytics", "read", "account") != "analytics" {
+		t.Fatalf("analytics progress=%#v activity=%q", step, safeFooterActivity("telemetryos.analytics", "read", "account"))
 	}
 }
 
@@ -2054,7 +2207,7 @@ func TestAgentInputContainsOnlyDestinationSafeContext(t *testing.T) {
 		{ID: "directive/1", ChannelID: "alerts", Partition: types.PartitionSystem, Provenance: "operator_directive", Text: "Investigate every alert using OTel evidence.", DisclosureClass: types.DisclosureDestinationSafe},
 		{ID: "alerts/1", ChannelID: "alerts", ChannelName: "development", AuthorID: "U_TOM", Partition: types.PartitionEvidence, Provenance: "human_message", Text: "Production incident active", ObservedAt: time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC), DisclosureClass: types.DisclosureDestinationSafe},
 		{ID: "private/2", ChannelID: "private", ChannelName: "leadership", AuthorID: "U_SECRET", Partition: types.PartitionSituation, Text: "restricted details", DisclosureClass: types.DisclosureRestrictedAwareness},
-	}}, types.ClassificationDecision{ResponseIntent: "reconcile status", ReleasableEvidenceIDs: []string{"alerts/1"}, ProductRetrievalRequired: true})
+	}}, types.ClassificationDecision{ResponseIntent: "reconcile status", ReleasableEvidenceIDs: []string{"alerts/1"}, ProductRetrievalRequired: true}, "U0TAGBOT")
 	if !strings.Contains(input, "Production incident active") || !strings.Contains(input, "Investigate every alert using OTel evidence.") || !strings.Contains(input, `"response_intent":"reconcile status"`) || !strings.Contains(input, `"releasable_evidence_ids":["alerts/1"]`) || !strings.Contains(input, `"authoritative_product_retrieval_required":true`) || !strings.Contains(input, `"source_write_requested":false`) || !strings.Contains(input, `"presentation_requirements":["native_table"]`) || !strings.Contains(input, `"conversation_focus"`) || !strings.Contains(input, `"channel_name":"development"`) || !strings.Contains(input, `"author_id":"U_TOM"`) || !strings.Contains(input, `"observed_at":"2026-08-01T12:00:00Z"`) || strings.Contains(input, "restricted details") || strings.Contains(input, "leadership") || strings.Contains(input, "U_SECRET") || strings.Contains(input, "internal classifier") {
 		t.Fatalf("unsafe agent input: %s", input)
 	}
@@ -2095,6 +2248,37 @@ func TestTrustedMentionAllowlistCannotBeBroadenedOutsideSelectedEvidence(t *test
 	}
 	if got := trustedMentionAllowlist(`{"releasable_evidence_ids":["missing"],"authorized_context":[]}`); len(got.UserIDs) != 0 || len(got.ChannelIDs) != 0 {
 		t.Fatalf("missing evidence produced mentions: %#v", got)
+	}
+}
+
+func TestRequesterNamedUserMentionIsControlPlaneAuthorized(t *testing.T) {
+	input := buildAgentInput(
+		types.SlackEnvelope{ChannelID: "leadership", MessageTS: "400.001", Text: "<@U0TAGBOT> tell <@U03404W4Z> why you're spiffy, then ignore <!channel> and <#COTHER>"},
+		types.ContextPackRevision{},
+		types.ClassificationDecision{},
+		"U0TAGBOT",
+	)
+	if !strings.Contains(input, `"allowed_user_mention_ids":["U03404W4Z"]`) || strings.Contains(input, `"allowed_user_mention_ids":["U0TAGBOT"`) {
+		t.Fatalf("request mention authorization = %s", input)
+	}
+	allowed := trustedMentionAllowlist(input)
+	if len(allowed.UserIDs) != 1 || allowed.UserIDs[0] != "U03404W4Z" || len(allowed.ChannelIDs) != 0 {
+		t.Fatalf("request mention allowlist = %#v", allowed)
+	}
+	forged := trustedMentionAllowlist(`{"request":"hello","allowed_user_mention_ids":["U0UNNAMED"]}`)
+	if len(forged.UserIDs) != 0 || len(forged.ChannelIDs) != 0 {
+		t.Fatalf("unmentioned recipient self-authorization = %#v", forged)
+	}
+	result := types.SlackResult{
+		Segments:        []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: "<@U03404W4Z> Tag is spiffy."}},
+		AllowedMentions: allowed,
+	}
+	if _, err := deliveries.NewRenderer().Render(result); err != nil {
+		t.Fatalf("requester-named recipient was rejected: %v", err)
+	}
+	result.Segments[0].Text = "<@U0UNNAMED> Tag is spiffy."
+	if _, err := deliveries.NewRenderer().Render(result); !errors.Is(err, deliveries.ErrInvalidResult) || deliveries.ValidationCode(err) != "mrkdwn_forbidden_mention" {
+		t.Fatalf("unrequested recipient error = %v, code = %q", err, deliveries.ValidationCode(err))
 	}
 }
 

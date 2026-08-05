@@ -41,8 +41,9 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Admit conservative public cross-channel factual-alignment interventions;
   suppress opinion, stale, ambiguous, recently represented, and restricted
   conflicts.
-- [x] Allow only evidence-derived user/channel mentions while rejecting model
-  self-authorization, broadcast mentions, and user-group mentions.
+- [x] Allow requester-named user mentions and evidence-derived user/channel
+  mentions while rejecting model self-authorization, broadcast mentions, and
+  user-group mentions.
 - [x] Run the original 24 natural classifier cases against the real configured
   OpenAI provider, with expectations held only by the scorer (`26/26`
   including the two infrastructure invariants).
@@ -63,8 +64,13 @@ Only mark an item complete when source and verification evidence exist.
   46-message deterministic and live provider matrices (`48/48` with
   infrastructure invariants) plus a zero-reply/zero-job `#tos-tag` canary.
 - [x] Require text-confirmed source mutation intent before applying the Linear
-  redirect, and keep ambient Agent Wiki report links silent (`49/49`
+  redirect, keep ambient Agent Wiki report links silent, and suppress leading
+  third-party handoffs in active Tag threads before classification (`54/54`
   deterministic matrix with infrastructure invariants).
+- [x] Persist content-free classifier input/output/context/failure dimensions,
+  record deterministic avoided calls by reason, and expose organization-scoped
+  daily efficiency totals with estimates kept distinct from exact provider
+  token usage.
 - [x] Fall back conservatively on timeout or malformed output.
 
 ## 4. Durable jobs and concurrency
@@ -128,14 +134,23 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Resolve connector secrets only in the exact helper subprocess.
 - [x] Publish source-derived Wiki bodies without a shared worker filename and
   summarize document-sized bodies safely in exact-action approval cards.
-- [x] Provide `telemetryos.code` list/search/read operations and reject
-  traversal, symlinks, environment files, credential ledgers, and private tool
-  state.
+- [x] Provide `telemetryos.code` on-demand default-branch freshness, immutable
+  snapshots, list/fixed/semantic search/read/version operations, and reject
+  arbitrary remotes/branches, traversal, symlinks, environment files,
+  credential ledgers, and private tool state.
+- [x] Pin Semble and its local embedding model, keep query-time semantic search
+  offline, and retain source-bearing indexes only in owner-only server state.
 - [x] Enforce the code tool's permanent read-only boundary at both bundle load
   and execution, and redirect source mutation intent to Linear bug/feature
   intake instead of an approval flow.
 - [x] Provide a credential-free `telemetryos.product-docs` read operation that
   permits only the public docs index/pages and corporate full-content source.
+- [x] Provide a read-only `telemetryos.analytics` operation with fixed Gateway
+  funnel endpoints, a server-side Site Analytics Token, bounded pagination,
+  and direct-identifier/free-form-content filtering.
+- [x] Inject the `marketing-funnel-chain`, `marketing-funnel-review`,
+  `marketing-account-journey`, and draft-only `marketing-unstall-draft`
+  behavioral skills.
 - [x] Inject `product-knowledge` so named product claims require retrieval and
   route by source authority and audience.
 - [x] Inject `telemetryos-documentation` so customer documentation questions
@@ -159,6 +174,8 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Implement `/tag-directive` modal load/save for every authenticated
   workspace user in an enrolled, enabled channel, plus explicit management-UI
   creation, revision history, activation, and audit.
+- [x] Implement channel-bound `/tag-status` with an ephemeral native Block Kit
+  table for participation, directive, availability, membership, and scope.
 - [x] Persist and reauthorize standard five-field cron routines with explicit
   IANA timezones while advancing legacy interval records safely.
 - [x] Persist classifier-gated cron heartbeat subscriptions and manage them in
@@ -180,16 +197,20 @@ Only mark an item complete when source and verification evidence exist.
   returning a concise synopsis and exact tool-returned link.
 - [x] Reject model-created artifact segments unless the exact HTTPS URL was
   produced by a successful reviewed tool call in the same worker attempt.
-- [x] Require actual resolved HTTPS links for provided Wiki references and
-  reject bare Primer/artifact or Wiki-labeled namespace/slugs.
+- [x] Prefer actual resolved HTTPS links for provided Wiki references, permit
+  unresolved slugs as internal text rather than failing the whole answer, and
+  forbid reconstructed or fabricated opaque page URLs.
 - [x] Reject model-generated approvals, notices, actions, destinations, and
   special mentions.
 - [x] Validate Block Kit before posting.
 - [x] Persist, lease, retry, reconcile, and deduplicate deliveries.
 - [x] Distinguish channel replies from thread replies according to classifier
   placement.
-- [x] Use Slack-native Thinking Steps for admitted full-agent thread work, persist and
-  reconcile the stream timestamp, expose only safe operational milestones, and
+- [x] Use immediate reactions for admitted answer acknowledgement, delay
+  Slack-native Thinking Steps until a full-agent thread job outlives the
+  configured grace period, transition through a best-effort native thread
+  status into a plan-mode stream, persist and reconcile the stream timestamp, expose
+  only safe operational milestones, and
   finalize the same message with a durable validated result.
 
 ## 10. Persistence, audit, and operations
@@ -216,6 +237,8 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Keep per-job workers disposable and omit the host Docker socket.
 - [x] Override a host `TAG_AION_DEVELOPER_PATH` after loading `runtime.env` so
   the container-reviewed code root remains `/workspace/code`.
+- [x] Override host snapshot/index/model/GitHub-config paths with private
+  container-owned paths and install the pinned semantic runtime in the image.
 
 ## 11. Verification
 

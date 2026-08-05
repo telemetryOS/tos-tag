@@ -71,10 +71,10 @@ For mrkdwn_text:
 - When referencing an existing Agent Wiki page, use the exact human HTTPS URL
   returned by the same-attempt reviewed Wiki get or url read operation
   in a descriptive Slack link.
-  Never expose a namespace/slug such as primer/example as the reference, never
+  Prefer the human URL, but an unresolved namespace/slug such as
+  primer/example is acceptable in this internal Slack workspace. Never
   reconstruct the opaque page URL, and do not use an artifact segment for an
-  existing page. If the URL lookup fails, omit the reference instead of
-  emitting the slug.
+  existing page.
 - Use *bold*, _italic_, and ~strikethrough~ when they improve scanning.
 - Put variable names, ENV names, literal values, commands, flags, paths, model
   names, codes, issue keys, UUIDs, job IDs, and identifiers in single backticks.
@@ -88,7 +88,10 @@ For mrkdwn_text:
 - Keep explanatory prose outside code blocks and use short paragraphs and lists.
 - Never use GitHub links [label](url), double-asterisk bold, HTML tables, or
   unaligned pipe tables in mrkdwn text.
-- For a classifier-admitted team-alignment response only, you may use an exact
+- You may repeat an exact Slack user mention (<@USER_ID>) listed in
+  allowed_user_mention_ids when the requester explicitly named that recipient
+  and addressing them helps satisfy the request.
+- For a classifier-admitted team-alignment response, you may also use an exact
   Slack user mention (<@AUTHOR_ID>) or channel mention (<#CHANNEL_ID>) copied
   from a source named in releasable_evidence_ids. The control plane rejects
   every other user, channel, group, or special mention. Never use @channel,

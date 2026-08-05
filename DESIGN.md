@@ -59,7 +59,9 @@ source-mutation intent to a Linear bug or feature instead of granting a worker
 source-write authority.
 Executable access is limited to `tos_tag_tool` operations in the reviewed tool
 catalog plus the typed `tos_tag_wiki` page-CRUD facade; Aion source is not mounted and can be inspected only through bounded
-`telemetryos.code` reads. Linear, Wiki, and OTel workflows are likewise
+`telemetryos.code` reads against an on-demand verified remote-default-branch
+snapshot. Conceptual discovery uses pinned offline semantic search before an
+exact decisive read. Linear, Wiki, and OTel workflows are likewise
 described by base skills and executed only through their reviewed tools. Public
 product content is available only through the
 fixed-host `telemetryos.product-docs` read tool, while arbitrary public research
@@ -105,8 +107,11 @@ allowlisted summary of successfully used capabilities. The
 control plane owns this metadata; model output and classifier-only replies do
 not carry it.
 
-Admitted full-agent thread jobs use Slack Thinking Steps in collapsed timeline mode.
-The control plane starts and owns the stream, emits only allowlisted operational
+Admitted full-agent thread jobs use the classifier-selected reaction as their
+immediate acknowledgement. Jobs still active after the configured progress grace
+period use Slack Thinking Steps in collapsed timeline mode; quick jobs deliver
+their final answer without flashing a generic `Thinking...` placeholder. The
+control plane starts and owns the stream, emits only allowlisted operational
 milestones, gives every native/reviewed tool call one stable in-progress then
 complete/error update on one rotating current-action task card, and shows each
 dynamically declared validated skill through that same transient card. Examples include reading the Wiki, querying telemetry, or

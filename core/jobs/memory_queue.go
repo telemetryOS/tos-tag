@@ -175,6 +175,26 @@ func (q *MemoryQueue) Transition(_ context.Context, id types.JobID, leaseToken s
 	return job, nil
 }
 
+func (q *MemoryQueue) SetProgressMessageTS(_ context.Context, id types.JobID, leaseToken, messageTS string) (Job, error) {
+	if messageTS == "" {
+		return Job{}, ErrInvalidState
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	job, ok := q.jobs[id]
+	if !ok {
+		return Job{}, ErrJobNotFound
+	}
+	if job.State != StateRunning || job.Lease.Token == "" || job.Lease.Token != leaseToken || !job.Lease.ExpiresAt.After(q.now().UTC()) {
+		return Job{}, ErrLeaseLost
+	}
+	job.ProgressMessageTS = messageTS
+	job.UpdatedAt = q.now().UTC()
+	job.Version++
+	q.jobs[id] = job
+	return job, nil
+}
+
 func (q *MemoryQueue) SuspendForApproval(ctx context.Context, id types.JobID, leaseToken, approvalID string) (Job, error) {
 	if approvalID == "" {
 		return Job{}, ErrInvalidState

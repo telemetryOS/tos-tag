@@ -41,7 +41,7 @@ func RunLive(ctx context.Context, cfg config.Config) (Score, error) {
 	}
 
 	fixtures := Fixtures()
-	score := Score{Suite: "cross-channel-behavior-live/v2", Total: len(fixtures) + 2, Threshold: 1, GeneratedAt: time.Now().UTC()}
+	score := Score{Suite: "cross-channel-behavior-live/v5", Total: len(fixtures) + 2, Threshold: 1, GeneratedAt: time.Now().UTC()}
 	var speakOK, speakTotal, silenceOK, silenceTotal, evidenceOK, evidenceTotal, disclosureOK, disclosureTotal, placementOK, placementTotal int
 	var routingOK, routingTotal, reactionOK, reactionTotal int
 	var totalLatency time.Duration

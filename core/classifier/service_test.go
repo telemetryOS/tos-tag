@@ -3,6 +3,7 @@ package classifier
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,65 @@ func TestHardMentionSurvivesShadowMode(t *testing.T) {
 	result := newService(t, true).Decide(context.Background(), got, types.ContextPackRevision{})
 	if result.Effective.Outcome != types.OutcomeReplyInThread || result.Shadowed {
 		t.Fatalf("hard mention was shadowed: %#v", result)
+	}
+}
+
+func TestActiveThreadThirdPartyAddressIsSuppressedBeforeProvider(t *testing.T) {
+	calls := 0
+	service, err := New(classifierFunc(func(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		calls++
+		return types.ClassificationDecision{}, errors.New("provider should not be called")
+	}), false, 0.9, 0.98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoff := target("<@U03404W4Z> ^")
+	handoff.ActiveThread = true
+	if service.RequiresProviderCall(handoff) {
+		t.Fatal("third-party handoff would consume a provider call")
+	}
+	result := service.Decide(context.Background(), handoff, types.ContextPackRevision{})
+	if calls != 0 || result.Predicted.Outcome != types.OutcomeSilent || result.Effective.Outcome != types.OutcomeSilent || !slices.Contains(result.Effective.ReasonCodes, "suppress.third_party_address") {
+		t.Fatalf("handoff result=%#v provider_calls=%d", result, calls)
+	}
+}
+
+func TestParticipationRecheckRejectsThirdPartyAddressedTurn(t *testing.T) {
+	decision := types.ClassificationDecision{
+		Outcome:           types.OutcomeReplyInThread,
+		Confidence:        0.99,
+		ReasonCodes:       []string{"provider.thread_reply"},
+		DisclosureClass:   types.DisclosureDestinationSafe,
+		RequiresFullAgent: true,
+		Reaction:          "speech_balloon",
+	}
+	target := Target{Mode: types.ModeAssist, ActiveThread: true, Envelope: types.SlackEnvelope{Text: "<@U03404W4Z> ^"}}
+	result := EnforceParticipation(Result{Predicted: decision, Effective: decision}, target, types.ContextPackRevision{})
+	if result.Effective.Outcome != types.OutcomeSilent || !result.Shadowed || !slices.Contains(result.Effective.ReasonCodes, "policy.unsolicited_assist_work") {
+		t.Fatalf("participation recheck allowed third-party address: %#v", result)
+	}
+}
+
+func TestThirdPartyAddressGatePreservesActiveThreadIntent(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		target Target
+		want   bool
+	}{
+		"leading handoff marker":      {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "<@U03404W4Z> ^"}}, want: true},
+		"labeled leading handoff":     {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "<@U03404W4Z|alex> ^"}}, want: true},
+		"leading direct question":     {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: " <@U03404W4Z>, can you check this?"}}, want: true},
+		"recipient later in request":  {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "Summarize this for <@U03404W4Z>."}}, want: false},
+		"Tag explicitly co-addressed": {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "<@U03404W4Z>, Tag, summarize this for both of us."}}, want: false},
+		"Tag directly mentioned":      {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "<@U03404W4Z> compare these", IsMention: true}}, want: false},
+		"direct message conversation": {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{ChannelKind: types.SlackChannelKindDirectMessage, Text: "<@U03404W4Z> is the owner"}}, want: false},
+		"replayed direct message":     {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{ChannelID: "D03404W4Z", Text: "<@U03404W4Z> is the owner"}}, want: false},
+		"inactive thread":             {target: Target{Envelope: types.SlackEnvelope{Text: "<@U03404W4Z> ^"}}, want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := thirdPartyAddressedTurn(testCase.target); got != testCase.want {
+				t.Fatalf("thirdPartyAddressedTurn()=%v want %v", got, testCase.want)
+			}
+		})
 	}
 }
 
@@ -612,6 +672,22 @@ func TestAssistModeBlocksUnsolicitedDeclarativeAgentWork(t *testing.T) {
 	}
 }
 
+func TestAssistModeBlocksUnsolicitedSourceWriteRedirect(t *testing.T) {
+	redirect := types.ClassificationDecision{
+		Outcome: types.OutcomeReplyInChannel, Confidence: .99,
+		ReasonCodes: []string{"policy.source_write_to_linear"}, ResponseIntent: "redirect source writes to Linear",
+		DirectReply: sourceWriteRedirectReply, SourceWriteRequested: true,
+		DisclosureClass: types.DisclosureDestinationSafe, Reaction: "speech_balloon", AgentModelStrength: "none",
+	}
+	target := Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{
+		Text: "Done Today: [TOSF PWA] Report cache usage ENG-3175 — the browser player now reports its cache stats, so the Cache Information card shows hit rate, cache size, and image/video counts instead of blanks; background images are cached and counted as images. Also make sure the remote cache-clear command actually removed the stored media.",
+	}}
+	result := EnforceParticipation(Result{Predicted: redirect, Effective: redirect}, target, types.ContextPackRevision{})
+	if result.Predicted.Outcome != types.OutcomeReplyInChannel || result.Effective.Outcome != types.OutcomeSilent || !result.Shadowed || !slices.Contains(result.Effective.ReasonCodes, "policy.unsolicited_assist_work") {
+		t.Fatalf("unsolicited source-write redirect was admitted: %#v", result)
+	}
+}
+
 func TestAssistInitiativeRequiresARealInvocationSignal(t *testing.T) {
 	decision := types.ClassificationDecision{
 		Outcome: types.OutcomeStartBackgroundJob, Confidence: .99,
@@ -657,6 +733,86 @@ func TestAssistInitiativeRequiresARealInvocationSignal(t *testing.T) {
 	productTarget := Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Text: "What is the Premium Trial about"}}
 	if result := EnforceParticipation(Result{Predicted: product, Effective: product}, productTarget, types.ContextPackRevision{}); result.Effective.Outcome != types.OutcomeStartBackgroundJob {
 		t.Fatalf("ambient product question was suppressed: %#v", result)
+	}
+}
+
+func TestQuestionGrantRejectsURLAndRepeatedPunctuation(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		text string
+		want bool
+	}{
+		"interrogative prefix":     {text: "Can you check checkout", want: true},
+		"single terminal question": {text: "Checkout is unavailable?", want: true},
+		"embedded question":        {text: "Can anyone help? Checkout is unavailable.", want: true},
+		"bare declaration":         {text: "Checkout is unavailable.", want: false},
+		"repeated punctuation":     {text: "Checkout is unavailable??", want: false},
+		"plain URL query":          {text: "Checkout is unavailable; status: https://status.example/incidents?id=427", want: false},
+		"Slack URL query":          {text: "Checkout is unavailable; status: <https://status.example/incidents?id=427|incident 427>", want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := looksLikeQuestion(testCase.text); got != testCase.want {
+				t.Fatalf("looksLikeQuestion(%q)=%v want %v", testCase.text, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestExplicitTagAddressRequiresVocativeUse(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		text string
+		want bool
+	}{
+		"leading punctuation":           {text: "Tag, checkout is unavailable.", want: true},
+		"leading natural question":      {text: "Tag can you check checkout", want: true},
+		"leading greeting":              {text: "Hey Tag: check checkout", want: true},
+		"mid-sentence greeting":         {text: "Morning, Tag. Hope your queues are behaving.", want: true},
+		"mid-sentence praise":           {text: "Nice work, Tag — thanks for sticking with it.", want: true},
+		"co-address after user":         {text: "<@U03404W4Z>, Tag, summarize this for both of us.", want: true},
+		"co-address after labeled user": {text: "<@U03404W4Z|alex>, Tag, summarize this for both of us.", want: true},
+		"trailing vocative":             {text: "Checkout is unavailable, Tag!", want: true},
+		"unpunctuated social address":   {text: "Thanks Tag!", want: true},
+		"colon request":                 {text: "Tag: can you check checkout", want: true},
+		"ordinary noun":                 {text: "Add the incident tag; checkout is unavailable.", want: false},
+		"ordinary trailing noun":        {text: "Apply the incident tag.", want: false},
+		"ordinary noun in list":         {text: "The required fields are owner, tag, priority.", want: false},
+		"field label":                   {text: "Tag: incident", want: false},
+		"embedded product name":         {text: "The tagging service is unavailable.", want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := explicitlyAddressesTag(testCase.text); got != testCase.want {
+				t.Fatalf("explicitlyAddressesTag(%q)=%v want %v", testCase.text, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestAssistRejectsMalformedSignalsThatProactiveMayActOn(t *testing.T) {
+	decision := types.ClassificationDecision{
+		Outcome: types.OutcomeStartBackgroundJob, Confidence: .99,
+		ReasonCodes: []string{"active_incident"}, ResponseIntent: "investigate the incident",
+		DisclosureClass: types.DisclosureDestinationSafe, RequiresFullAgent: true,
+		Reaction: "rotating_light", AgentModelProfile: "standard", AgentModelStrength: "standard", AgentReasoningEffort: "medium",
+	}
+	for _, text := range []string{
+		"Checkout is unavailable??",
+		"Checkout is unavailable; status: https://status.example/incidents?id=427",
+		"Checkout is unavailable; status: <https://status.example/incidents?id=427|incident 427>",
+		"Add the incident tag; checkout is unavailable.",
+	} {
+		t.Run(text, func(t *testing.T) {
+			assist := Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Text: text}}
+			assistResult := EnforceParticipation(Result{Predicted: decision, Effective: decision}, assist, types.ContextPackRevision{})
+			if assistResult.Effective.Outcome != types.OutcomeSilent || !assistResult.Shadowed || !slices.Contains(assistResult.Effective.ReasonCodes, "policy.unsolicited_assist_work") {
+				t.Fatalf("malformed assist signal was admitted: %#v", assistResult)
+			}
+
+			proactive := assist
+			proactive.Mode = types.ModeProactive
+			proactiveResult := EnforceParticipation(Result{Predicted: decision, Effective: decision}, proactive, types.ContextPackRevision{})
+			if proactiveResult.Effective.Outcome != types.OutcomeStartBackgroundJob || proactiveResult.Shadowed {
+				t.Fatalf("proactive incident initiative was suppressed: %#v", proactiveResult)
+			}
+		})
 	}
 }
 
@@ -747,6 +903,9 @@ func TestServiceRequiresProviderCall(t *testing.T) {
 	}
 	if live.RequiresProviderCall(Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Subtype: types.SlackMessageSubtypeAssistantAppThread}}) {
 		t.Fatal("assistant app target should not call provider")
+	}
+	if live.RequiresProviderCall(Target{Mode: types.ModeAssist, AmbientLinkOnly: true}) {
+		t.Fatal("ambient link-only target should not call provider")
 	}
 	shadow := newService(t, true)
 	if !shadow.RequiresProviderCall(Target{Mode: types.ModeObserve}) {

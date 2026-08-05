@@ -1,0 +1,16 @@
+{
+  "id": "telemetryos.analytics",
+  "version": "1.0.0",
+  "script": "run.sh",
+  "operations": [
+    {
+      "id": "read",
+      "env": ["TELEMETRYOS_ANALYTICS_URL", "SITE_ANALYTICS_TOKEN"],
+      "public_env": ["TELEMETRYOS_ANALYTICS_URL"],
+      "timeout_seconds": 90,
+      "max_output_bytes": 1048576,
+      "risk": "read",
+      "approval": "never"
+    }
+  ]
+}

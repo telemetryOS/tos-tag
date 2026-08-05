@@ -23,8 +23,11 @@ Keep these boundaries explicit:
 - Secrets stay in the Go control plane or exact reviewed helper subprocess.
   Never place secrets in prompts, worker-visible files, model tool arguments,
   logs, fixtures, or artifacts.
-- The model cannot choose a destination, mention users/groups/channels, or
-  create approval/notice/action blocks.
+- The model cannot choose a destination or independently choose whom to
+  mention. The control plane may authorize an exact user mention already named
+  in the current human request or exact user/channel provenance from selected
+  evidence; groups, broadcasts, and every other mention remain unavailable.
+  The model cannot create approval/notice/action blocks.
 - Slack-authenticated bot, app, workflow, and assistant messages are
   observation-only. Preserve them as unverified destination-local context, but
   never let them enter classification, reaction, job, or delivery paths—even
@@ -53,8 +56,8 @@ Never encode live IDs/secrets in tracked files.
 - `core/jobs`, `core/sessions`, `core/deliveries`: leased execution,
   generations, typed output, and durable Slack delivery.
 - `core/slack`: Socket Mode ingress, Block Kit rendering, interactions, the
-  `/tag-directive` modal, and the `/tag-mode` participation-mode command, plus
-  Slack-native Thinking Steps streaming for
+  `/tag-directive` modal, the `/tag-mode` participation-mode command, and the
+  read-only `/tag-status` native table, plus Slack-native Thinking Steps streaming for
   admitted full-agent work; durable one-time context bootstrap and proactively
   paced post-watermark catch-up for direct messages missed while offline.
 - `core/approvals`: exact-action Slack approval/resume.
@@ -73,10 +76,12 @@ Direct mentions trigger participation consideration, not mandatory thread
 placement. Prefer a channel reply for a brief, self-contained answer unlikely
 to continue. Prefer a thread for an investigation, multi-step/tool-heavy work,
 a narrow deep dive, or a conversation likely to continue. Existing tos-tag
-threads continue in thread. Per-channel cooldown suppresses ambient chatter,
-not an explicit mention or a human continuation in an active Tag thread; the
-hourly response budget, concurrency limit, and organization flood gate still
-apply to those invocations.
+threads continue in thread, except a reply beginning with another user's Slack
+mention is a human-to-human handoff when it neither mentions nor explicitly
+addresses Tag. Suppress that turn before classification. Per-channel cooldown
+suppresses ambient chatter, not an explicit mention or a human continuation in
+an active Tag thread; the hourly response budget, concurrency limit, and
+organization flood gate still apply to those invocations.
 
 The classifier may directly produce one short social response for greetings,
 thanks, farewells, praise, or light banter. Substantive answers require an
@@ -92,9 +97,17 @@ for audit, suppress its effective action with
 `policy.unsolicited_assist_work`, and apply the same gate again immediately
 before pipeline admission. Only `proactive` mode may treat an unaddressed
 declarative failure or incident as initiative by itself.
+Question grants ignore URL query punctuation and require an interrogative form
+or one terminal question mark; repeated `??` fails closed. An explicit Tag
+address must use a vocative position rather than the ordinary noun `tag`.
 
-Admitted full-agent thread jobs use a collapsed Slack Thinking Steps timeline. The Go
-control plane owns `chat.startStream`, safe task updates, and `chat.stopStream`;
+Admitted full-agent thread jobs that remain active after the configured progress
+grace period use a collapsed Slack Thinking Steps timeline. The immediate
+classifier-selected reaction is the only acknowledgement for jobs that finish
+inside that grace period. Slower jobs first set Slack's transient native thread
+status and then open a plan-mode stream; status failure is cosmetic and cannot
+block progress or final delivery. The Go control plane owns
+`assistant.threads.setStatus`, `chat.startStream`, safe task updates, and `chat.stopStream`;
 the model does not write progress text. Emit only allowlisted operational
 milestones and validated HTTPS sources through one rotating current-action card,
 rather than retaining a card for every completed step. Never stream model reasoning, deltas,
@@ -202,13 +215,18 @@ content-free code, and self-corrected attempts remain one Slack progress step.
 The reviewed tool catalog currently contains `telemetryos.linear` (read/write),
 `telemetryos.wiki` (page-only read/write/delete; soft-delete approval-gated and
 all namespace/admin/general-destructive surfaces unavailable), `telemetryos.otel` (read),
+`telemetryos.analytics` (privacy-filtered read-only funnel, account,
+normalized-event, and bounded raw site-event GETs),
 `telemetryos.device-logs` (read/write), `telemetryos.mongo` (read), and
 `telemetryos.code` (read), plus `telemetryos.product-docs` (credential-free
 fixed-host public product reads). `telemetryos.code` is the only source-tree
-capability: it supports bounded repository/file listing, fixed-string search,
-and line reads under `TAG_AION_DEVELOPER_PATH`, while rejecting traversal,
+capability: it refreshes only a requested approved TelemetryOS origin into an
+immutable default-branch snapshot, returns commit/fetch freshness evidence,
+and supports bounded repository/file listing, fixed-string or pinned offline
+semantic search, and line reads. It rejects remote/branch selection, traversal,
 symlinks, runtime environment files, credential ledgers, and private tool
-state. Workers receive neither that tree nor a generic shell.
+state. Workers receive neither source/snapshot paths, GitHub credentials, nor a
+generic shell.
 
 The `product-knowledge` base skill requires retrieval for named product claims
 and routes by authority: Agent Wiki Primer for internal product truth and
@@ -234,10 +252,10 @@ linking to `llms-full.txt`.
 Every product answer automatically includes concise clickable links to the
 authoritative sources materially used; test this with natural user questions,
 not prompts that request links or citations. When a Wiki page is referenced,
-its namespace/slug is used only for tool lookup. The worker uses the exact URL
-returned by `telemetryos.wiki/read get` or `url` and emits the exact returned
-human HTTPS URL in a descriptive Slack link. The renderer
-rejects bare Primer/artifact slugs and Wiki-labeled slug citations.
+the worker prefers the exact URL returned by `telemetryos.wiki/read get` or
+`url` and emits that human HTTPS URL in a descriptive Slack link. An unresolved
+namespace/slug may remain as internal text rather than invalidating the whole
+answer; the worker never reconstructs an opaque page URL.
 
 TelemetryOS source is permanently read-only at reviewed bundle load and tool
 execution. Source-write requests do not enter a worker or an approval flow;
@@ -264,7 +282,7 @@ and Carousels are compact presentation-only summaries whose model schema has
 no actions. The control
 plane also promotes conventional Markdown pipe tables outside fenced code into
 native table segments as a typed-output fallback. It owns approvals, notices,
-actions, destinations, mentions, and the full-agent execution footer. Never
+actions, destinations, mention authorization, and the full-agent execution footer. Never
 emit model, effort, token, or latency metadata in model-authored segments; the
 renderer appends trusted runtime values and omits them for classifier-only
 replies.
@@ -312,7 +330,7 @@ Before completion:
 make verify
 ```
 
-The deterministic classifier gate contains 47 natural messages plus context-cap
+The deterministic classifier gate contains 52 natural messages plus context-cap
 and deduplication invariants. To run the same cases through the configured real
 OpenAI classifier, with expected behavior kept outside provider input:
 

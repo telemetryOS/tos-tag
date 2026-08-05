@@ -14,6 +14,7 @@ import (
 	"html/template"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/sessions"
 	"github.com/telemetryos/tos-tag/core/tools"
 	"github.com/telemetryos/tos-tag/core/triggers"
+	"github.com/telemetryos/tos-tag/core/usage"
 	"github.com/telemetryos/tos-tag/models"
 	"github.com/telemetryos/tos-tag/types"
 )
@@ -86,6 +88,7 @@ type Dependencies struct {
 	Routines routines.Repository
 	Triggers triggers.Repository
 	Sessions sessions.Store
+	Usage    usage.EfficiencyReader
 }
 
 type Server struct {
@@ -142,6 +145,7 @@ func New(deps Dependencies) (*Server, error) {
 	mux.HandleFunc("GET /admin/api/context", s.listRecords("context"))
 	mux.HandleFunc("GET /admin/api/audit", s.listRecords("audit"))
 	mux.HandleFunc("GET /admin/api/usage", s.listRecords("usage"))
+	mux.HandleFunc("GET /admin/api/usage/classifier-efficiency", s.classifierEfficiency)
 	mux.HandleFunc("GET /admin/api/facts", s.listRecords("facts"))
 	mux.HandleFunc("GET /admin/api/marketplaces", s.listMarketplaces)
 	mux.HandleFunc("GET /admin/api/tool-marketplaces", s.listToolMarketplaces)
@@ -648,6 +652,66 @@ func (s *Server) listRecords(kind string) http.HandlerFunc {
 		values, err := s.deps.Records.List(r.Context(), kind, r.URL.Query().Get("organization_id"), 50)
 		writeList(w, values, err)
 	}
+}
+
+func (s *Server) classifierEfficiency(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Usage == nil {
+		writeError(w, http.StatusNotFound, "usage_disabled")
+		return
+	}
+	organizationID, ok := requiredOrganization(w, r)
+	if !ok {
+		return
+	}
+	days := 14
+	if raw := strings.TrimSpace(r.URL.Query().Get("days")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 31 {
+			writeError(w, http.StatusBadRequest, "days_invalid")
+			return
+		}
+		days = parsed
+	}
+	timezone := strings.TrimSpace(r.URL.Query().Get("timezone"))
+	if timezone == "" {
+		timezone = "UTC"
+	}
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "timezone_invalid")
+		return
+	}
+	now := time.Now().UTC()
+	localNow := now.In(location)
+	localSince := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, location).AddDate(0, 0, -(days - 1))
+	report, err := s.deps.Usage.ClassifierEfficiency(r.Context(), usage.EfficiencyQuery{
+		OrganizationID: organizationID,
+		Since:          localSince.UTC(),
+		Until:          now,
+		Location:       location,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "query_failed")
+		return
+	}
+	if s.deps.Logger != nil {
+		s.deps.Logger.WithCtx(blackbox.Ctx{
+			"organization_id":                organizationID,
+			"timezone":                       report.Timezone,
+			"days":                           days,
+			"candidate_decisions":            report.Totals.CandidateDecisions,
+			"provider_calls":                 report.Totals.ProviderCalls,
+			"instrumented_provider_calls":    report.Totals.InstrumentedProviderCalls,
+			"uninstrumented_provider_calls":  report.Totals.UninstrumentedProviderCalls,
+			"failed_provider_calls":          report.Totals.FailedProviderCalls,
+			"avoided_provider_calls":         report.Totals.AvoidedProviderCalls,
+			"input_tokens":                   report.Totals.InputTokens,
+			"output_tokens":                  report.Totals.OutputTokens,
+			"average_input_tokens":           report.Totals.AverageInputTokens,
+			"estimated_avoided_input_tokens": report.Totals.EstimatedAvoidedInputTokens,
+		}).Info("classifier token efficiency report generated")
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 func (s *Server) listMarketplaces(w http.ResponseWriter, _ *http.Request) {
 	if s.deps.Marketplaces == nil {

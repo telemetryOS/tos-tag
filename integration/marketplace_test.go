@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -258,12 +259,341 @@ printf '# fetched product source\n'
 	}
 }
 
+func TestAnalyticsReviewedHelperUsesBoundedGETAndRedactsDirectIdentifiers(t *testing.T) {
+	temporary := t.TempDir()
+	capture := filepath.Join(temporary, "curl-argv.txt")
+	fakeCurl := filepath.Join(temporary, "curl")
+	const fakeCurlScript = `#!/bin/bash
+set -eu
+output=""
+headers=""
+url=""
+printf '%s\n' "$@" > "$CAPTURE_PATH"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) output="$2"; shift 2 ;;
+    --dump-header) headers="$2"; shift 2 ;;
+    --url) url="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ "$url" == *"/analytics/site"* ]]; then
+  printf 'HTTP/1.1 200 OK\r\nTotal-Records-Count: 23\r\n\r\n' > "$headers"
+  printf '%s' '[{"type":"pageview","ip":"192.0.2.1","visitor_token":"visitor-secret","session_id":"session-secret","event_id":"event-secret","url":"https://www.telemetryos.com/pricing?email=person@example.com","referrer":"https://example.com/?secret=yes","props":{"customer_text":"private"},"ua":{"raw":"private-user-agent"},"path":"/pricing"}]' > "$output"
+else
+  printf '%s' '{"account":{"account_id":"0123456789abcdef01234567","email":"person@example.com","internal":false,"stage":"activated","demo_code":"secret-code","touches":[{"source":"google","token":"visitor-secret"}]},"events":[{"type":"pageview","ip":"192.0.2.1","visitor_token":"visitor-secret","session_id":"session-secret","event_id":"event-secret","url":"https://www.telemetryos.com/pricing?email=person@example.com","referrer":"https://example.com/?secret=yes","props":{"customer_text":"private"},"ua":{"raw":"private-user-agent"},"path":"/pricing"}],"self_reported_attribution":[{"label":"free-form customer answer","accounts":1}]}' > "$output"
+fi
+printf '200'
+`
+	if err := os.WriteFile(fakeCurl, []byte(fakeCurlScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	helper := filepath.Join("..", "tool-marketplace", "tools", "analytics", "run.sh")
+	command := exec.Command("/bin/bash", helper, "account", "0123456789abcdef01234567")
+	command.Env = []string{
+		"PATH=" + temporary + ":/usr/bin:/bin",
+		"HOME=" + temporary,
+		"TMPDIR=" + temporary,
+		"TOS_TAG_OPERATION_ID=read",
+		"TELEMETRYOS_ANALYTICS_URL=https://qa-api.telemetryos.com",
+		"SITE_ANALYTICS_TOKEN=s0123456789abcdef0123456789abcdef",
+		"CAPTURE_PATH=" + capture,
+	}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("analytics helper failed: %v: %s", err, output)
+	}
+	for _, forbidden := range []string{"person@example.com", "192.0.2.1", "visitor-secret", "session-secret", "event-secret", "secret-code", "customer_text", "private-user-agent", "free-form customer answer", "?email=", "?secret="} {
+		if bytes.Contains(output, []byte(forbidden)) {
+			t.Fatalf("analytics output leaked %q: %s", forbidden, output)
+		}
+	}
+	for _, expected := range []string{"0123456789abcdef01234567", `"stage": "activated"`, `"path": "/pricing"`, "https://www.telemetryos.com/pricing"} {
+		if !bytes.Contains(output, []byte(expected)) {
+			t.Fatalf("analytics output is missing %q: %s", expected, output)
+		}
+	}
+	argv, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(argv, []byte("s0123456789abcdef0123456789abcdef")) || !bytes.Contains(argv, []byte("https://qa-api.telemetryos.com/reporting/funnel/accounts/0123456789abcdef01234567")) || !bytes.Contains(argv, []byte("--request\nGET")) {
+		t.Fatalf("unexpected analytics curl arguments: %s", argv)
+	}
+
+	command = exec.Command("/bin/bash", helper, "site-events", "--from", "2026-07-01T00:00:00Z", "--to", "2026-07-08T00:00:00Z", "--type", "pageview,signup_started", "--path", "/pricing", "--exclude-bots", "true", "--page", "2", "--per-page", "25")
+	command.Env = []string{
+		"PATH=" + temporary + ":/usr/bin:/bin",
+		"HOME=" + temporary,
+		"TMPDIR=" + temporary,
+		"TOS_TAG_OPERATION_ID=read",
+		"TELEMETRYOS_ANALYTICS_URL=https://qa-api.telemetryos.com",
+		"SITE_ANALYTICS_TOKEN=s0123456789abcdef0123456789abcdef",
+		"CAPTURE_PATH=" + capture,
+	}
+	rawOutput, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("raw site-events helper failed: %v: %s", err, rawOutput)
+	}
+	for _, forbidden := range []string{"person@example.com", "192.0.2.1", "visitor-secret", "session-secret", "event-secret", "customer_text", "private-user-agent", "?email=", "?secret="} {
+		if bytes.Contains(rawOutput, []byte(forbidden)) {
+			t.Fatalf("raw site-events output leaked %q: %s", forbidden, rawOutput)
+		}
+	}
+	for _, expected := range []string{`"total": 23`, `"page": 2`, `"per_page": 25`, `"type": "pageview"`, `"path": "/pricing"`} {
+		if !bytes.Contains(rawOutput, []byte(expected)) {
+			t.Fatalf("raw site-events output is missing %q: %s", expected, rawOutput)
+		}
+	}
+	argv, err = os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"https://qa-api.telemetryos.com/analytics/site?", "from=2026-07-01T00%3A00%3A00Z", "type=pageview%2Csignup_started", "path=%2Fpricing", "exclude_bots=true", "page=2", "per_page=25", "--dump-header"} {
+		if !bytes.Contains(argv, []byte(expected)) {
+			t.Fatalf("raw site-events curl arguments are missing %q: %s", expected, argv)
+		}
+	}
+	if bytes.Contains(argv, []byte("perPage=")) || bytes.Contains(argv, []byte("s0123456789abcdef0123456789abcdef")) {
+		t.Fatalf("raw site-events curl arguments crossed the reviewed boundary: %s", argv)
+	}
+
+	for name, args := range map[string][]string{
+		"visitor lookup":          {"events", "--visitor", "visitor-secret"},
+		"raw visitor lookup":      {"site-events", "--token", "visitor-secret"},
+		"raw session lookup":      {"site-events", "--session-id", "session-secret"},
+		"raw unsafe path":         {"site-events", "--path", "/pricing?email=person@example.com"},
+		"raw missing bot scope":   {"site-events", "--from", "2026-07-01T00:00:00Z"},
+		"conflicting bot filters": {"site-events", "--exclude-bots", "true", "--bots-only", "true"},
+		"internal events":         {"events", "--include-internal", "true"},
+		"invalid account":         {"account", "../secret"},
+	} {
+		t.Run("reject "+name, func(t *testing.T) {
+			command := exec.Command("/bin/bash", append([]string{helper}, args...)...)
+			command.Env = []string{
+				"PATH=" + temporary + ":/usr/bin:/bin",
+				"HOME=" + temporary,
+				"TMPDIR=" + temporary,
+				"TOS_TAG_OPERATION_ID=read",
+				"TELEMETRYOS_ANALYTICS_URL=https://qa-api.telemetryos.com",
+				"SITE_ANALYTICS_TOKEN=s0123456789abcdef0123456789abcdef",
+				"CAPTURE_PATH=" + capture,
+			}
+			if rejectedOutput, rejectedErr := command.CombinedOutput(); rejectedErr == nil {
+				t.Fatalf("unsafe Analytics input succeeded: %s", rejectedOutput)
+			}
+		})
+	}
+}
+
+func TestCodeReviewedHelperRefreshesDefaultSnapshotAndBoundsSemanticSearch(t *testing.T) {
+	temporary := t.TempDir()
+	remote := filepath.Join(temporary, "remote.git")
+	seed := filepath.Join(temporary, "seed")
+	sourceRoot := filepath.Join(temporary, "source")
+	snapshotRoot := filepath.Join(temporary, "snapshots")
+	indexRoot := filepath.Join(temporary, "indexes")
+	modelRoot := filepath.Join(temporary, "model")
+	githubConfig := filepath.Join(temporary, "gh")
+	binRoot := filepath.Join(temporary, "bin")
+	for _, directory := range []string{sourceRoot, snapshotRoot, indexRoot, modelRoot, githubConfig, binRoot} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(modelRoot, ".tos-tag-model-revision"), []byte("e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	runGit := func(directory string, arguments ...string) string {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", directory}, arguments...)...)
+		command.Env = append(os.Environ(), "GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.com", "GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.com")
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	if output, err := exec.Command("git", "init", "--bare", "--initial-branch=main", remote).CombinedOutput(); err != nil {
+		t.Fatalf("init remote: %v: %s", err, output)
+	}
+	if output, err := exec.Command("git", "init", "--initial-branch=main", seed).CombinedOutput(); err != nil {
+		t.Fatalf("init seed: %v: %s", err, output)
+	}
+	if err := os.MkdirAll(filepath.Join(seed, "core"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(seed, "core", "auth.go"), []byte("package core\n\nfunc Authorize() bool { return true }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(seed, ".env"), []byte("TOKEN=must-not-be-readable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(seed, "add", "core/auth.go", ".env")
+	runGit(seed, "commit", "-m", "initial")
+	runGit(seed, "remote", "add", "origin", "file://"+remote)
+	runGit(seed, "push", "-u", "origin", "main")
+	if output, err := exec.Command("git", "clone", "--quiet", "file://"+remote, filepath.Join(sourceRoot, "Demo")).CombinedOutput(); err != nil {
+		t.Fatalf("clone source: %v: %s", err, output)
+	}
+	runGit(filepath.Join(sourceRoot, "Demo"), "remote", "set-url", "origin", "https://github.com/telemetryOS/Demo.git")
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeGit := filepath.Join(binRoot, "git")
+	const fakeGitScript = `#!/usr/bin/env bash
+set -euo pipefail
+arguments=("$@")
+for index in "${!arguments[@]}"; do
+  if [[ "${arguments[index]}" == "https://github.com/telemetryOS/Demo.git" ]]; then
+    arguments[index]="file://${TEST_REMOTE_PATH}"
+  fi
+done
+exec "${REAL_GIT_BIN}" "${arguments[@]}"
+`
+	if err := os.WriteFile(fakeGit, []byte(fakeGitScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	capture := filepath.Join(temporary, "semble-arguments")
+	fakeSemble := filepath.Join(binRoot, "semble")
+	const fakeSembleScript = `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  printf '0.5.3\n'
+  exit 0
+fi
+printf '%s\n' "$@" >"${CAPTURE_PATH}"
+printf '%s\n' '{"query":"authorization path","results":[{"file_path":"core/auth.go","start_line":3,"end_line":3,"score":0.91,"content":"func Authorize() bool { return true }"}]}'
+`
+	if err := os.WriteFile(fakeSemble, []byte(fakeSembleScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	helper := filepath.Join("..", "tool-marketplace", "tools", "code", "run.sh")
+	environment := []string{
+		"PATH=" + binRoot + ":" + os.Getenv("PATH"),
+		"HOME=" + temporary,
+		"TOS_TAG_OPERATION_ID=read",
+		"TAG_AION_DEVELOPER_PATH=" + sourceRoot,
+		"TAG_CODE_SNAPSHOT_ROOT=" + snapshotRoot,
+		"TAG_CODE_INDEX_ROOT=" + indexRoot,
+		"TAG_CODE_MODEL_PATH=" + modelRoot,
+		"TAG_CODE_GH_CONFIG_DIR=" + githubConfig,
+		"REAL_GIT_BIN=" + realGit,
+		"TEST_REMOTE_PATH=" + remote,
+		"CAPTURE_PATH=" + capture,
+	}
+	runHelper := func(arguments ...string) ([]byte, error) {
+		t.Helper()
+		command := exec.Command("/bin/bash", append([]string{helper}, arguments...)...)
+		command.Env = environment
+		return command.CombinedOutput()
+	}
+
+	freshnessOutput, err := runHelper("freshness", "Demo")
+	if err != nil {
+		t.Fatalf("freshness failed: %v: %s", err, freshnessOutput)
+	}
+	var freshness map[string]any
+	if err := json.Unmarshal(freshnessOutput, &freshness); err != nil {
+		t.Fatalf("freshness JSON: %v: %s", err, freshnessOutput)
+	}
+	firstCommit, _ := freshness["commit"].(string)
+	if freshness["repository"] != "Demo" || freshness["default_branch"] != "main" || freshness["status"] != "current" || len(firstCommit) != 40 {
+		t.Fatalf("unexpected freshness: %#v", freshness)
+	}
+	if _, err := os.Stat(filepath.Join(snapshotRoot, "repos", "Demo", firstCommit, "core", "auth.go")); err != nil {
+		t.Fatalf("default snapshot missing: %v", err)
+	}
+	receiptPath := filepath.Join(snapshotRoot, "receipts", "Demo.json")
+	receiptBytes, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt map[string]any
+	if err := json.Unmarshal(receiptBytes, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	receipt["fetched_at"] = ""
+	invalidReceipt, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(receiptPath, invalidReceipt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repairedOutput, err := runHelper("freshness", "Demo")
+	if err != nil {
+		t.Fatalf("invalid receipt was not refreshed: %v: %s", err, repairedOutput)
+	}
+	var repaired map[string]any
+	if err := json.Unmarshal(repairedOutput, &repaired); err != nil {
+		t.Fatal(err)
+	}
+	if repaired["fetched_at"] == "" {
+		t.Fatalf("invalid fetched_at was accepted: %s", repairedOutput)
+	}
+
+	semanticOutput, err := runHelper("semantic-search", "Demo", "where is authorization enforced?", "3", "8")
+	if err != nil {
+		t.Fatalf("semantic search failed: %v: %s", err, semanticOutput)
+	}
+	if !bytes.Contains(semanticOutput, []byte(`"file_path": "Demo/core/auth.go"`)) || !bytes.Contains(semanticOutput, []byte(`"commit": "`+firstCommit+`"`)) {
+		t.Fatalf("semantic output lacks bounded provenance: %s", semanticOutput)
+	}
+	semanticArguments, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"search", "where is authorization enforced?", "--top-k", "3", "--max-snippet-lines", "8", "--content", "all"} {
+		if !bytes.Contains(semanticArguments, []byte(expected)) {
+			t.Fatalf("Semble invocation is missing %q: %s", expected, semanticArguments)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(seed, "core", "auth.go"), []byte("package core\n\nfunc Authorize() bool { return false }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(seed, "add", "core/auth.go")
+	runGit(seed, "commit", "-m", "change default")
+	runGit(seed, "push", "origin", "main")
+	if err := os.Remove(filepath.Join(snapshotRoot, "receipts", "Demo.json")); err != nil {
+		t.Fatal(err)
+	}
+	refreshedOutput, err := runHelper("freshness", "Demo")
+	if err != nil {
+		t.Fatalf("refreshed freshness failed: %v: %s", err, refreshedOutput)
+	}
+	var refreshed map[string]any
+	if err := json.Unmarshal(refreshedOutput, &refreshed); err != nil {
+		t.Fatal(err)
+	}
+	if refreshed["commit"] == firstCommit {
+		t.Fatalf("default branch did not refresh: %s", refreshedOutput)
+	}
+	readOutput, err := runHelper("read", "Demo/core/auth.go", "1", "5")
+	if err != nil || !bytes.Contains(readOutput, []byte("return false")) {
+		t.Fatalf("exact read did not use refreshed snapshot: %v: %s", err, readOutput)
+	}
+	if restrictedOutput, restrictedErr := runHelper("read", "Demo/.env", "1", "5"); restrictedErr == nil || bytes.Contains(restrictedOutput, []byte("must-not-be-readable")) {
+		t.Fatalf("restricted default-branch file escaped: %v: %s", restrictedErr, restrictedOutput)
+	}
+	if unsafeOutput, unsafeErr := runHelper("semantic-search", "../Demo", "authorization", "3", "8"); unsafeErr == nil {
+		t.Fatalf("unsafe semantic repository succeeded: %s", unsafeOutput)
+	}
+}
+
 func TestCheckedInReviewedToolMarketplace(t *testing.T) {
 	registry, err := tools.LoadMarketplace(filepath.Join("..", "tool-marketplace"), "catalog.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"telemetryos.linear": true, "telemetryos.wiki": true, "telemetryos.otel": true, "telemetryos.device-logs": true, "telemetryos.mongo": true, "telemetryos.code": true, "telemetryos.product-docs": true}
+	want := map[string]bool{"telemetryos.linear": true, "telemetryos.wiki": true, "telemetryos.otel": true, "telemetryos.analytics": true, "telemetryos.device-logs": true, "telemetryos.mongo": true, "telemetryos.code": true, "telemetryos.product-docs": true}
 	for _, snapshot := range registry.List() {
 		delete(want, snapshot.ToolID)
 		if snapshot.ContentHash == "" || len(snapshot.Operations) == 0 {
@@ -276,6 +606,10 @@ func TestCheckedInReviewedToolMarketplace(t *testing.T) {
 	code, ok := registry.Resolve("telemetryos.code")
 	if !ok || len(code.Manifest.Operations) != 1 || code.Manifest.Operations[0].ID != "read" || code.Manifest.Operations[0].Risk != "read" {
 		t.Fatalf("source capability is not permanently read-only: %#v", code.Manifest)
+	}
+	codeRead := code.Manifest.Operations[0]
+	if codeRead.TimeoutSeconds != 120 || codeRead.MaxOutputBytes != 1048576 || !reflect.DeepEqual(codeRead.Env, []string{"TAG_AION_DEVELOPER_PATH", "TAG_CODE_SNAPSHOT_ROOT", "TAG_CODE_INDEX_ROOT", "TAG_CODE_MODEL_PATH", "TAG_CODE_GH_CONFIG_DIR"}) {
+		t.Fatalf("source refresh/semantic boundary is invalid: %#v", codeRead)
 	}
 	wiki, ok := registry.Resolve("telemetryos.wiki")
 	if !ok {
@@ -302,6 +636,14 @@ func TestCheckedInReviewedToolMarketplace(t *testing.T) {
 	if productRead.ID != "read" || productRead.Risk != "read" || productRead.RequiresApproval() || len(productRead.Env) != 0 || productRead.TimeoutSeconds != 30 || productRead.MaxOutputBytes != 524288 {
 		t.Fatalf("product docs read boundary is invalid: %#v", productRead)
 	}
+	analytics, ok := registry.Resolve("telemetryos.analytics")
+	if !ok || len(analytics.Manifest.Operations) != 1 {
+		t.Fatalf("analytics tool was not resolved safely: %#v", analytics.Manifest)
+	}
+	analyticsRead := analytics.Manifest.Operations[0]
+	if analyticsRead.ID != "read" || analyticsRead.Risk != "read" || analyticsRead.RequiresApproval() || analyticsRead.TimeoutSeconds != 90 || analyticsRead.MaxOutputBytes != 1048576 || !reflect.DeepEqual(analyticsRead.Env, []string{"TELEMETRYOS_ANALYTICS_URL", "SITE_ANALYTICS_TOKEN"}) || !reflect.DeepEqual(analyticsRead.PublicEnv, []string{"TELEMETRYOS_ANALYTICS_URL"}) {
+		t.Fatalf("analytics read boundary is invalid: %#v", analyticsRead)
+	}
 }
 
 func TestConfiguredBasePluginWhenAvailable(t *testing.T) {
@@ -309,15 +651,16 @@ func TestConfiguredBasePluginWhenAvailable(t *testing.T) {
 	if _, err := os.Stat(baseRoot); errors.Is(err, os.ErrNotExist) {
 		t.Skipf("checkout not present: %s", baseRoot)
 	}
+	expectedNames := []string{"bug", "code-change-intake", "codebase-read", "feature", "linear-issue-manager", "marketing-account-journey", "marketing-funnel-chain", "marketing-funnel-review", "marketing-messaging", "marketing-unstall-draft", "product-knowledge", "slack-message-design", "suitability", "tag-triggers", "team-alignment", "telemetry-otel-fetch", "telemetryos-documentation", "wiki"}
 	base, err := marketplace.LoadPlugin(baseRoot, filepath.Join(".claude-plugin", "marketplace.json"), "base")
-	if err != nil || len(base) != 14 {
+	if err != nil || len(base) < len(expectedNames) {
 		t.Fatalf("base skills=%d err=%v", len(base), err)
 	}
 	baseNames := map[string]bool{}
 	for _, snapshot := range base {
 		baseNames[snapshot.Name] = true
 	}
-	for _, expected := range []string{"bug", "code-change-intake", "codebase-read", "feature", "linear-issue-manager", "marketing-messaging", "product-knowledge", "slack-message-design", "suitability", "tag-triggers", "team-alignment", "telemetry-otel-fetch", "telemetryos-documentation", "wiki"} {
+	for _, expected := range expectedNames {
 		if !baseNames[expected] {
 			t.Fatalf("base plugin missing %s: %#v", expected, baseNames)
 		}

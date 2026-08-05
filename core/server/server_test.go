@@ -23,6 +23,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/sessions"
 	"github.com/telemetryos/tos-tag/core/slack"
 	"github.com/telemetryos/tos-tag/core/triggers"
+	"github.com/telemetryos/tos-tag/core/usage"
 	"github.com/telemetryos/tos-tag/models"
 	"github.com/telemetryos/tos-tag/types"
 )
@@ -310,6 +311,43 @@ func TestStatusSupportsLiveModeWithoutStubAdapters(t *testing.T) {
 	srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/.status", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("live status = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestClassifierEfficiencyEndpointIsScopedAndValidatesWindow(t *testing.T) {
+	srv, _ := newTestServer(t, false)
+	store := usage.NewMemory()
+	if err := store.Record(context.Background(), usage.Event{OrganizationID: "org", Category: usage.CategoryClassifier, EfficiencyAccountingVersion: usage.ClassifierEfficiencyAccountingVersion, Calls: 1, InputTokens: 120, OutputTokens: 8, ContextPackTokens: 20}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Record(context.Background(), usage.Event{OrganizationID: "other", Category: usage.CategoryClassifier, Calls: 1, InputTokens: 999}); err != nil {
+		t.Fatal(err)
+	}
+	srv.deps.Usage = store
+
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/api/usage/classifier-efficiency?organization_id=org&days=1&timezone=America%2FVancouver", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("efficiency status=%d body=%s", response.Code, response.Body.String())
+	}
+	var report usage.EfficiencyReport
+	if err := json.Unmarshal(response.Body.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.OrganizationID != "org" || report.Timezone != "America/Vancouver" || report.Totals.ProviderCalls != 1 || report.Totals.InstrumentedProviderCalls != 1 || report.Totals.UninstrumentedProviderCalls != 0 || report.Totals.InputTokens != 120 || report.Totals.ContextPackTokens != 20 {
+		t.Fatalf("efficiency report = %#v", report)
+	}
+
+	for _, path := range []string{
+		"/admin/api/usage/classifier-efficiency?days=1",
+		"/admin/api/usage/classifier-efficiency?organization_id=org&days=0",
+		"/admin/api/usage/classifier-efficiency?organization_id=org&timezone=Nowhere%2FInvalid",
+	} {
+		response = httptest.NewRecorder()
+		srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("path %s status=%d body=%s", path, response.Code, response.Body.String())
+		}
 	}
 }
 

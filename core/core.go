@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/RobertWHurst/blackbox"
@@ -65,6 +66,7 @@ type Core struct {
 	contextDone        chan struct{}
 	contextRefreshStop context.CancelFunc
 	contextRefreshDone chan struct{}
+	contextCycleMu     sync.Mutex
 	activity           *activity.Hub
 	memoryCurator      *agentmemory.Curator
 }
@@ -310,13 +312,29 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 			},
 		)
 		liveIngress.SetModeChangeHandler(func(ctx context.Context, request slack.ModeChangeRequest) (slack.ModeChangeResult, error) {
+			if request.Mode != "" && !validParticipationMode(request.Mode) {
+				return slack.ModeChangeResult{}, fmt.Errorf("unsupported participation mode %q", request.Mode)
+			}
 			policy, resolveErr := organizationStore.Resolve(ctx, request.OrganizationID, request.WorkspaceID, request.ChannelID)
 			if resolveErr != nil {
 				return slack.ModeChangeResult{}, fmt.Errorf("resolve channel policy: %w", resolveErr)
 			}
 			previous := string(policy.ParticipationMode)
+			result := slack.ModeChangeResult{
+				Mode:               previous,
+				Previous:           previous,
+				Enrolled:           policy.Enrolled,
+				Restricted:         policy.Restricted,
+				KillSwitched:       policy.KillSwitch,
+				WorkspaceEnabled:   policy.WorkspaceEnabled,
+				BotIsMember:        policy.BotIsMember,
+				BotMembershipKnown: policy.BotMembershipKnown,
+			}
 			if request.Mode == "" || request.Mode == previous {
-				return slack.ModeChangeResult{Mode: previous, Previous: previous}, nil
+				return result, nil
+			}
+			if request.Mode != string(types.ModeObserve) && (!policy.Enrolled || policy.KillSwitch || !policy.WorkspaceEnabled) {
+				return slack.ModeChangeResult{}, fmt.Errorf("channel policy does not permit active participation")
 			}
 			policy.ParticipationMode = types.ParticipationMode(request.Mode)
 			// An explicit operator choice must survive membership reconciliation.
@@ -328,7 +346,9 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 			if auditErr := appendModeChangeAudit(ctx, auditChain, request, saved, previous); auditErr != nil {
 				logger.WithCtx(blackbox.Ctx{"organization_id": request.OrganizationID, "channel_id": request.ChannelID, "error_type": fmt.Sprintf("%T", auditErr)}).Error("channel mode change audit persistence failed")
 			}
-			return slack.ModeChangeResult{Mode: string(saved.ParticipationMode), Previous: previous, Changed: true}, nil
+			result.Mode = string(saved.ParticipationMode)
+			result.Changed = true
+			return result, nil
 		})
 	}
 	pipe, err := pipeline.New(pipeline.Dependencies{
@@ -365,12 +385,25 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	srv, err := server.New(server.Dependencies{
 		Config: cfg, Logger: logger, Activity: activityFeed, Health: db, Ingress: statusIngress, Transport: statusTransport,
 		Jobs: jobQueue, Deliveries: deliveryQueue, Decisions: decisionStore, Version: Version,
-		Routes: responseRouter, Organizations: organizationStore, Retention: retentionJanitor, Records: managementRecords, ChannelConfig: channelConfiguration, Marketplaces: marketplaceRegistry, ToolMarketplaces: toolMarketplaceRegistry, Intelligence: intelligenceProjector, Memory: memoryStore, Secrets: secretStore, Audit: auditChain, Approvals: approvalStore, ApprovalCoordinator: approvalCoordinator, Routines: routineStore, Triggers: triggerStore, Sessions: sessionStore,
+		Routes: responseRouter, Organizations: organizationStore, Retention: retentionJanitor, Records: managementRecords, ChannelConfig: channelConfiguration, Marketplaces: marketplaceRegistry, ToolMarketplaces: toolMarketplaceRegistry, Intelligence: intelligenceProjector, Memory: memoryStore, Secrets: secretStore, Audit: auditChain, Approvals: approvalStore, ApprovalCoordinator: approvalCoordinator, Routines: routineStore, Triggers: triggerStore, Sessions: sessionStore, Usage: usageRecorder,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &Core{Config: cfg, Logger: logger, database: db, pipeline: pipe, server: srv, retention: retentionJanitor, router: responseRouter, toolBridge: toolBridge, toolIDs: allowedToolIDs, routines: routineService, triggers: triggerService, contextSync: slackContextSync, activity: activityFeed, memoryCurator: memoryCurator}, nil
+	app := &Core{Config: cfg, Logger: logger, database: db, pipeline: pipe, server: srv, retention: retentionJanitor, router: responseRouter, toolBridge: toolBridge, toolIDs: allowedToolIDs, routines: routineService, triggers: triggerService, contextSync: slackContextSync, activity: activityFeed, memoryCurator: memoryCurator}
+	if liveIngress != nil && slackContextSync != nil {
+		liveIngress.SetReconnectHandler(app.recoverSlackContext)
+	}
+	return app, nil
+}
+
+func validParticipationMode(mode string) bool {
+	switch types.ParticipationMode(mode) {
+	case types.ModeObserve, types.ModeMention, types.ModeAssist, types.ModeProactive:
+		return true
+	default:
+		return false
+	}
 }
 
 func appendModeChangeAudit(ctx context.Context, appender audit.Appender, request slack.ModeChangeRequest, saved orgconfig.ChannelPolicy, previous string) error {
@@ -468,17 +501,23 @@ func (c loggedClassifier) Decide(ctx context.Context, target classifier.Target, 
 	decision, err := c.next.Decide(ctx, target, pack)
 	if err != nil {
 		duration := time.Since(started)
+		classifierCode := classifier.ErrorCode(err)
 		c.logger.WithCtx(blackbox.Ctx{
-			"organization_id":  target.Envelope.OrganizationID,
-			"channel_id":       target.Envelope.ChannelID,
-			"observation_id":   target.ObservationID,
-			"classifier_stage": classifier.ErrorStage(err),
-			"classifier_code":  classifier.ErrorCode(err),
-			"error_type":       fmt.Sprintf("%T", err),
-			"duration_ms":      duration.Milliseconds(),
+			"organization_id":       target.Envelope.OrganizationID,
+			"channel_id":            target.Envelope.ChannelID,
+			"observation_id":        target.ObservationID,
+			"classifier_stage":      classifier.ErrorStage(err),
+			"classifier_code":       classifierCode,
+			"error_type":            fmt.Sprintf("%T", err),
+			"duration_ms":           duration.Milliseconds(),
+			"context_pack_tokens":   pack.TotalTokens,
+			"provider_calls":        1,
+			"failed_provider_calls": 1,
 		}).Warn("OpenAI classifier failed; deterministic fallback selected")
 		if c.usage != nil {
-			_ = c.usage.Record(ctx, usage.Event{OrganizationID: target.Envelope.OrganizationID, Category: "classifier", ProviderID: c.providerID, ModelID: c.modelID, Calls: 1, DurationMS: duration.Milliseconds()})
+			if usageErr := c.usage.Record(ctx, usage.Event{OrganizationID: target.Envelope.OrganizationID, Category: usage.CategoryClassifier, ProviderID: c.providerID, ModelID: c.modelID, ContextPackTokens: int64(pack.TotalTokens), EfficiencyAccountingVersion: usage.ClassifierEfficiencyAccountingVersion, Calls: 1, FailedCalls: 1, Outcome: "provider_error", ReasonCode: classifierCode, DurationMS: duration.Milliseconds()}); usageErr != nil {
+				c.logger.WithCtx(blackbox.Ctx{"organization_id": target.Envelope.OrganizationID, "error_type": fmt.Sprintf("%T", usageErr)}).Warn("classifier usage accounting failed")
+			}
 		}
 		fallback, fallbackErr := (classifier.DeterministicClassifier{}).Decide(ctx, target, pack)
 		if fallbackErr != nil {
@@ -488,25 +527,35 @@ func (c loggedClassifier) Decide(ctx context.Context, target classifier.Target, 
 		return fallback, nil
 	}
 	duration := time.Since(started)
+	estimatedNonContextInputTokens := decision.ClassifierInputTokens - int64(pack.TotalTokens)
+	if estimatedNonContextInputTokens < 0 {
+		estimatedNonContextInputTokens = 0
+	}
 	c.logger.WithCtx(blackbox.Ctx{
-		"organization_id":             target.Envelope.OrganizationID,
-		"channel_id":                  target.Envelope.ChannelID,
-		"observation_id":              target.ObservationID,
-		"recommended_outcome":         decision.Outcome,
-		"recommended_confidence":      decision.Confidence,
-		"recommended_reaction":        decision.Reaction,
-		"recommended_agent_profile":   decision.AgentModelProfile,
-		"recommended_agent_strength":  decision.AgentModelStrength,
-		"recommended_agent_effort":    decision.AgentReasoningEffort,
-		"classifier_response_id":      decision.ClassifierResponseID,
-		"classifier_model":            decision.ClassifierModel,
-		"classifier_reasoning_effort": decision.ClassifierReasoningEffort,
-		"input_tokens":                decision.ClassifierInputTokens,
-		"output_tokens":               decision.ClassifierOutputTokens,
-		"duration_ms":                 duration.Milliseconds(),
+		"organization_id":                    target.Envelope.OrganizationID,
+		"channel_id":                         target.Envelope.ChannelID,
+		"observation_id":                     target.ObservationID,
+		"recommended_outcome":                decision.Outcome,
+		"recommended_confidence":             decision.Confidence,
+		"recommended_reaction":               decision.Reaction,
+		"recommended_agent_profile":          decision.AgentModelProfile,
+		"recommended_agent_strength":         decision.AgentModelStrength,
+		"recommended_agent_effort":           decision.AgentReasoningEffort,
+		"classifier_response_id":             decision.ClassifierResponseID,
+		"classifier_model":                   decision.ClassifierModel,
+		"classifier_reasoning_effort":        decision.ClassifierReasoningEffort,
+		"input_tokens":                       decision.ClassifierInputTokens,
+		"output_tokens":                      decision.ClassifierOutputTokens,
+		"context_pack_tokens":                pack.TotalTokens,
+		"estimated_non_context_input_tokens": estimatedNonContextInputTokens,
+		"provider_calls":                     1,
+		"failed_provider_calls":              0,
+		"duration_ms":                        duration.Milliseconds(),
 	}).Info("OpenAI classifier request completed")
 	if c.usage != nil {
-		_ = c.usage.Record(ctx, usage.Event{OrganizationID: target.Envelope.OrganizationID, Category: "classifier", ProviderID: c.providerID, ModelID: c.modelID, InputTokens: decision.ClassifierInputTokens, OutputTokens: decision.ClassifierOutputTokens, Calls: 1, DurationMS: duration.Milliseconds()})
+		if usageErr := c.usage.Record(ctx, usage.Event{OrganizationID: target.Envelope.OrganizationID, Category: usage.CategoryClassifier, ProviderID: c.providerID, ModelID: c.modelID, InputTokens: decision.ClassifierInputTokens, OutputTokens: decision.ClassifierOutputTokens, ContextPackTokens: int64(pack.TotalTokens), EfficiencyAccountingVersion: usage.ClassifierEfficiencyAccountingVersion, Calls: 1, Outcome: string(decision.Outcome), DurationMS: duration.Milliseconds()}); usageErr != nil {
+			c.logger.WithCtx(blackbox.Ctx{"organization_id": target.Envelope.OrganizationID, "error_type": fmt.Sprintf("%T", usageErr)}).Warn("classifier usage accounting failed")
+		}
 	}
 	return decision, err
 }
@@ -660,8 +709,10 @@ func (c *Core) startContextRefresh(parent context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				run, err := c.contextSync.Discover(ctx, c.pipeline.RegisterContextChannel)
+				c.contextCycleMu.Lock()
+				run, err := c.contextSync.RefreshMembership(ctx, c.pipeline.RegisterContextChannel)
 				if err != nil {
+					c.contextCycleMu.Unlock()
 					if ctx.Err() == nil {
 						c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Warn("Slack membership reconciliation failed; prior policy retained")
 					}
@@ -669,12 +720,10 @@ func (c *Core) startContextRefresh(parent context.Context) {
 				}
 				stats := run.Stats()
 				c.Logger.WithCtx(blackbox.Ctx{"channels_discovered": stats.ChannelsDiscovered, "channels_registered": stats.ChannelsRegistered}).Info("Slack membership reconciliation completed")
-				if _, err := c.contextSync.CatchUp(ctx, run, c.pipeline.RecoverContextEnvelope); err != nil && ctx.Err() == nil {
-					c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Warn("Slack joined-channel missed-event catch-up stopped before completion")
-				}
 				if _, err := c.contextSync.Backfill(ctx, run, c.pipeline.ImportContextEnvelope); err != nil && ctx.Err() == nil {
 					c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Warn("Slack incremental context bootstrap stopped before completion")
 				}
+				c.contextCycleMu.Unlock()
 			}
 		}
 	}()
@@ -705,6 +754,8 @@ func (c *Core) startContextBackfill(parent context.Context) {
 	run := c.contextRun
 	go func() {
 		defer close(c.contextDone)
+		c.contextCycleMu.Lock()
+		defer c.contextCycleMu.Unlock()
 		if _, err := c.contextSync.CatchUp(ctx, run, c.pipeline.RecoverContextEnvelope); err != nil && ctx.Err() == nil {
 			c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Error("Slack startup joined-channel missed-event catch-up stopped before completion")
 		}
@@ -712,6 +763,25 @@ func (c *Core) startContextBackfill(parent context.Context) {
 			c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Error("Slack user context backfill stopped before completion")
 		}
 	}()
+}
+
+func (c *Core) recoverSlackContext(ctx context.Context) error {
+	if c.contextSync == nil {
+		return nil
+	}
+	c.contextCycleMu.Lock()
+	defer c.contextCycleMu.Unlock()
+	run, err := c.contextSync.Discover(ctx, c.pipeline.RegisterContextChannel)
+	if err != nil {
+		return fmt.Errorf("discover Slack context after reconnect: %w", err)
+	}
+	if _, err := c.contextSync.CatchUp(ctx, run, c.pipeline.RecoverContextEnvelope); err != nil {
+		return fmt.Errorf("catch up Slack context after reconnect: %w", err)
+	}
+	if _, err := c.contextSync.Backfill(ctx, run, c.pipeline.ImportContextEnvelope); err != nil {
+		return fmt.Errorf("bootstrap Slack context after reconnect: %w", err)
+	}
+	return nil
 }
 
 func (c *Core) stopContextBackfill(ctx context.Context) error {

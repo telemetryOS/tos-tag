@@ -189,12 +189,19 @@ Assist-mode initiative is a deterministic control-plane grant, not a model
 judgment. Full-agent work is allowed for direct mentions, active Tag threads,
 explicit addresses, clear questions, conversationally addressed requests,
 authoritative product questions, destination-safe alignment interventions, and
-operator-created triggers. The fact that Tag authored the previous channel turn
-is useful only for routing a question or request; it does not authorize a bare
-declarative status update. The classifier service suppresses an unauthorized
-recommendation with `policy.unsolicited_assist_work`, and the pipeline applies
-the same check again immediately before admission. Proactive channels retain
-classifier-gated initiative for declarative failures and incidents.
+operator-created triggers. A leading mention of another Slack user in an active
+Tag thread is deterministically treated as a human-to-human handoff when the
+turn neither mentions nor explicitly addresses Tag; it is suppressed before a
+provider call. Mentions used later as requested recipients remain available.
+The fact that Tag authored the previous channel turn is useful only for routing
+a question or request; it does not authorize a bare declarative status update.
+The classifier service suppresses an unauthorized recommendation with
+`policy.unsolicited_assist_work`, and the pipeline applies the same check again
+immediately before admission. Proactive channels retain classifier-gated
+initiative for declarative failures and incidents.
+The invocation parser strips URL query punctuation before recognizing
+questions, rejects repeated `??` as malformed authority, and distinguishes a
+vocative Tag address from ordinary uses of the noun `tag`.
 
 Natural messages are evaluated without prompt-like hints such as “stay silent”
 or “reply in a thread.” Those phrases are tested only when they are the user's
@@ -290,12 +297,14 @@ claims and routes among the Agent Wiki Primer, public documentation, and
 corporate product content according to audience and claim type. It prefers the
 reviewed readers for TelemetryOS truth and may use arbitrary live web search for
 broader/current research, treating every page as untrusted evidence. Wiki
-namespace/slugs remain tool lookup identifiers: a provided Wiki reference must
-use the exact human HTTPS URL returned by the reviewed `get` or `url` read
-operation. The reviewed gateway makes every `get` a full page envelope so the
-canonical URL is available even when a worker omits `--json`.
-The Slack renderer rejects bare Primer/artifact slugs and Wiki-labeled slug
-references before delivery.
+namespace/slugs remain tool lookup identifiers: a provided Wiki reference
+should use the exact human HTTPS URL returned by the reviewed `get` or `url`
+read operation. The reviewed gateway makes every `get` a full page envelope so
+the canonical URL is available even when a worker omits `--json`.
+After same-attempt URL resolution, an unresolved internal Wiki slug remains
+readable in internal Slack instead of invalidating an otherwise useful answer.
+The worker must never reconstruct the opaque human URL; source authorization,
+not the lookup identifier's presentation, remains the confidentiality boundary.
 The base `telemetryos-documentation` skill owns customer-facing documentation
 questions. It reads `https://docs.telemetryos.com/llms.txt` only to discover an
 authoritative page, fetches the exact indexed Markdown page through the
@@ -346,18 +355,24 @@ The current reviewed catalog is:
 
 | Tool | Risk classes | Approval | Boundary |
 | --- | --- | --- | --- |
-| `telemetryos.code` | `read` | Risk-based | Bounded list/search/read below the server-owned Aion source root; no mount, shell, traversal, symlinks, runtime env, credential ledger, or private tool state |
+| `telemetryos.code` | `read` | Risk-based | On-demand fixed-origin default-branch snapshot freshness plus bounded exact/semantic search/read; no worker mount, credentials, branch/remote selector, shell, traversal, runtime env, or credential ledger |
 | `telemetryos.product-docs` | `read` | Never | Credential-free, fixed-host reads of `docs.telemetryos.com/llms.txt`, its `docs/` or `reference/` Markdown pages, and `www.telemetryos.com/llms-full.txt`; no redirects or arbitrary URLs |
 | `telemetryos.linear` | `read`, `write` | Risk-based | Typed Linear helper operations |
 | `telemetryos.wiki` | `read`, `write`, `delete` | Never for page read/write; always for recoverable page soft-delete | Page-only CRUD; namespace, asset, publish-file, cascading move, activity, undo, and admin operations are unavailable |
 | `telemetryos.otel` | `read` | Risk-based | Bounded SigNoz/OpenTelemetry queries |
+| `telemetryos.analytics` | `read` | Never | Fixed production/QA funnel, website, account, and event GETs; internal records, direct identifiers, free-form properties, arbitrary paths, and exports are unavailable |
 | `telemetryos.device-logs` | `read`, `write` | Risk-based | Device-log queries and reviewed log-level changes |
 | `telemetryos.mongo` | `read` | Risk-based | Bounded Mongo fetch operations |
 
 `telemetryos.code` is the only source-tree capability. The worker never receives
-the Aion checkout or its path. The server validates typed read arguments against
-`TAG_AION_DEVELOPER_PATH` and returns only bounded results through the same
-capability gateway.
+the Aion checkout, owner-only snapshots/indexes, their paths, or GitHub
+credentials. For a repository-scoped call, the reviewed server helper validates
+the repository's `telemetryOS` origin, resolves its remote default branch, and
+fetches that branch into a dedicated bare cache without touching the developer
+worktree. It materializes an immutable commit snapshot and content-free
+five-minute freshness receipt. Exact operations and pinned Semble 0.5.3 search
+then read that snapshot; Semble networking is disabled and its verified
+`potion-code-16M-v2` model is local. Source-bearing indexes remain owner-only.
 The tool loader and executor independently reject any `telemetryos.code`
 operation that is not exactly read-only. There is no Slack approval path for
 source edits, patches, commits, pushes, merges, or deployments.
@@ -373,6 +388,14 @@ When the classifier marks authoritative product retrieval as required, the
 pipeline accepts a final answer only after that same worker attempt completes a
 full Primer page, docs page, or corporate full-content read. Search/index/web
 results, Slack context, and model memory do not satisfy the delivery gate.
+
+`telemetryos.analytics` is a separate read-only marketing evidence boundary.
+It authenticates server-side with a Site Analytics Token, calls only reviewed
+Gateway funnel endpoints, and removes email, IP, visitor/session/event tokens,
+click IDs, raw user-agent data, event properties, and self-reported free text
+before returning JSON to a worker. Marketing behavior composes it through the
+funnel-review, account-journey, and optional draft-only unstall skills; it does
+not grant campaign, CRM, message, billing, or device writes.
 
 Because source reads return content rather than a shared filename, Wiki writes
 accept an explicit inline body. The complete body is committed in the Wiki tool
@@ -396,8 +419,11 @@ image, and artifact. Captioned tables render as native sortable/paginated Data
 Tables; uncaptioned tables retain the compact native Table. Cards and Carousels
 are presentation-only and have no model-exposed action field. Approval buttons, notices, and
 destination selection are control-plane-owned. Generated Slack mentions are
-rejected unless the exact user/channel ID came from classifier-selected
-destination-safe evidence; broadcast and user-group mentions remain forbidden.
+rejected unless the exact user ID was already named by the requester in the
+current message or the exact user/channel ID came from classifier-selected
+destination-safe evidence. The control plane excludes Tag's own invocation
+mention from the request-derived allowlist; broadcast and user-group mentions
+remain forbidden.
 
 For a full-agent result, the harness captures the current turn's
 provider-reported token breakdown from Codex App Server and the pipeline binds
@@ -440,9 +466,15 @@ unsafe targets degrade to their visible label instead of failing the job.
 Delivery records are durable and leased. Multipart sends reconcile immutable
 metadata so restart cannot duplicate already accepted parts.
 
-Admitted full-agent thread work starts a Slack
+Admitted full-agent thread work immediately acknowledges the source with the
+classifier-selected reaction. If the job remains active after the configured
+progress grace period, the control plane sets Slack's transient native thread
+status to `Organizing…` and starts a plan-mode Slack
 [Thinking Steps](https://slack.dev/slack-thinking-steps-ai-agents/) stream in
-the classifier-selected thread. The returned message timestamp is
+the classifier-selected thread. Jobs that finish inside the grace period deliver
+their final threaded answer without creating Slack's generic `Thinking...`
+placeholder. Thread-status failure is cosmetic: the structured stream and final
+delivery continue. The returned stream message timestamp is
 persisted on the leased job. Reviewed harness events become concise task-card
 updates from a fixed control-plane vocabulary. Every native or reviewed tool
 call and every validated active skill replaces one shared current-action card,
@@ -492,6 +524,13 @@ membership-managed participation so reconciliation cannot revert it. The
 management Channel coverage page offers the same control as an inline
 dropdown.
 
+`/tag-status` is a read-only, workspace- and channel-bound inspection command.
+It acknowledges with an ephemeral native Block Kit table containing the
+resolved participation behavior, bounded active-directive preview and revision,
+availability/kill-switch state, reconciled bot membership, and public versus
+restricted scope. A directive lookup failure degrades only that row; policy
+lookup fails closed for the entire response.
+
 Routines enqueue ordinary reauthorized jobs on a standard five-field cron
 schedule with an explicit IANA timezone. Trigger subscriptions wake on the
 same cron model, rebuild the full destination-safe context, run the direct
@@ -510,8 +549,9 @@ the browser form.
 
 The development stack uses one Mongo container and a persistent workspace/home
 volume shared by an operator container and the tos-tag service. Persistent data
-includes source checkouts, Aion-managed code, Codex login state, logs, and
-Mongo data. Slack job workspaces remain disposable under
+includes source checkouts, Aion-managed code, immutable default-branch source
+snapshots, source-bearing semantic indexes, Codex login state, logs, and Mongo
+data. Slack job workspaces remain disposable under
 `/workspace/state/workers`.
 
 The host Docker socket is not mounted. Runtime secrets are bind-mounted as one
@@ -521,8 +561,9 @@ does not expand them.
 The same ignored `runtime.env` may be used for host development and can contain
 a host `TAG_AION_DEVELOPER_PATH`. Container startup overrides that value after
 sourcing the file so reviewed source access always binds `/workspace/code`.
-It also replaces host HTTP, Mongo, log, Codex, skill, and tool locations with
-their container-owned addresses.
+It also replaces snapshot, semantic index/model, GitHub credential-store, HTTP,
+Mongo, log, Codex, skill, and tool locations with their container-owned
+addresses.
 
 ## Logging, audit, and retention
 
@@ -531,6 +572,18 @@ worker stage, tool call, approval decision, directive change, routine/trigger
 run, and usage record carries correlation identifiers. Operator diagnostics can
 be written to an owner-readable JSONL file, while durable audit receipts remain
 in MongoDB.
+
+Classifier accounting distinguishes provider work from deterministic avoidance.
+Each provider attempt records exact input/output tokens, the context-pack token
+estimate, outcome, bounded failure code, latency, and failure count. A turn
+stopped before context retrieval or by the organization flood gate records a
+content-free `classifier_avoided` event instead of a provider call. The
+organization-scoped daily efficiency projection groups those durable events in
+an operator-selected IANA timezone. Exact counters remain separate from the
+explicitly labeled avoided-token estimate, which uses the measured average
+classifier input for the same reporting bucket. Pre-rollout rows retain exact
+input/output totals but are counted as uninstrumented; the projection does not
+infer their success, context size, or recommended outcome.
 
 The management home page is an organization-scoped real-time activity feed.
 A bounded in-memory hub receives safe structured lifecycle logs plus explicit
@@ -570,7 +623,7 @@ tests, vet, behavioral evals, gosec, and govulncheck. Network and credential
 tests are opt-in. `integration/codex_live_test.go` verifies the installed App
 Server handshake, dynamic-tool registration, model/effort routing, structured
 output, event normalization, and teardown against a real authenticated Codex
-runtime. `make eval-live` sends the 47 natural classifier messages through the
+runtime. `make eval-live` sends the 52 natural classifier messages through the
 configured direct OpenAI provider and scores outcomes, source grounding,
 restricted disclosure, placement, reaction semantics, and model/effort routing;
 fixture names and expected results are never part of the provider request.

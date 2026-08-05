@@ -26,6 +26,10 @@ const (
 	directivePromptBlockID  = "channel_directive"
 	directivePromptActionID = "prompt"
 	modeSlashCommand        = "/tag-mode"
+	proactiveSlashCommand   = "/tag-proactive"
+	assistSlashCommand      = "/tag-assist"
+	offSlashCommand         = "/tag-off"
+	statusSlashCommand      = "/tag-status"
 )
 
 type LiveOptions struct {
@@ -42,6 +46,7 @@ type LiveIngress struct {
 	options LiveOptions
 	client  socketModeTransport
 	views   viewAPI
+	members membershipAPI
 
 	mu                 sync.Mutex
 	cancel             context.CancelFunc
@@ -52,7 +57,12 @@ type LiveIngress struct {
 	directiveLoad      DirectiveLoadHandler
 	directiveSave      DirectiveSaveHandler
 	modeChange         ModeChangeHandler
+	reconnectHandler   ReconnectHandler
+	recoveryWG         sync.WaitGroup
+	stopping           bool
 }
+
+type ReconnectHandler func(context.Context) error
 
 func (s *LiveIngress) SetApprovalInteractionHandler(handler ApprovalInteractionHandler) {
 	s.mu.Lock()
@@ -79,6 +89,12 @@ func (s *LiveIngress) SetModeChangeHandler(handler ModeChangeHandler) {
 	s.mu.Unlock()
 }
 
+func (s *LiveIngress) SetReconnectHandler(handler ReconnectHandler) {
+	s.mu.Lock()
+	s.reconnectHandler = handler
+	s.mu.Unlock()
+}
+
 type socketModeTransport interface {
 	RunContext(context.Context) error
 	AckCtx(context.Context, string, any) error
@@ -91,6 +107,12 @@ type managedSocketModeTransport struct {
 
 type viewAPI interface {
 	OpenViewContext(context.Context, string, slackapi.ModalViewRequest) (*slackapi.ViewResponse, error)
+}
+
+type membershipAPI interface {
+	GetConversationInfoContext(context.Context, *slackapi.GetConversationInfoInput) (*slackapi.Channel, error)
+	JoinConversationContext(context.Context, string) (*slackapi.Channel, string, []string, error)
+	LeaveConversationContext(context.Context, string) (bool, error)
 }
 
 func (t managedSocketModeTransport) RunContext(ctx context.Context) error {
@@ -108,6 +130,7 @@ func (t managedSocketModeTransport) EventsChannel() <-chan socketmode.Event {
 type deliveryAPI interface {
 	PostMessageContext(context.Context, string, ...slackapi.MsgOption) (string, string, error)
 	UpdateMessageContext(context.Context, string, string, ...slackapi.MsgOption) (string, string, string, error)
+	SetAssistantThreadsStatusContext(context.Context, slackapi.AssistantThreadsSetStatusParameters) error
 	StartStreamContext(context.Context, string, ...slackapi.MsgOption) (string, string, error)
 	AppendStreamContext(context.Context, string, string, ...slackapi.MsgOption) (string, string, error)
 	StopStreamContext(context.Context, string, string, ...slackapi.MsgOption) (string, string, error)
@@ -147,10 +170,23 @@ func (d *LiveDelivery) StartProgress(ctx context.Context, request types.SlackPro
 		requestLogger.WithCtx(blackbox.Ctx{"message_ts": timestamp, "duration_ms": time.Since(started).Milliseconds(), "duplicate": true}).Info("Slack Thinking Steps reconciled")
 		return types.SlackProgressResult{MessageTS: timestamp, UpdatedAt: time.Now().UTC(), Duplicate: true}, nil
 	}
+	// Use Slack's native transient agent status to bridge the handoff from the
+	// source-message acknowledgement reaction into the structured progress
+	// stream. This avoids exposing a literal message-like "Thinking..." state;
+	// failure is cosmetic and must not prevent the answer or its safe progress.
+	if err := d.api.SetAssistantThreadsStatusContext(ctx, slackapi.AssistantThreadsSetStatusParameters{
+		ChannelID: request.ChannelID,
+		ThreadTS:  request.ThreadTS,
+		Status:    "Organizing…",
+	}); err != nil {
+		requestLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "slack_error_code": slackAPIErrorCode(err)}).Warn("Slack agent status failed; continuing with progress stream")
+	} else {
+		requestLogger.Info("Slack agent status set")
+	}
 	options := []slackapi.MsgOption{
 		slackapi.MsgOptionRecipientTeamID(request.TeamID),
 		slackapi.MsgOptionRecipientUserID(request.RecipientUserID),
-		slackapi.MsgOptionTaskDisplayMode(slackapi.TaskDisplayModeTimeline),
+		slackapi.MsgOptionTaskDisplayMode(slackapi.TaskDisplayModePlan),
 		slackapi.MsgOptionChunks(slackapi.NewPlanUpdateChunk(request.Title), chunk),
 		slackapi.MsgOptionMetadata(slackapi.SlackMetadata{EventType: "tos_tag_progress", EventPayload: map[string]any{"job_id": string(request.JobID), "idempotency_key": request.IdempotencyKey}}),
 	}
@@ -230,7 +266,7 @@ func NewLive(options LiveOptions, renderer *deliveries.Renderer) (*LiveIngress, 
 		options.Logger = blackbox.New()
 	}
 	options.Logger = options.Logger.WithCtx(blackbox.Ctx{"component": "slack", "slack_app_id": options.AppID, "slack_team_id": options.TeamID})
-	return &LiveIngress{options: options, client: client, views: api}, &LiveDelivery{teamID: options.TeamID, api: api, renderer: renderer, logger: options.Logger}, nil
+	return &LiveIngress{options: options, client: client, views: api, members: api}, &LiveDelivery{teamID: options.TeamID, api: api, renderer: renderer, logger: options.Logger}, nil
 }
 
 func (s *LiveIngress) Start(parent context.Context, handler Handler) error {
@@ -241,6 +277,9 @@ func (s *LiveIngress) Start(parent context.Context, handler Handler) error {
 	defer s.mu.Unlock()
 	if s.started {
 		return nil
+	}
+	if s.stopping {
+		return errors.New("Slack ingress is stopping")
 	}
 	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
@@ -256,6 +295,7 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 	defer s.options.Logger.Info("Slack Socket Mode loop stopped")
 	runDone := make(chan error, 1)
 	go func() { runDone <- s.client.RunContext(ctx) }()
+	connectedOnce := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -287,7 +327,30 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 				if connected, ok := event.Data.(*socketmode.ConnectedEvent); ok {
 					connectionCount = connected.ConnectionCount
 				}
-				eventLogger.WithCtx(blackbox.Ctx{"connection_count": connectionCount, "reconnected": connectionCount > 0}).Info("Slack Socket Mode transport connected")
+				reconnected := connectedOnce
+				connectedOnce = true
+				eventLogger.WithCtx(blackbox.Ctx{"connection_count": connectionCount, "reconnected": reconnected}).Info("Slack Socket Mode transport connected")
+				if reconnected {
+					s.mu.Lock()
+					reconnectHandler := s.reconnectHandler
+					launchRecovery := reconnectHandler != nil && !s.stopping
+					if launchRecovery {
+						s.recoveryWG.Add(1)
+					}
+					s.mu.Unlock()
+					if launchRecovery {
+						go func() {
+							defer s.recoveryWG.Done()
+							if err := reconnectHandler(ctx); err != nil && ctx.Err() == nil {
+								s.options.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Warn("Slack reconnect context recovery failed")
+								return
+							}
+							if ctx.Err() == nil {
+								s.options.Logger.Info("Slack reconnect context recovery completed")
+							}
+						}()
+					}
+				}
 				continue
 			case socketmode.EventTypeHello:
 				if event.Request == nil {
@@ -320,6 +383,16 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 				}
 				if modeEligible {
 					s.handleModeCommand(ctx, eventLogger, event.Request.EnvelopeID, modeRequest)
+					continue
+				}
+				statusRequest, statusEligible, statusErr := NormalizeStatusCommand(s.options, event.Data)
+				if statusErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", statusErr)}).Error("Slack status command rejected")
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralCommandResponse("Usage: `/tag-status` — run it without arguments in the channel you want to inspect."))
+					continue
+				}
+				if statusEligible {
+					s.handleStatusCommand(ctx, eventLogger, event.Request.EnvelopeID, statusRequest)
 					continue
 				}
 				command, eligible, normalizeErr := NormalizeDirectiveCommand(s.options, event.Data)
@@ -559,7 +632,7 @@ func approvalInteractionDiagnosticCode(err error) string {
 }
 
 func (s *LiveIngress) handleModeCommand(ctx context.Context, eventLogger *blackbox.Logger, envelopeID string, request ModeChangeRequest) {
-	commandLogger := eventLogger.WithCtx(blackbox.Ctx{"channel_id": request.ChannelID, "actor_id": request.UserID, "requested_mode": request.Mode})
+	commandLogger := eventLogger.WithCtx(blackbox.Ctx{"channel_id": request.ChannelID, "actor_id": request.UserID, "command": request.Command, "requested_mode": request.Mode})
 	switch request.Mode {
 	case "", "observe", "assist", "proactive":
 	default:
@@ -574,11 +647,39 @@ func (s *LiveIngress) handleModeCommand(ctx context.Context, eventLogger *blackb
 		_ = s.client.AckCtx(ctx, envelopeID, ephemeralCommandResponse("Participation mode changes are not available right now."))
 		return
 	}
+	fixedCommand := request.Command != "" && request.Command != modeSlashCommand
+	var policy ModeChangeResult
+	if fixedCommand {
+		preflight := request
+		preflight.Mode = ""
+		var inspectErr error
+		policy, inspectErr = changeMode(ctx, preflight)
+		if inspectErr != nil {
+			commandLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", inspectErr)}).Warn("Slack mode command scope check failed")
+			_ = s.client.AckCtx(ctx, envelopeID, ephemeralCommandResponse("Tag's participation level is not configurable in this channel right now."))
+			return
+		}
+		if request.Mode != "observe" && (!policy.Enrolled || policy.KillSwitched || !policy.WorkspaceEnabled) {
+			_ = s.client.AckCtx(ctx, envelopeID, ephemeralCommandResponse("Tag cannot be activated here because this channel or workspace is not enabled."))
+			return
+		}
+	}
+
 	result, changeErr := changeMode(ctx, request)
 	if changeErr != nil {
 		commandLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", changeErr)}).Warn("Slack mode command failed")
 		_ = s.client.AckCtx(ctx, envelopeID, ephemeralCommandResponse("The participation mode could not be changed for this channel."))
 		return
+	}
+	var membership modeMembershipResult
+	if fixedCommand && request.Mode != "observe" {
+		membership = s.ensureJoinedForMode(ctx, commandLogger, request, policy)
+	}
+	if fixedCommand && request.Mode == "observe" {
+		membership = s.leaveAfterModeOff(ctx, commandLogger, request, policy)
+	}
+	if membership.changed {
+		s.recordCommandMembership(ctx, commandLogger, request, membership.joined)
 	}
 	response := "Tag is in *" + result.Mode + "* mode in this channel. Use `/tag-mode observe | assist | proactive` to change it."
 	if result.Changed {
@@ -586,11 +687,141 @@ func (s *LiveIngress) handleModeCommand(ctx context.Context, eventLogger *blackb
 	} else if request.Mode != "" {
 		response = "Tag is already in *" + result.Mode + "* mode in this channel."
 	}
+	if fixedCommand {
+		level := "*" + result.Mode + "*"
+		if request.Mode == "observe" {
+			level = "*off* (`observe`)"
+		}
+		response = "Tag's participation level for this channel is now " + level + "."
+		if membership.message != "" {
+			response += " " + membership.message
+		}
+	}
 	if ackErr := s.client.AckCtx(ctx, envelopeID, ephemeralCommandResponse(response)); ackErr != nil {
 		commandLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", ackErr)}).Error("Slack mode command acknowledgement failed")
 		return
 	}
 	commandLogger.WithCtx(blackbox.Ctx{"effective_mode": result.Mode, "changed": result.Changed}).Info("Slack mode command handled")
+}
+
+func (s *LiveIngress) handleStatusCommand(ctx context.Context, eventLogger *blackbox.Logger, envelopeID string, request ModeChangeRequest) {
+	commandLogger := eventLogger.WithCtx(blackbox.Ctx{"channel_id": request.ChannelID, "actor_id": request.UserID, "command": request.Command})
+	s.mu.Lock()
+	loadMode := s.modeChange
+	loadDirective := s.directiveLoad
+	s.mu.Unlock()
+	if loadMode == nil {
+		commandLogger.Error("Slack status command has no configuration handler")
+		_ = s.client.AckCtx(ctx, envelopeID, ephemeralCommandResponse("Tag's channel status is not available right now."))
+		return
+	}
+	policy, policyErr := loadMode(ctx, request)
+	if policyErr != nil {
+		commandLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", policyErr)}).Warn("Slack status command policy lookup failed")
+		_ = s.client.AckCtx(ctx, envelopeID, ephemeralCommandResponse("Tag's channel status is not available in this channel right now."))
+		return
+	}
+
+	directive := DirectiveConfiguration{}
+	directiveAvailable := loadDirective != nil
+	if loadDirective != nil {
+		var directiveErr error
+		directive, directiveErr = loadDirective(ctx, DirectiveConfigurationRequest{
+			OrganizationID: request.OrganizationID,
+			WorkspaceID:    request.WorkspaceID,
+			ChannelID:      request.ChannelID,
+			UserID:         request.UserID,
+		})
+		if directiveErr != nil {
+			directiveAvailable = false
+			commandLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", directiveErr)}).Warn("Slack status command directive lookup failed")
+		}
+	}
+	if ackErr := s.client.AckCtx(ctx, envelopeID, ephemeralStatusResponse(policy, directive, directiveAvailable)); ackErr != nil {
+		commandLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", ackErr)}).Error("Slack status command acknowledgement failed")
+		return
+	}
+	commandLogger.WithCtx(blackbox.Ctx{"effective_mode": policy.Mode, "directive_revision": directive.Revision, "directive_available": directiveAvailable}).Info("Slack status command handled")
+}
+
+type modeMembershipResult struct {
+	changed bool
+	joined  bool
+	message string
+}
+
+func (s *LiveIngress) ensureJoinedForMode(ctx context.Context, logger *blackbox.Logger, request ModeChangeRequest, policy ModeChangeResult) modeMembershipResult {
+	if policy.BotMembershipKnown && policy.BotIsMember {
+		return modeMembershipResult{}
+	}
+	if policy.BotMembershipKnown && policy.Restricted {
+		return modeMembershipResult{message: "Slack cannot auto-join apps to private channels; invite <@" + s.options.BotUserID + "> to activate this level."}
+	}
+	if s.members == nil {
+		return modeMembershipResult{message: "The level was saved, but Tag could not join automatically; invite <@" + s.options.BotUserID + "> to activate it."}
+	}
+	membershipCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if !policy.BotMembershipKnown {
+		channel, err := s.members.GetConversationInfoContext(membershipCtx, &slackapi.GetConversationInfoInput{ChannelID: request.ChannelID})
+		if err != nil {
+			logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "slack_error_code": slackAPIErrorCode(err)}).Warn("Slack mode command could not inspect channel membership")
+			return modeMembershipResult{message: "The level was saved, but Tag could not join automatically; invite <@" + s.options.BotUserID + "> if needed."}
+		}
+		if channel.IsMember {
+			return modeMembershipResult{}
+		}
+		if channel.IsPrivate || channel.IsIM || channel.IsMpIM {
+			return modeMembershipResult{message: "Slack cannot auto-join apps to this conversation; invite <@" + s.options.BotUserID + "> if Slack offers that option."}
+		}
+	}
+	if _, _, _, err := s.members.JoinConversationContext(membershipCtx, request.ChannelID); err != nil {
+		logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "slack_error_code": slackAPIErrorCode(err)}).Warn("Slack mode command could not join channel")
+		return modeMembershipResult{message: "The level was saved, but Tag could not join automatically; invite <@" + s.options.BotUserID + "> to activate it."}
+	}
+	return modeMembershipResult{changed: true, joined: true, message: "Tag also joined the channel."}
+}
+
+func (s *LiveIngress) leaveAfterModeOff(ctx context.Context, logger *blackbox.Logger, request ModeChangeRequest, policy ModeChangeResult) modeMembershipResult {
+	if policy.BotMembershipKnown && !policy.BotIsMember {
+		return modeMembershipResult{}
+	}
+	if s.members == nil {
+		return modeMembershipResult{message: "The safe `observe` policy is active, but Tag could not leave automatically."}
+	}
+	membershipCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if !policy.BotMembershipKnown {
+		channel, err := s.members.GetConversationInfoContext(membershipCtx, &slackapi.GetConversationInfoInput{ChannelID: request.ChannelID})
+		if err != nil {
+			logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "slack_error_code": slackAPIErrorCode(err)}).Warn("Slack mode command could not inspect channel membership")
+			return modeMembershipResult{message: "The safe `observe` policy is active, but Tag could not confirm whether it should leave."}
+		}
+		if !channel.IsMember {
+			return modeMembershipResult{}
+		}
+		if channel.IsIM || channel.IsMpIM {
+			return modeMembershipResult{message: "Slack does not support leaving this conversation, but the safe `observe` policy is active."}
+		}
+	}
+	if _, err := s.members.LeaveConversationContext(membershipCtx, request.ChannelID); err != nil {
+		logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "slack_error_code": slackAPIErrorCode(err)}).Warn("Slack mode command could not leave channel")
+		return modeMembershipResult{message: "The safe `observe` policy is active, but Slack would not let Tag leave automatically."}
+	}
+	return modeMembershipResult{changed: true, joined: false, message: "Tag also left the channel."}
+}
+
+func (s *LiveIngress) recordCommandMembership(ctx context.Context, logger *blackbox.Logger, request ModeChangeRequest, joined bool) {
+	s.mu.Lock()
+	handler := s.membershipHandler
+	s.mu.Unlock()
+	if handler == nil {
+		return
+	}
+	change := BotMembershipChange{OrganizationID: request.OrganizationID, WorkspaceID: request.WorkspaceID, ChannelID: request.ChannelID, EventID: "slash-command/" + strings.TrimPrefix(request.Command, "/"), Joined: joined}
+	if err := handler(ctx, change); err != nil {
+		logger.WithCtx(blackbox.Ctx{"joined": joined, "error_type": fmt.Sprintf("%T", err)}).Warn("Slack mode command membership state refresh failed")
+	}
 }
 
 type directiveCommand struct {
@@ -617,13 +848,25 @@ func normalizeSlashCommand(data any) (slackapi.SlashCommand, bool, error) {
 	}
 }
 
-// NormalizeModeCommand validates a /tag-mode slash command's installation
-// scope. The requested mode text is passed through for the handler to
-// validate so unknown values can receive a usage reply.
+// NormalizeModeCommand validates the workspace-scoped participation commands.
+// /tag-mode accepts a mode argument; the three fixed commands intentionally do
+// not create a second participation model and map onto the same stored policy.
 func NormalizeModeCommand(options LiveOptions, data any) (ModeChangeRequest, bool, error) {
 	command, ok, err := normalizeSlashCommand(data)
-	if err != nil || !ok || command.Command != modeSlashCommand {
+	if err != nil || !ok {
 		return ModeChangeRequest{}, false, err
+	}
+	mode := strings.ToLower(strings.TrimSpace(command.Text))
+	switch command.Command {
+	case modeSlashCommand:
+	case proactiveSlashCommand:
+		mode = "proactive"
+	case assistSlashCommand:
+		mode = "assist"
+	case offSlashCommand:
+		mode = "observe"
+	default:
+		return ModeChangeRequest{}, false, nil
 	}
 	if command.TeamID != options.TeamID || (command.APIAppID != "" && command.APIAppID != options.AppID) || command.ChannelID == "" || command.UserID == "" {
 		return ModeChangeRequest{}, false, errors.New("Slack mode command scope is invalid")
@@ -633,7 +876,31 @@ func NormalizeModeCommand(options LiveOptions, data any) (ModeChangeRequest, boo
 		WorkspaceID:    command.TeamID,
 		ChannelID:      command.ChannelID,
 		UserID:         command.UserID,
-		Mode:           strings.ToLower(strings.TrimSpace(command.Text)),
+		Command:        command.Command,
+		Mode:           mode,
+	}, true, nil
+}
+
+// NormalizeStatusCommand validates the read-only, channel-scoped /tag-status
+// command. It returns the same scope shape used by a mode inspection, always
+// with an empty Mode so the durable participation policy cannot be changed.
+func NormalizeStatusCommand(options LiveOptions, data any) (ModeChangeRequest, bool, error) {
+	command, ok, err := normalizeSlashCommand(data)
+	if err != nil || !ok {
+		return ModeChangeRequest{}, false, err
+	}
+	if command.Command != statusSlashCommand {
+		return ModeChangeRequest{}, false, nil
+	}
+	if command.TeamID != options.TeamID || (command.APIAppID != "" && command.APIAppID != options.AppID) || command.ChannelID == "" || command.UserID == "" || strings.TrimSpace(command.Text) != "" {
+		return ModeChangeRequest{}, false, errors.New("Slack status command scope is invalid")
+	}
+	return ModeChangeRequest{
+		OrganizationID: options.OrganizationID,
+		WorkspaceID:    command.TeamID,
+		ChannelID:      command.ChannelID,
+		UserID:         command.UserID,
+		Command:        command.Command,
 	}, true, nil
 }
 
@@ -721,6 +988,106 @@ func ephemeralCommandResponse(message string) map[string]any {
 	return map[string]any{"response_type": "ephemeral", "text": message}
 }
 
+func ephemeralStatusResponse(policy ModeChangeResult, directive DirectiveConfiguration, directiveAvailable bool) map[string]any {
+	table := slackapi.NewTableBlock("tos_tag_channel_status").WithColumnSettings(
+		slackapi.ColumnSetting{Align: slackapi.ColumnAlignmentLeft, IsWrapped: true},
+		slackapi.ColumnSetting{Align: slackapi.ColumnAlignmentLeft, IsWrapped: true},
+	)
+	addStatusRow := func(label, value string) {
+		table.AddRow(slackapi.NewTableRawTextCell(label), slackapi.NewTableRawTextCell(value))
+	}
+	addStatusRow("Participation", statusModeDescription(policy.Mode))
+	addStatusRow("Directive", statusDirectiveDescription(directive, directiveAvailable))
+	addStatusRow("Availability", statusAvailabilityDescription(policy))
+	addStatusRow("Tag presence", statusPresenceDescription(policy))
+	addStatusRow("Channel scope", statusScopeDescription(policy))
+
+	header := slackapi.NewSectionBlock(
+		slackapi.NewTextBlockObject("mrkdwn", "*Tag channel status*", false, false),
+		nil,
+		nil,
+	)
+	footer := slackapi.NewContextBlock(
+		"tos_tag_channel_status_controls",
+		slackapi.NewTextBlockObject("mrkdwn", "Controls: `/tag-assist` · `/tag-proactive` · `/tag-off` · `/tag-directive`", false, false),
+	)
+	return map[string]any{
+		"response_type": "ephemeral",
+		"text":          "Tag channel status: " + policy.Mode,
+		"blocks":        []slackapi.Block{header, table, footer},
+	}
+}
+
+func statusModeDescription(mode string) string {
+	switch mode {
+	case "observe":
+		return "off (observe) — retains authorized context but does not react or answer"
+	case "mention":
+		return "mention — responds to direct mentions and active Tag threads"
+	case "assist":
+		return "assist — answers useful ambient questions and authorized interventions"
+	case "proactive":
+		return "proactive — may start classifier-approved background work"
+	case "":
+		return "Unknown"
+	default:
+		return mode
+	}
+}
+
+func statusDirectiveDescription(directive DirectiveConfiguration, available bool) string {
+	if !available {
+		return "Unavailable"
+	}
+	if strings.TrimSpace(directive.Prompt) == "" || directive.Revision <= 0 {
+		return "No channel directive is configured"
+	}
+	prompt := strings.Join(strings.Fields(directive.Prompt), " ")
+	const maximumRunes = 1200
+	runes := []rune(prompt)
+	if len(runes) > maximumRunes {
+		prompt = string(runes[:maximumRunes-1]) + "…"
+	}
+	return fmt.Sprintf("Revision %d — %s", directive.Revision, prompt)
+}
+
+func statusAvailabilityDescription(policy ModeChangeResult) string {
+	issues := make([]string, 0, 3)
+	if !policy.WorkspaceEnabled {
+		issues = append(issues, "workspace disabled")
+	}
+	if !policy.Enrolled {
+		issues = append(issues, "channel not enrolled")
+	}
+	if policy.KillSwitched {
+		issues = append(issues, "channel kill switch active")
+	}
+	if len(issues) == 0 {
+		return "Enabled"
+	}
+	return "Unavailable — " + strings.Join(issues, "; ")
+}
+
+func statusPresenceDescription(policy ModeChangeResult) string {
+	if !policy.BotMembershipKnown {
+		return "Unknown — Slack membership has not been reconciled"
+	}
+	if policy.BotIsMember {
+		return "Joined"
+	}
+	if policy.Restricted {
+		return "Not joined — invite Tag to this private channel if active participation is wanted"
+	}
+	return "Not joined"
+}
+
+func statusScopeDescription(policy ModeChangeResult) string {
+	if policy.Restricted {
+		return "Private or restricted — context and output stay channel-local"
+	}
+	return "Public channel"
+}
+
 func NormalizeApprovalInteraction(options LiveOptions, data any) (ApprovalInteraction, bool, error) {
 	var callback slackapi.InteractionCallback
 	switch value := data.(type) {
@@ -792,16 +1159,32 @@ func slackEnvelopeLogContext(envelope types.SlackEnvelope) blackbox.Ctx {
 
 func (s *LiveIngress) Stop(ctx context.Context) error {
 	s.mu.Lock()
-	if !s.started {
+	if !s.started && !s.stopping {
 		s.mu.Unlock()
 		return nil
 	}
 	cancel, done := s.cancel, s.done
 	s.started = false
+	s.stopping = true
 	s.mu.Unlock()
-	cancel()
+	if cancel != nil {
+		cancel()
+	}
 	select {
 	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	recoveryDone := make(chan struct{})
+	go func() {
+		s.recoveryWG.Wait()
+		close(recoveryDone)
+	}()
+	select {
+	case <-recoveryDone:
+		s.mu.Lock()
+		s.stopping = false
+		s.mu.Unlock()
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

@@ -35,12 +35,21 @@ Current initiative constraints:
 - Treat a direct mention as a hard participation trigger, not a hard thread
   placement. Prefer an in-channel response for a brief, self-contained answer
   unlikely to continue; use a thread for deeper, multi-step, tool-heavy, narrow,
-  or likely-to-continue work. Once a tos-tag thread is active, continue there.
-  Apply per-channel cooldown only to ambient chatter; never let it discard a
-  direct mention or a human continuation in an active Tag thread. Keep hourly
-  response budgets, concurrency limits, and the organization flood gate intact.
-- Use Slack Thinking Steps for admitted full-agent thread jobs as the progress
-  surface. Reuse one transient current-action task card for every native or
+  or likely-to-continue work. Once a tos-tag thread is active, continue there,
+  except when a human reply begins by addressing another Slack user and neither
+  mentions nor explicitly addresses Tag; treat that as a human-to-human handoff
+  and stay silent. Apply per-channel cooldown only to ambient chatter; never let
+  it discard a direct mention or a human continuation in an active Tag thread.
+  Keep hourly response budgets, concurrency limits, and the organization flood
+  gate intact.
+- Use the immediate classifier-selected reaction as the acknowledgement for
+  admitted answer work. Start Slack Thinking Steps only when a full-agent
+  thread job remains active after the configured progress grace period, so
+  quick answers do not flash Slack's generic `Thinking...` placeholder. For
+  work that outlives the grace period, set Slack's transient native thread
+  status before opening a plan-mode stream; keep status failure cosmetic and
+  continue delivery. Reuse
+  one transient current-action task card for every native or
   reviewed tool and dynamically declared validated skill, replacing it as work
   advances instead of accumulating completed cards. Keep titles to safe operational facts from reviewed control-plane
   events; never expose chain-of-thought, model deltas, raw tool arguments/output,
@@ -138,7 +147,7 @@ Current local regression baseline (2026-08-04): direct classifier and ambient
 silence/social placement, native Tables/Data Tables, presentation-only
 Cards/Carousels, approval/resume, Wiki and reviewed
 source access, three overlapping jobs on the eight-worker pool, private-context
-isolation, the deterministic 49-case eval, the latest opt-in live OpenAI
+isolation, the deterministic 54-case eval, the latest opt-in live OpenAI
 48-case baseline (before the ambient Wiki report-link regression was added),
 and full `make verify` all passed. `make eval-live` must use only natural message
 text; evaluator outcomes, placement, reactions, model, and effort remain outside
@@ -194,10 +203,12 @@ deterministic and never add an arbitrary shell operation.
 
 The reviewed catalog currently contains:
 
-- `telemetryos.code` (`read` only): bounded repository/file listing,
-  fixed-string search, numbered source reads, and deterministic manifest/build/
-  CI version evidence under the server-owned `TAG_AION_DEVELOPER_PATH`; rejects
-  traversal, symlinks, runtime environment files, and credential ledgers;
+- `telemetryos.code` (`read` only): on-demand approved-origin refresh into an
+  immutable verified default-branch snapshot, bounded repository/file listing,
+  fixed-string and pinned offline semantic search, numbered source reads, and
+  deterministic manifest/build/CI version evidence; rejects arbitrary remotes,
+  branches, traversal, symlinks, runtime environment files, and credential
+  ledgers;
 - `telemetryos.product-docs` (`read` only, no approval): fixed-host HTTPS reads
   of the public documentation index/pages and corporate `llms-full.txt`; no
   arbitrary URLs, redirects, headers, methods, credentials, or shell;
@@ -207,6 +218,10 @@ The reviewed catalog currently contains:
   always requires approval, and namespace/assets/publish-file/cascading-move/
   activity/undo/admin operations are unavailable;
 - `telemetryos.otel` (`read`);
+- `telemetryos.analytics` (`read` only, no approval): fixed funnel, website,
+  account, normalized-event, and bounded raw site-event GETs through the Site
+  Analytics Token boundary with direct-identifier and free-form-property
+  filtering and no visitor/session lookup;
 - `telemetryos.device-logs` (`read`, `write`); and
 - `telemetryos.mongo` (`read`, disabled by default pending the human-opened
   security-key session).
@@ -216,7 +231,7 @@ Wiki content obtained through `telemetryos.code` must use the typed Wiki
 workers have no shared source filename; never invent `/workspace/...` paths.
 The exact action is committed by the Wiki execution audit receipt.
 
-Behavioral skill presence is not tool authority. The current inventory is 14
+Behavioral skill presence is not tool authority. The current inventory is 18
 skills in `base`; use the checked-in plugin manifest as the source of truth and
 keep the exact list in `README.md`.
 
@@ -231,9 +246,10 @@ Every product answer automatically includes concise clickable links to the
 authoritative sources materially used; a requester never needs to ask for them.
 For a Wiki source, use the exact human HTTPS URL returned by the reviewed Wiki
 `get` or `url` read operation and render it as a descriptive Slack link.
-Namespace/slugs are internal lookup identifiers and must never be delivered as
-citations; opaque page URLs must never be guessed. Every reviewed `get` returns
-a full page envelope containing that URL.
+Prefer that human URL, but an unresolved namespace/slug may remain readable in
+internal Slack rather than invalidating the answer. Opaque page URLs must never
+be guessed. Every reviewed `get` returns a full page envelope containing that
+URL.
 The reviewed product reader is the preferred deterministic path; arbitrary Codex live web search is available for
 broader/current research but remains untrusted and cannot widen authority.
 For customer-facing procedures and technical reference, apply
@@ -255,13 +271,16 @@ changed behavior. Use the `code-change-intake` skill only after explicit issue
 creation intent; normal reviewed Linear approval still applies.
 
 For local setup, run `make sync-tool-env`. The script copies only the known
-Linear, Wiki, SigNoz, and DLA variables from the current shell or
+Linear, Wiki, SigNoz, DLA, and optional Site Analytics variables from the current shell or
 `~/.config/telemetryos`, writes them to ignored mode-0600 `runtime.env`, and
-enables the corresponding reviewed tools. It reports variable names only.
-It also binds `TAG_AION_DEVELOPER_PATH` for the read-only `telemetryos.code`
-tool. Workers may list repositories/files, fixed-string search, and read a
-bounded source range through that capability; never mount the source tree into
-their disposable workspace or add shell/write operations to the code tool.
+enables the corresponding reviewed tools. Analytics remains disabled when no
+Site Analytics Token is available. It reports variable names only.
+It also binds the Aion inventory, owner-only snapshot/index roots, pinned model,
+and GitHub CLI credential-store location for `telemetryos.code`. Run
+`make install-semantic-search` first. Workers may request freshness, list
+repositories/files, run one bounded semantic or fixed-string search, and read a
+bounded source range through that capability; they never receive those paths,
+credentials, a source mount, or shell/write operations.
 Never print, inspect, commit, or paste their values. Mongo access remains
 disabled until `MONGO_QA_URI` exists and a human has opened the security-key
 session; adding it requires an explicit injected-tool allowlist change.

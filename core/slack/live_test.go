@@ -214,6 +214,80 @@ func TestLiveIngressAcknowledgesDurableRetryDuplicateAfterReconnect(t *testing.T
 	}
 }
 
+func TestLiveIngressRecoversOnlyAfterAnActualReconnect(t *testing.T) {
+	transport := newFakeSocketModeTransport()
+	ingress := &LiveIngress{
+		options: LiveOptions{OrganizationID: "org", AppID: "app", TeamID: "team", BotUserID: "bot", Logger: blackbox.New()},
+		client:  transport,
+	}
+	recovered := make(chan struct{}, 2)
+	ingress.SetReconnectHandler(func(context.Context) error {
+		recovered <- struct{}{}
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := ingress.Start(ctx, func(context.Context, types.SlackEnvelope) (AcceptResult, error) { return AcceptResult{}, nil }); err != nil {
+		t.Fatal(err)
+	}
+	transport.events <- socketmode.Event{Type: socketmode.EventTypeConnected, Data: &socketmode.ConnectedEvent{ConnectionCount: 1}}
+	select {
+	case <-recovered:
+		t.Fatal("initial Socket Mode connection triggered gap recovery")
+	case <-time.After(20 * time.Millisecond):
+	}
+	transport.events <- socketmode.Event{Type: socketmode.EventTypeConnected, Data: &socketmode.ConnectedEvent{ConnectionCount: 2}}
+	select {
+	case <-recovered:
+	case <-time.After(time.Second):
+		t.Fatal("Socket Mode reconnect did not trigger gap recovery")
+	}
+	if err := ingress.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLiveIngressStopWaitsForReconnectRecovery(t *testing.T) {
+	transport := newFakeSocketModeTransport()
+	ingress := &LiveIngress{
+		options: LiveOptions{OrganizationID: "org", AppID: "app", TeamID: "team", BotUserID: "bot", Logger: blackbox.New()},
+		client:  transport,
+	}
+	recoveryStarted := make(chan struct{})
+	releaseRecovery := make(chan struct{})
+	ingress.SetReconnectHandler(func(context.Context) error {
+		close(recoveryStarted)
+		<-releaseRecovery
+		return nil
+	})
+	if err := ingress.Start(context.Background(), func(context.Context, types.SlackEnvelope) (AcceptResult, error) { return AcceptResult{}, nil }); err != nil {
+		t.Fatal(err)
+	}
+	transport.events <- socketmode.Event{Type: socketmode.EventTypeConnected, Data: &socketmode.ConnectedEvent{ConnectionCount: 1}}
+	transport.events <- socketmode.Event{Type: socketmode.EventTypeConnected, Data: &socketmode.ConnectedEvent{ConnectionCount: 2}}
+	select {
+	case <-recoveryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("reconnect recovery did not start")
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- ingress.Stop(context.Background()) }()
+	select {
+	case err := <-stopped:
+		t.Fatalf("Stop returned before recovery completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseRecovery)
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not join reconnect recovery")
+	}
+}
+
 func TestLiveIngressAcknowledgesPolicyExcludedEnvelope(t *testing.T) {
 	transport := newFakeSocketModeTransport()
 	ingress := &LiveIngress{
@@ -261,11 +335,12 @@ func retryEventsAPIEvent(envelopeID string, retryAttempt int, retryReason string
 type fakeSocketModeTransport struct {
 	events  chan socketmode.Event
 	acked   chan string
+	payload chan any
 	handled chan struct{}
 }
 
 func newFakeSocketModeTransport() *fakeSocketModeTransport {
-	return &fakeSocketModeTransport{events: make(chan socketmode.Event, 8), acked: make(chan string, 8), handled: make(chan struct{}, 8)}
+	return &fakeSocketModeTransport{events: make(chan socketmode.Event, 8), acked: make(chan string, 8), payload: make(chan any, 8), handled: make(chan struct{}, 8)}
 }
 
 func (f *fakeSocketModeTransport) RunContext(ctx context.Context) error {
@@ -273,8 +348,9 @@ func (f *fakeSocketModeTransport) RunContext(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (f *fakeSocketModeTransport) AckCtx(_ context.Context, envelopeID string, _ any) error {
+func (f *fakeSocketModeTransport) AckCtx(_ context.Context, envelopeID string, payload any) error {
 	f.acked <- envelopeID
+	f.payload <- payload
 	return nil
 }
 
@@ -459,10 +535,12 @@ type fakePostMessage struct {
 	channel   string
 	calls     int
 	updates   int
+	statuses  int
 	starts    int
 	appends   int
 	stops     int
 	stopErr   error
+	statusErr error
 	updateTS  string
 	messages  []slackapi.Message
 	reactions []slackapi.ItemRef
@@ -489,6 +567,11 @@ func (f *fakePostMessage) PostMessageContext(_ context.Context, channel string, 
 func (f *fakePostMessage) UpdateMessageContext(_ context.Context, channel, timestamp string, _ ...slackapi.MsgOption) (string, string, string, error) {
 	f.channel, f.updateTS, f.updates = channel, timestamp, f.updates+1
 	return channel, timestamp, "", nil
+}
+
+func (f *fakePostMessage) SetAssistantThreadsStatusContext(_ context.Context, _ slackapi.AssistantThreadsSetStatusParameters) error {
+	f.statuses++
+	return f.statusErr
 }
 
 func (f *fakePostMessage) StartStreamContext(_ context.Context, channel string, _ ...slackapi.MsgOption) (string, string, error) {
@@ -576,8 +659,8 @@ func TestLiveDeliveryStartsUpdatesAndFinalizesThinkingSteps(t *testing.T) {
 		IdempotencyKey: "job-1/progress", TeamID: "team", ChannelID: "channel", ThreadTS: "100.1", JobID: "job-1", RecipientUserID: "user-1", Title: "Tag is working",
 		Step: types.SlackProgressStep{ID: "agent-work", Title: "Working on the request", Status: types.SlackProgressInProgress},
 	})
-	if err != nil || started.MessageTS != "stream.1" || fake.starts != 1 {
-		t.Fatalf("start=%#v starts=%d err=%v", started, fake.starts, err)
+	if err != nil || started.MessageTS != "stream.1" || fake.statuses != 1 || fake.starts != 1 {
+		t.Fatalf("start=%#v statuses=%d starts=%d err=%v", started, fake.statuses, fake.starts, err)
 	}
 	updated, err := delivery.UpdateProgress(context.Background(), types.SlackProgressUpdateRequest{TeamID: "team", ChannelID: "channel", MessageTS: started.MessageTS, JobID: "job-1", Step: types.SlackProgressStep{ID: "tool-wiki", Title: "Read Agent Wiki", Status: types.SlackProgressComplete, Sources: []types.SlackProgressSource{{URL: "https://wiki.example/page", Text: "Wiki page"}}}})
 	if err != nil || updated.MessageTS != started.MessageTS || fake.appends != 1 {
@@ -592,17 +675,27 @@ func TestLiveDeliveryStartsUpdatesAndFinalizesThinkingSteps(t *testing.T) {
 func TestLiveDeliverySendsRequiredRecipientTeamForThinkingSteps(t *testing.T) {
 	recipientTeam := ""
 	recipientUser := ""
+	status := ""
+	statusThread := ""
+	displayMode := ""
 	httpClient := fakeSlackHTTPClient{do: func(request *http.Request) (*http.Response, error) {
 		body := `{"ok":false,"error":"unexpected_endpoint"}`
 		switch request.URL.Path {
 		case "/conversations.replies":
 			body = `{"ok":true,"messages":[],"has_more":false,"response_metadata":{"next_cursor":""}}`
+		case "/assistant.threads.setStatus":
+			if err := request.ParseForm(); err != nil {
+				t.Errorf("parse thread-status form: %v", err)
+			}
+			status, statusThread = request.Form.Get("status"), request.Form.Get("thread_ts")
+			body = `{"ok":true}`
 		case "/chat.startStream":
 			if err := request.ParseForm(); err != nil {
 				t.Errorf("parse stream form: %v", err)
 			}
 			recipientTeam = request.Form.Get("recipient_team_id")
 			recipientUser = request.Form.Get("recipient_user_id")
+			displayMode = request.Form.Get("task_display_mode")
 			body = `{"ok":true,"channel":"channel","ts":"stream.1"}`
 		default:
 			t.Errorf("unexpected Slack endpoint %s", request.URL.Path)
@@ -619,6 +712,24 @@ func TestLiveDeliverySendsRequiredRecipientTeamForThinkingSteps(t *testing.T) {
 	}
 	if recipientUser != "user-1" {
 		t.Fatalf("recipient_user_id=%q", recipientUser)
+	}
+	if status != "Organizing…" || statusThread != "100.1" {
+		t.Fatalf("status=%q status_thread=%q", status, statusThread)
+	}
+	if displayMode != "plan" {
+		t.Fatalf("task_display_mode=%q", displayMode)
+	}
+}
+
+func TestLiveDeliveryContinuesWhenTransientAgentStatusFails(t *testing.T) {
+	fake := &fakePostMessage{statusErr: errors.New("status unavailable")}
+	delivery := &LiveDelivery{teamID: "team", api: fake, renderer: deliveries.NewRenderer()}
+	result, err := delivery.StartProgress(context.Background(), types.SlackProgressStartRequest{
+		IdempotencyKey: "job-1/progress", TeamID: "team", ChannelID: "channel", ThreadTS: "100.1", JobID: "job-1", RecipientUserID: "user-1", Title: "Tag is working",
+		Step: types.SlackProgressStep{ID: "agent-work", Title: "Working", Status: types.SlackProgressInProgress},
+	})
+	if err != nil || result.MessageTS != "stream.1" || fake.statuses != 1 || fake.starts != 1 {
+		t.Fatalf("result=%#v statuses=%d starts=%d err=%v", result, fake.statuses, fake.starts, err)
 	}
 }
 
@@ -722,7 +833,7 @@ func TestDirectiveCommandAndModalSubmissionRemainChannelBound(t *testing.T) {
 func TestModeCommandRemainsWorkspaceBoundAndPassesRequestedMode(t *testing.T) {
 	options := LiveOptions{OrganizationID: "org", AppID: "A123", TeamID: "T123"}
 	request, eligible, err := NormalizeModeCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: modeSlashCommand, Text: " Proactive "})
-	if err != nil || !eligible || request.ChannelID != "C_ALERTS" || request.UserID != "U_ADMIN" || request.Mode != "proactive" {
+	if err != nil || !eligible || request.ChannelID != "C_ALERTS" || request.UserID != "U_ADMIN" || request.Command != modeSlashCommand || request.Mode != "proactive" {
 		t.Fatalf("request=%#v eligible=%v err=%v", request, eligible, err)
 	}
 	if _, eligible, err := NormalizeModeCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: directiveSlashCommand}); err != nil || eligible {
@@ -730,5 +841,264 @@ func TestModeCommandRemainsWorkspaceBoundAndPassesRequestedMode(t *testing.T) {
 	}
 	if _, _, err := NormalizeModeCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T999", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: modeSlashCommand, Text: "assist"}); err == nil {
 		t.Fatal("cross-workspace mode command was accepted")
+	}
+}
+
+func TestStatusCommandRemainsReadOnlyAndChannelBound(t *testing.T) {
+	options := LiveOptions{OrganizationID: "org", AppID: "A123", TeamID: "T123"}
+	request, eligible, err := NormalizeStatusCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: statusSlashCommand})
+	if err != nil || !eligible || request.OrganizationID != "org" || request.WorkspaceID != "T123" || request.ChannelID != "C_ALERTS" || request.UserID != "U_ADMIN" || request.Command != statusSlashCommand || request.Mode != "" {
+		t.Fatalf("request=%#v eligible=%v err=%v", request, eligible, err)
+	}
+	if _, eligible, err := NormalizeStatusCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: modeSlashCommand}); err != nil || eligible {
+		t.Fatalf("mode command leaked into status normalization: eligible=%v err=%v", eligible, err)
+	}
+	for name, command := range map[string]slackapi.SlashCommand{
+		"cross-workspace": {APIAppID: "A123", TeamID: "T999", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: statusSlashCommand},
+		"arguments":       {APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: statusSlashCommand, Text: "verbose"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := NormalizeStatusCommand(options, command); err == nil {
+				t.Fatal("invalid status command was accepted")
+			}
+		})
+	}
+}
+
+func TestStatusCommandReturnsEphemeralNativeTableWithoutChangingMode(t *testing.T) {
+	transport := newFakeSocketModeTransport()
+	ingress := &LiveIngress{
+		options: LiveOptions{OrganizationID: "org", TeamID: "team", BotUserID: "U_TAG"},
+		client:  transport,
+	}
+	modeCalls := 0
+	ingress.SetModeChangeHandler(func(_ context.Context, request ModeChangeRequest) (ModeChangeResult, error) {
+		modeCalls++
+		if request.Mode != "" {
+			t.Fatalf("status attempted to change mode to %q", request.Mode)
+		}
+		return ModeChangeResult{Mode: "assist", Previous: "assist", Enrolled: true, Restricted: true, WorkspaceEnabled: true, BotMembershipKnown: true}, nil
+	})
+	directiveCalls := 0
+	ingress.SetDirectiveConfigurationHandlers(func(_ context.Context, request DirectiveConfigurationRequest) (DirectiveConfiguration, error) {
+		directiveCalls++
+		if request.OrganizationID != "org" || request.WorkspaceID != "team" || request.ChannelID != "C_PRIVATE" || request.UserID != "U_ADMIN" {
+			t.Fatalf("directive request=%#v", request)
+		}
+		return DirectiveConfiguration{Prompt: "Investigate alerts and report evidence.", Revision: 3}, nil
+	}, nil)
+
+	ingress.handleStatusCommand(context.Background(), blackbox.New(), "E_STATUS", ModeChangeRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "C_PRIVATE", UserID: "U_ADMIN", Command: statusSlashCommand})
+	var payload map[string]any
+	select {
+	case raw := <-transport.payload:
+		var ok bool
+		payload, ok = raw.(map[string]any)
+		if !ok {
+			t.Fatalf("ack payload type = %T", raw)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("status command was not acknowledged")
+	}
+	if modeCalls != 1 || directiveCalls != 1 || payload["response_type"] != "ephemeral" || !strings.Contains(fmt.Sprint(payload["text"]), "assist") {
+		t.Fatalf("mode_calls=%d directive_calls=%d payload=%#v", modeCalls, directiveCalls, payload)
+	}
+	blocks, ok := payload["blocks"].([]slackapi.Block)
+	if !ok || len(blocks) != 3 {
+		t.Fatalf("status blocks=%#v", payload["blocks"])
+	}
+	table, ok := blocks[1].(*slackapi.TableBlock)
+	if !ok || len(table.Rows) != 5 || len(table.ColumnSettings) != 2 || !table.ColumnSettings[1].IsWrapped {
+		t.Fatalf("status table=%#v", blocks[1])
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"type":"table"`, `"Participation"`, `"assist —`, `"Revision 3`, `"Availability"`, `"Enabled"`, `"Tag presence"`, `"Not joined —`, `"Channel scope"`, `"Private or restricted —`, `/tag-directive`} {
+		if !strings.Contains(string(encoded), expected) {
+			t.Fatalf("status response missing %q: %s", expected, encoded)
+		}
+	}
+}
+
+func TestStatusResponseBoundsDirectiveAndDegradesItsLookupIndependently(t *testing.T) {
+	longDirective := strings.Repeat("evidence ", 400)
+	response := ephemeralStatusResponse(
+		ModeChangeResult{Mode: "proactive", Enrolled: true, WorkspaceEnabled: true, BotMembershipKnown: true, BotIsMember: true},
+		DirectiveConfiguration{Prompt: longDirective, Revision: 9},
+		true,
+	)
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) >= 10000 || !strings.Contains(string(encoded), `Revision 9`) || !strings.Contains(string(encoded), `…`) || !strings.Contains(string(encoded), `proactive`) || !strings.Contains(string(encoded), `Joined`) {
+		t.Fatalf("bounded status response=%s", encoded)
+	}
+
+	unavailable, err := json.Marshal(ephemeralStatusResponse(
+		ModeChangeResult{Mode: "observe", KillSwitched: true, BotMembershipKnown: false},
+		DirectiveConfiguration{},
+		false,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`Unavailable`, `workspace disabled`, `channel not enrolled`, `kill switch active`, `membership has not been reconciled`} {
+		if !strings.Contains(string(unavailable), expected) {
+			t.Fatalf("degraded status response missing %q: %s", expected, unavailable)
+		}
+	}
+}
+
+func TestFixedModeCommandsMapToExistingParticipationModes(t *testing.T) {
+	options := LiveOptions{OrganizationID: "org", AppID: "A123", TeamID: "T123"}
+	tests := map[string]string{
+		proactiveSlashCommand: "proactive",
+		assistSlashCommand:    "assist",
+		offSlashCommand:       "observe",
+	}
+	for command, wantMode := range tests {
+		t.Run(command, func(t *testing.T) {
+			request, eligible, err := NormalizeModeCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: command})
+			if err != nil || !eligible || request.Command != command || request.Mode != wantMode {
+				t.Fatalf("request=%#v eligible=%v err=%v", request, eligible, err)
+			}
+		})
+	}
+}
+
+type fakeMembershipAPI struct {
+	info       *slackapi.Channel
+	infoErr    error
+	joinErr    error
+	leaveErr   error
+	infoCalls  int
+	joinCalls  int
+	leaveCalls int
+	beforeJoin func()
+}
+
+func (f *fakeMembershipAPI) GetConversationInfoContext(context.Context, *slackapi.GetConversationInfoInput) (*slackapi.Channel, error) {
+	f.infoCalls++
+	return f.info, f.infoErr
+}
+
+func (f *fakeMembershipAPI) JoinConversationContext(context.Context, string) (*slackapi.Channel, string, []string, error) {
+	f.joinCalls++
+	if f.beforeJoin != nil {
+		f.beforeJoin()
+	}
+	return &slackapi.Channel{IsMember: f.joinErr == nil}, "", nil, f.joinErr
+}
+
+func (f *fakeMembershipAPI) LeaveConversationContext(context.Context, string) (bool, error) {
+	f.leaveCalls++
+	return f.leaveErr == nil, f.leaveErr
+}
+
+func modeAckText(t *testing.T, transport *fakeSocketModeTransport) string {
+	t.Helper()
+	select {
+	case payload := <-transport.payload:
+		response, ok := payload.(map[string]any)
+		if !ok {
+			t.Fatalf("ack payload type = %T", payload)
+		}
+		return fmt.Sprint(response["text"])
+	case <-time.After(time.Second):
+		t.Fatal("mode command was not acknowledged")
+		return ""
+	}
+}
+
+func TestFixedProactiveCommandJoinsPublicChannelAndRefreshesMembership(t *testing.T) {
+	transport := newFakeSocketModeTransport()
+	members := &fakeMembershipAPI{}
+	ingress := &LiveIngress{
+		options: LiveOptions{OrganizationID: "org", TeamID: "team", BotUserID: "U_TAG"},
+		client:  transport,
+		members: members,
+	}
+	var requested []string
+	modePersisted := false
+	ingress.SetModeChangeHandler(func(_ context.Context, request ModeChangeRequest) (ModeChangeResult, error) {
+		requested = append(requested, request.Mode)
+		if request.Mode == "" {
+			return ModeChangeResult{Mode: "observe", Previous: "observe", Enrolled: true, WorkspaceEnabled: true, BotMembershipKnown: true}, nil
+		}
+		modePersisted = true
+		return ModeChangeResult{Mode: request.Mode, Previous: "observe", Changed: true}, nil
+	})
+	members.beforeJoin = func() {
+		if !modePersisted {
+			t.Fatal("channel join happened before participation mode persistence")
+		}
+	}
+	var membership BotMembershipChange
+	ingress.SetBotMembershipHandler(func(_ context.Context, change BotMembershipChange) error {
+		membership = change
+		return nil
+	})
+	ingress.handleModeCommand(context.Background(), blackbox.New(), "E1", ModeChangeRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "C_PUBLIC", UserID: "U_ADMIN", Command: proactiveSlashCommand, Mode: "proactive"})
+	text := modeAckText(t, transport)
+	if fmt.Sprint(requested) != "[ proactive]" || members.infoCalls != 0 || members.joinCalls != 1 || members.leaveCalls != 0 {
+		t.Fatalf("requested=%v info=%d join=%d leave=%d", requested, members.infoCalls, members.joinCalls, members.leaveCalls)
+	}
+	if !membership.Joined || membership.ChannelID != "C_PUBLIC" || !strings.Contains(text, "*proactive*") || !strings.Contains(text, "also joined") {
+		t.Fatalf("membership=%#v response=%q", membership, text)
+	}
+}
+
+func TestFixedAssistCommandSavesPrivateLevelWithoutPretendingItCanJoin(t *testing.T) {
+	transport := newFakeSocketModeTransport()
+	members := &fakeMembershipAPI{}
+	ingress := &LiveIngress{options: LiveOptions{OrganizationID: "org", TeamID: "team", BotUserID: "U_TAG"}, client: transport, members: members}
+	ingress.SetModeChangeHandler(func(_ context.Context, request ModeChangeRequest) (ModeChangeResult, error) {
+		if request.Mode == "" {
+			return ModeChangeResult{Mode: "observe", Previous: "observe", Enrolled: true, Restricted: true, WorkspaceEnabled: true, BotMembershipKnown: true}, nil
+		}
+		return ModeChangeResult{Mode: request.Mode, Previous: "observe", Changed: true}, nil
+	})
+	ingress.handleModeCommand(context.Background(), blackbox.New(), "E2", ModeChangeRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "G_PRIVATE", UserID: "U_ADMIN", Command: assistSlashCommand, Mode: "assist"})
+	text := modeAckText(t, transport)
+	if members.infoCalls != 0 || members.joinCalls != 0 || !strings.Contains(text, "*assist*") || !strings.Contains(text, "private channels") || !strings.Contains(text, "<@U_TAG>") {
+		t.Fatalf("info=%d join=%d response=%q", members.infoCalls, members.joinCalls, text)
+	}
+}
+
+func TestFixedOffCommandPersistsObserveBeforeBestEffortLeave(t *testing.T) {
+	transport := newFakeSocketModeTransport()
+	members := &fakeMembershipAPI{leaveErr: errors.New("cant_leave_general")}
+	ingress := &LiveIngress{options: LiveOptions{OrganizationID: "org", TeamID: "team", BotUserID: "U_TAG"}, client: transport, members: members}
+	modeSaved := false
+	ingress.SetModeChangeHandler(func(_ context.Context, request ModeChangeRequest) (ModeChangeResult, error) {
+		if request.Mode == "" {
+			return ModeChangeResult{Mode: "proactive", Previous: "proactive", Enrolled: true, WorkspaceEnabled: true, BotMembershipKnown: true, BotIsMember: true}, nil
+		}
+		modeSaved = request.Mode == "observe"
+		return ModeChangeResult{Mode: request.Mode, Previous: "proactive", Changed: true}, nil
+	})
+	ingress.handleModeCommand(context.Background(), blackbox.New(), "E3", ModeChangeRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "C_GENERAL", UserID: "U_ADMIN", Command: offSlashCommand, Mode: "observe"})
+	text := modeAckText(t, transport)
+	if !modeSaved || members.leaveCalls != 1 || !strings.Contains(text, "*off* (`observe`)") || !strings.Contains(text, "would not let Tag leave") {
+		t.Fatalf("mode_saved=%v leave=%d response=%q", modeSaved, members.leaveCalls, text)
+	}
+}
+
+func TestFixedActiveCommandDoesNotJoinDisabledChannel(t *testing.T) {
+	transport := newFakeSocketModeTransport()
+	members := &fakeMembershipAPI{}
+	ingress := &LiveIngress{options: LiveOptions{OrganizationID: "org", TeamID: "team", BotUserID: "U_TAG"}, client: transport, members: members}
+	calls := 0
+	ingress.SetModeChangeHandler(func(_ context.Context, _ ModeChangeRequest) (ModeChangeResult, error) {
+		calls++
+		return ModeChangeResult{Mode: "observe", Previous: "observe", Enrolled: true, WorkspaceEnabled: false, KillSwitched: true}, nil
+	})
+	ingress.handleModeCommand(context.Background(), blackbox.New(), "E4", ModeChangeRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "C_DISABLED", UserID: "U_ADMIN", Command: proactiveSlashCommand, Mode: "proactive"})
+	text := modeAckText(t, transport)
+	if calls != 1 || members.joinCalls != 0 || !strings.Contains(text, "cannot be activated") {
+		t.Fatalf("calls=%d join=%d response=%q", calls, members.joinCalls, text)
 	}
 }

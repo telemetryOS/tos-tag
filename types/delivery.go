@@ -24,8 +24,9 @@ type SlackResult struct {
 	AgentFooter     *SlackAgentFooter     `json:"-" bson:"agent_footer,omitempty"`
 }
 
-// SlackMentionAllowlist is control-plane-owned provenance attached after model
-// output parsing. JSON model output cannot set or broaden it.
+// SlackMentionAllowlist is control-plane-owned provenance derived from exact
+// requester-named recipients or selected evidence after model output parsing.
+// JSON model output cannot set or broaden it.
 type SlackMentionAllowlist struct {
 	UserIDs    []string `json:"-" bson:"user_ids,omitempty"`
 	ChannelIDs []string `json:"-" bson:"channel_ids,omitempty"`

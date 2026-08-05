@@ -123,12 +123,16 @@ func TestValidateMemoryRequiresLuna(t *testing.T) {
 
 func TestLoadJobWorkerConcurrencyEnvironment(t *testing.T) {
 	t.Setenv("TAG__JOBS__WORKER_CONCURRENCY", "7")
+	t.Setenv("TAG__JOBS__PROGRESS_DELAY", "12s")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Jobs.WorkerConcurrency != 7 {
 		t.Fatalf("job worker concurrency = %d", cfg.Jobs.WorkerConcurrency)
+	}
+	if cfg.Jobs.ProgressDelay != 12*time.Second {
+		t.Fatalf("job progress delay = %s", cfg.Jobs.ProgressDelay)
 	}
 }
 
@@ -137,6 +141,16 @@ func TestValidateRejectsUnboundedJobWorkerConcurrency(t *testing.T) {
 	cfg.Jobs.WorkerConcurrency = 65
 	if err := Validate(&cfg); err == nil {
 		t.Fatal("expected excessive job worker concurrency to fail")
+	}
+}
+
+func TestValidateRejectsInvalidJobProgressDelay(t *testing.T) {
+	for _, delay := range []time.Duration{0, -time.Second, time.Minute + time.Second} {
+		cfg := DefaultConfiguration
+		cfg.Jobs.ProgressDelay = delay
+		if err := Validate(&cfg); err == nil {
+			t.Fatalf("expected progress delay %s to fail", delay)
+		}
 	}
 }
 

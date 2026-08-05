@@ -100,6 +100,7 @@ type Queue interface {
 	Enqueue(context.Context, Spec) (Job, bool, error)
 	Claim(context.Context, types.WorkerID, time.Duration) (Job, error)
 	Transition(context.Context, types.JobID, string, State, func(*Job)) (Job, error)
+	SetProgressMessageTS(context.Context, types.JobID, string, string) (Job, error)
 	Heartbeat(context.Context, types.JobID, string, time.Duration) error
 	Requeue(context.Context, types.JobID, string, string, time.Duration) (Job, error)
 	ReleaseRetryWait(context.Context, types.JobID) (Job, error)

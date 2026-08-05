@@ -16,18 +16,24 @@ import (
 )
 
 type Event struct {
-	ID             string    `json:"id" bson:"public_id"`
-	OrganizationID string    `json:"organization_id" bson:"organization_id"`
-	JobID          string    `json:"job_id,omitempty" bson:"job_id,omitempty"`
-	Category       string    `json:"category" bson:"category"`
-	ProviderID     string    `json:"provider_id,omitempty" bson:"provider_id,omitempty"`
-	ModelID        string    `json:"model_id,omitempty" bson:"model_id,omitempty"`
-	ProfileID      string    `json:"profile_id,omitempty" bson:"profile_id,omitempty"`
-	InputTokens    int64     `json:"input_tokens,omitempty" bson:"input_tokens,omitempty"`
-	OutputTokens   int64     `json:"output_tokens,omitempty" bson:"output_tokens,omitempty"`
-	Calls          int64     `json:"calls" bson:"calls"`
-	DurationMS     int64     `json:"duration_ms,omitempty" bson:"duration_ms,omitempty"`
-	CreatedAt      time.Time `json:"created_at" bson:"created_at"`
+	ID                          string    `json:"id" bson:"public_id"`
+	OrganizationID              string    `json:"organization_id" bson:"organization_id"`
+	JobID                       string    `json:"job_id,omitempty" bson:"job_id,omitempty"`
+	Category                    string    `json:"category" bson:"category"`
+	ProviderID                  string    `json:"provider_id,omitempty" bson:"provider_id,omitempty"`
+	ModelID                     string    `json:"model_id,omitempty" bson:"model_id,omitempty"`
+	ProfileID                   string    `json:"profile_id,omitempty" bson:"profile_id,omitempty"`
+	InputTokens                 int64     `json:"input_tokens,omitempty" bson:"input_tokens,omitempty"`
+	OutputTokens                int64     `json:"output_tokens,omitempty" bson:"output_tokens,omitempty"`
+	ContextPackTokens           int64     `json:"context_pack_tokens,omitempty" bson:"context_pack_tokens,omitempty"`
+	EfficiencyAccountingVersion int       `json:"efficiency_accounting_version,omitempty" bson:"efficiency_accounting_version,omitempty"`
+	Calls                       int64     `json:"calls" bson:"calls"`
+	FailedCalls                 int64     `json:"failed_calls,omitempty" bson:"failed_calls,omitempty"`
+	AvoidedProviderCalls        int64     `json:"avoided_provider_calls,omitempty" bson:"avoided_provider_calls,omitempty"`
+	Outcome                     string    `json:"outcome,omitempty" bson:"outcome,omitempty"`
+	ReasonCode                  string    `json:"reason_code,omitempty" bson:"reason_code,omitempty"`
+	DurationMS                  int64     `json:"duration_ms,omitempty" bson:"duration_ms,omitempty"`
+	CreatedAt                   time.Time `json:"created_at" bson:"created_at"`
 }
 type Recorder interface {
 	Record(context.Context, Event) error
@@ -35,7 +41,7 @@ type Recorder interface {
 }
 
 func validate(event Event) error {
-	if event.OrganizationID == "" || event.Category == "" || event.Calls < 0 || event.InputTokens < 0 || event.OutputTokens < 0 || event.DurationMS < 0 {
+	if event.OrganizationID == "" || event.Category == "" || event.Calls < 0 || event.FailedCalls < 0 || event.FailedCalls > event.Calls || event.AvoidedProviderCalls < 0 || event.InputTokens < 0 || event.OutputTokens < 0 || event.ContextPackTokens < 0 || event.EfficiencyAccountingVersion < 0 || event.EfficiencyAccountingVersion > ClassifierEfficiencyAccountingVersion || event.DurationMS < 0 || len(event.Outcome) > 64 || len(event.ReasonCode) > 128 {
 		return fmt.Errorf("invalid content-free usage event")
 	}
 	return nil

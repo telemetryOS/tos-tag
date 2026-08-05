@@ -69,13 +69,20 @@ type ModeChangeRequest struct {
 	WorkspaceID    string
 	ChannelID      string
 	UserID         string
+	Command        string
 	Mode           string
 }
 
 type ModeChangeResult struct {
-	Mode     string
-	Previous string
-	Changed  bool
+	Mode               string
+	Previous           string
+	Changed            bool
+	Enrolled           bool
+	Restricted         bool
+	KillSwitched       bool
+	WorkspaceEnabled   bool
+	BotIsMember        bool
+	BotMembershipKnown bool
 }
 
 type ModeChangeHandler func(context.Context, ModeChangeRequest) (ModeChangeResult, error)

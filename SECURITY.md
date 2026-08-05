@@ -65,10 +65,14 @@ the minimum live operational records needed for delivery safety and audit.
   justify intervention.
 - Workers receive no long-lived credentials or MongoDB connection string.
 - Tool secrets may enter only the exact reviewed subprocess that declares them.
-- Workers receive no direct Aion source mount or shell. `telemetryos.code` is a
-  server-side read capability limited to bounded list/search/read requests and
-  rejects traversal, symlinks, environment files, credential ledgers, and
-  private tool state.
+- Workers receive no direct Aion source mount, GitHub credential, or shell.
+  `telemetryos.code` can refresh only the requested locally inventoried
+  repository's validated `telemetryOS` origin into a server-owned immutable
+  remote-default-branch snapshot. It exposes bounded freshness, exact and
+  pinned offline semantic search/read results while rejecting arbitrary
+  remotes/branches, traversal, symlinks, environment files, credential ledgers,
+  and private tool state. Snapshots and Semble indexes are owner-only because
+  they contain source.
 - The code bundle is rejected at load and execution unless every operation is
   exactly `read` risk. Source edits, patches, commits, pushes, merges, and
   deploys have no worker approval path; the classifier redirects them to
@@ -82,6 +86,12 @@ the minimum live operational records needed for delivery safety and audit.
   credentials or private context authority, and shell/subprocess networking
   remains disabled. Each completed native web search produces a hashed audit
   receipt without persisting its raw query.
+- `telemetryos.analytics` is GET-only and fixed to the production or QA
+  TelemetryOS Gateway funnel routes. Its Site Analytics Token is written only
+  to a mode-0600 helper-local curl config, never argv or worker context. The
+  helper rejects arbitrary paths, headers, exports, internal-event inclusion,
+  and visitor/session lookup, then removes direct identifiers and free-form
+  customer/event content from returned JSON.
 - Classifier-marked product answers cannot be delivered unless the same attempt
   successfully reads a full Primer Wiki page, public docs page, or corporate
   full-content source. Search results and model memory are not proof.
@@ -90,9 +100,10 @@ the minimum live operational records needed for delivery safety and audit.
   strict schema exposes no action/button fields. Interactive controls, modal
   Alerts, approvals, and destinations remain control-plane-owned.
 - Model-created Slack mentions are denied by default. The renderer accepts only
-  exact user/channel IDs attached by the control plane from selected releasable
-  evidence; broadcast, user-group, unselected, and self-authorized mentions are
-  rejected.
+  exact user IDs named by the requester in the current message or exact
+  user/channel IDs attached by the control plane from selected releasable
+  evidence. Tag's invocation mention, broadcasts, user groups, unselected IDs,
+  and self-authorized mentions are rejected.
 - Every sensitive transition is fenced by live lease and kill-switch state.
 - Audit receipts contain redacted metadata, not copies of secret/message data.
 

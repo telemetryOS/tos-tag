@@ -83,7 +83,7 @@ func Run() (Score, error) {
 		return Score{}, err
 	}
 	fixtures := Fixtures()
-	score := Score{Suite: "cross-channel-behavior/v4", Total: len(fixtures) + 2, Threshold: 1, GeneratedAt: time.Now().UTC()}
+	score := Score{Suite: "cross-channel-behavior/v5", Total: len(fixtures) + 2, Threshold: 1, GeneratedAt: time.Now().UTC()}
 	var speakOK, speakTotal, silenceOK, silenceTotal, evidenceOK, evidenceTotal, disclosureOK, disclosureTotal, placementOK, placementTotal int
 	for _, fixture := range fixtures {
 		if err := validateNaturalisticFixture(fixture); err != nil {
@@ -209,6 +209,8 @@ func Fixtures() []Fixture {
 	naturalThanksThread.ActiveThread = true
 	thread := base("The same timeout is happening in the worker too.")
 	thread.ActiveThread = true
+	humanHandoff := base("<@U03404W4Z> ^")
+	humanHandoff.ActiveThread = true
 	bot := base("<@tos-tag> Build 1842 completed successfully; should we continue?")
 	bot.Envelope.BotID = "another-bot"
 	bot.Envelope.IsMention = true
@@ -233,6 +235,14 @@ func Fixtures() []Fixture {
 	proactiveFailure.Mode = types.ModeProactive
 	assistIncidentDeclaration := base("The orange-cart staging checkout is currently unavailable; incident TEST-427 is active.")
 	assistIncidentDeclaration.Mode = types.ModeAssist
+	assistURLQueryDeclaration := base("Checkout is unavailable; status: https://status.example/incidents?id=427")
+	assistURLQueryDeclaration.Mode = types.ModeAssist
+	assistRepeatedQuestionDeclaration := base("Checkout is unavailable??")
+	assistRepeatedQuestionDeclaration.Mode = types.ModeAssist
+	assistTagNounDeclaration := base("Add the incident tag; checkout is unavailable.")
+	assistTagNounDeclaration.Mode = types.ModeAssist
+	proactiveURLQueryDeclaration := assistURLQueryDeclaration
+	proactiveURLQueryDeclaration.Mode = types.ModeProactive
 	arithmeticMention := base("<@tos-tag> what is 144 divided by 12?")
 	arithmeticMention.Envelope.IsMention = true
 	comparisonMention := base("<@tos-tag> compare the two rollback options for the API release.")
@@ -304,6 +314,7 @@ func Fixtures() []Fixture {
 		{Name: "brief_direct_mention_channel_reply", Target: briefMention, Pack: pack(), WantPredicted: types.OutcomeReplyInChannel, WantEffective: types.OutcomeReplyInChannel, WantLiveReactions: []string{"thinking_face", "speech_balloon"}, WantLiveRoutes: []LiveRoute{{Strength: "light", Effort: "low"}}},
 		{Name: "deep_direct_mention_thread_reply", Target: deepMention, Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeReplyInThread, LivePredicted: []types.ClassificationOutcome{types.OutcomeReplyInThread, types.OutcomeStartBackgroundJob}, LiveEffective: []types.ClassificationOutcome{types.OutcomeReplyInThread, types.OutcomeStartBackgroundJob}, WantLiveReactions: []string{"eyes", "hammer_and_wrench", "rotating_light", "thinking_face"}, WantLiveRoutes: []LiveRoute{{Strength: "standard", Effort: "medium"}, {Strength: "strong", Effort: "medium"}}},
 		{Name: "active_thread_reply", Target: thread, Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeReplyInThread},
+		{Name: "active_thread_human_handoff_silent", Target: humanHandoff, Pack: pack(), WantPredicted: types.OutcomeSilent, WantEffective: types.OutcomeSilent},
 		{Name: "ambient_question_shadowed", Target: base("Does anyone know what changed in the API deploy?"), Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeSilent}, LiveEffective: []types.ClassificationOutcome{types.OutcomeSilent}},
 		{Name: "ambient_product_plan_comparison", Target: productPlanComparison, Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeReplyInThread}, LiveEffective: []types.ClassificationOutcome{types.OutcomeReplyInThread}, WantLiveReactions: []string{"thinking_face", "speech_balloon"}, WantLiveRoutes: []LiveRoute{{Strength: "standard", Effort: "medium"}}, WantFullAgent: true},
 		{Name: "ambient_product_plan_transition_not_source_write", Target: productPlanTransition, Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeReplyInThread}, LiveEffective: []types.ClassificationOutcome{types.OutcomeReplyInThread}, WantLiveReactions: []string{"thinking_face"}, WantLiveRoutes: []LiveRoute{{Strength: "standard", Effort: "medium"}}, WantFullAgent: true, WantProductRetrieval: true, ForbidSourceRedirect: true},
@@ -330,7 +341,11 @@ func Fixtures() []Fixture {
 		{Name: "observe_mode_direct_mention_shadowed", Target: observeMention, Pack: pack(), WantPredicted: types.OutcomeReplyInChannel, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeSilent}, LiveEffective: []types.ClassificationOutcome{types.OutcomeSilent}, SkipLiveProviderCall: true},
 		{Name: "mention_mode_ambient_question_silent", Target: mentionModeAmbient, Pack: pack(), WantPredicted: types.OutcomeSilent, WantEffective: types.OutcomeSilent, SkipLiveProviderCall: true},
 		{Name: "assist_incident_declaration_cannot_start_work", Target: assistIncidentDeclaration, Pack: pack(), WantPredicted: types.OutcomeSilent, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeSilent, types.OutcomeReact, types.OutcomeReplyInChannel, types.OutcomeReplyInThread, types.OutcomeStartBackgroundJob}, LiveEffective: []types.ClassificationOutcome{types.OutcomeSilent, types.OutcomeReact}, WantLiveReactions: []string{"warning", "rotating_light"}},
+		{Name: "assist_url_query_declaration_cannot_start_work", Target: assistURLQueryDeclaration, Pack: pack(), WantPredicted: types.OutcomeSilent, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeSilent, types.OutcomeReact, types.OutcomeReplyInChannel, types.OutcomeReplyInThread, types.OutcomeStartBackgroundJob}, LiveEffective: []types.ClassificationOutcome{types.OutcomeSilent, types.OutcomeReact}, WantLiveReactions: []string{"warning", "rotating_light"}},
+		{Name: "assist_repeated_question_declaration_cannot_start_work", Target: assistRepeatedQuestionDeclaration, Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeSilent, types.OutcomeReact, types.OutcomeReplyInChannel, types.OutcomeReplyInThread, types.OutcomeStartBackgroundJob}, LiveEffective: []types.ClassificationOutcome{types.OutcomeSilent, types.OutcomeReact}, WantLiveReactions: []string{"warning", "rotating_light"}},
+		{Name: "assist_tag_noun_declaration_cannot_start_work", Target: assistTagNounDeclaration, Pack: pack(), WantPredicted: types.OutcomeSilent, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeSilent, types.OutcomeReact, types.OutcomeReplyInChannel, types.OutcomeReplyInThread, types.OutcomeStartBackgroundJob}, LiveEffective: []types.ClassificationOutcome{types.OutcomeSilent, types.OutcomeReact}, WantLiveReactions: []string{"warning", "rotating_light"}},
 		{Name: "proactive_failure_signal_channel_reply", Target: proactiveFailure, Pack: pack(), WantPredicted: types.OutcomeReplyInChannel, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeReact, types.OutcomeReplyInChannel, types.OutcomeReplyInThread, types.OutcomeStartBackgroundJob}, LiveEffective: []types.ClassificationOutcome{types.OutcomeReact, types.OutcomeReplyInChannel, types.OutcomeReplyInThread, types.OutcomeStartBackgroundJob}, WantLiveReactions: []string{"eyes", "warning", "rotating_light"}},
+		{Name: "proactive_url_query_failure_can_start_work", Target: proactiveURLQueryDeclaration, Pack: pack(), WantPredicted: types.OutcomeReplyInChannel, WantEffective: types.OutcomeSilent, LivePredicted: []types.ClassificationOutcome{types.OutcomeReact, types.OutcomeReplyInChannel, types.OutcomeReplyInThread, types.OutcomeStartBackgroundJob}, LiveEffective: []types.ClassificationOutcome{types.OutcomeReact, types.OutcomeReplyInChannel, types.OutcomeReplyInThread, types.OutcomeStartBackgroundJob}, WantLiveReactions: []string{"eyes", "warning", "rotating_light"}},
 		{Name: "arithmetic_mention_light_channel_reply", Target: arithmeticMention, Pack: pack(), WantPredicted: types.OutcomeReplyInChannel, WantEffective: types.OutcomeReplyInChannel, WantLiveReactions: []string{"thinking_face", "speech_balloon", "white_check_mark"}, WantLiveRoutes: []LiveRoute{{Strength: "light", Effort: "low"}}},
 		{Name: "rollback_comparison_standard_thread_reply", Target: comparisonMention, Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeReplyInThread, WantLiveRoutes: []LiveRoute{{Strength: "standard", Effort: "medium"}}},
 		{Name: "structured_three_way_comparison_thread", Target: structuredComparison, Pack: pack(), WantPredicted: types.OutcomeReplyInThread, WantEffective: types.OutcomeReplyInThread, WantLiveReactions: []string{"speech_balloon", "thinking_face", "eyes"}, WantLiveRoutes: []LiveRoute{{Strength: "standard", Effort: "medium"}}, WantFullAgent: true},

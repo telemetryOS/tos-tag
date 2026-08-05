@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -14,6 +15,14 @@ import (
 )
 
 var ErrInvalidClassifierDecision = errors.New("invalid classifier decision")
+
+var (
+	leadingSlackUserAddressPattern = regexp.MustCompile(`^\s*<@U[A-Z0-9]+(?:\|[^>\r\n]+)?>(?:[\s,;:!?.]|$)`)
+	questionURLPattern             = regexp.MustCompile(`(?i)(?:<https?://[^>\s]+(?:\|[^>]*)?>|https?://[^\s>]+)`)
+	coAddressedTagPattern          = regexp.MustCompile(`(?i)^\s*<@U[A-Z0-9]+(?:\|[^>\r\n]+)?>\s*,\s*tag\s*[,;:]`)
+	trailingTagAddressPattern      = regexp.MustCompile(`(?i),\s*tag\s*[!?.]*\s*$`)
+	socialTagTokenPattern          = regexp.MustCompile(`(?i)(?:^|[\s,])tag(?:$|[\s,;:!?.—–-])`)
+)
 
 type Classifier interface {
 	Decide(context.Context, Target, types.ContextPackRevision) (types.ClassificationDecision, error)
@@ -33,7 +42,11 @@ type Target struct {
 	WorkflowLoop      bool
 	Unsupported       bool
 	Deleted           bool
-	SelfAuthored      bool
+	// AmbientLinkOnly identifies an unaddressed top-level channel message made
+	// entirely of one or more links. These messages are useful as context, but
+	// are not requests for Tag to classify or answer.
+	AmbientLinkOnly bool
+	SelfAuthored    bool
 }
 
 type Result struct {
@@ -104,7 +117,7 @@ func (s *Service) RequiresProviderCall(target Target) bool {
 // admission so a future classifier implementation cannot bypass the rule.
 func EnforceParticipation(result Result, target Target, pack types.ContextPackRevision) Result {
 	effective := result.Effective
-	if target.Mode != types.ModeAssist || effective.DirectReply != "" || !outcomeNeedsAgent(effective.Outcome) {
+	if target.Mode != types.ModeAssist || !outcomeNeedsAgent(effective.Outcome) {
 		return result
 	}
 	if assistInitiativeAuthorized(target, pack, effective) {
@@ -114,6 +127,9 @@ func EnforceParticipation(result Result, target Target, pack types.ContextPackRe
 }
 
 func assistInitiativeAuthorized(target Target, pack types.ContextPackRevision, decision types.ClassificationDecision) bool {
+	if thirdPartyAddressedTurn(target) {
+		return false
+	}
 	if target.Envelope.IsMention || target.ActiveThread || target.AuthorizedTrigger || explicitlyAddressesTag(target.Envelope.Text) {
 		return true
 	}
@@ -142,12 +158,12 @@ func assistInitiativeAuthorized(target Target, pack types.ContextPackRevision, d
 }
 
 func looksLikeQuestion(text string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(text))
+	// URL query strings are data, not conversational punctuation. Remove both
+	// plain and Slack-formatted links before recognizing a question so a status
+	// declaration containing `...?id=427` cannot acquire assist authority.
+	normalized := strings.ToLower(strings.TrimSpace(questionURLPattern.ReplaceAllString(text, " ")))
 	if normalized == "" {
 		return false
-	}
-	if strings.Contains(normalized, "?") {
-		return true
 	}
 	for _, prefix := range []string{
 		"what ", "why ", "how ", "when ", "where ", "who ", "which ",
@@ -158,7 +174,62 @@ func looksLikeQuestion(text string) bool {
 			return true
 		}
 	}
-	return false
+	// Natural questions may use declarative word order, but only a single final
+	// question mark is a reliable grant. Embedded URL punctuation and repeated
+	// marks such as a bare failure followed by `??` fail closed.
+	return strings.HasSuffix(normalized, "?") && !strings.HasSuffix(normalized, "??")
+}
+
+func explicitlyAddressesTag(text string) bool {
+	normalized := strings.TrimSpace(strings.ToLower(text))
+	if normalized == "" {
+		return false
+	}
+	unpunctuatedSocial := strings.TrimRight(normalized, " \t\r\n.!?")
+	for _, addressed := range []string{
+		"thanks tag", "thank you tag", "nice work tag", "great work tag",
+		"good work tag", "well done tag", "appreciate it tag",
+		"morning tag", "good morning tag", "afternoon tag", "good afternoon tag",
+		"evening tag", "good evening tag",
+	} {
+		if unpunctuatedSocial == addressed {
+			return true
+		}
+	}
+	if socialTagTokenPattern.MatchString(normalized) && isDirectSocialCandidate(normalized) {
+		return true
+	}
+	if coAddressedTagPattern.MatchString(normalized) || trailingTagAddressPattern.MatchString(normalized) {
+		return true
+	}
+	for _, greeting := range []string{"hey ", "hi ", "hello "} {
+		if strings.HasPrefix(normalized, greeting) {
+			normalized = strings.TrimSpace(strings.TrimPrefix(normalized, greeting))
+			break
+		}
+	}
+	if normalized == "tag" {
+		return true
+	}
+	if !strings.HasPrefix(normalized, "tag") || len(normalized) == len("tag") {
+		return false
+	}
+	remainder := strings.TrimSpace(normalized[len("tag"):])
+	if remainder == "" {
+		return true
+	}
+	first, _ := utf8.DecodeRuneInString(remainder)
+	if strings.ContainsRune(",!—–-", first) {
+		return true
+	}
+	if strings.ContainsRune(":;", first) {
+		_, size := utf8.DecodeRuneInString(remainder)
+		remainder = strings.TrimSpace(remainder[size:])
+	}
+	// Unpunctuated leading addresses remain natural when followed by an actual
+	// question or request ("Tag can you check this"). Merely using the ordinary
+	// noun "tag" elsewhere in a sentence grants no authority.
+	return looksLikeQuestion(remainder) || looksLikeExplicitRequest(remainder)
 }
 
 func looksLikeExplicitRequest(text string) bool {
@@ -679,13 +750,33 @@ func hardSuppression(target Target) string {
 		return "suppress.workflow_loop"
 	case target.Deleted || target.Envelope.Kind == types.SlackEventDelete:
 		return "suppress.deleted"
+	case target.AmbientLinkOnly:
+		return "suppress.ambient_link_only"
 	case target.Unsupported:
 		return "suppress.unsupported_subtype"
 	case target.Envelope.IntegrationAuthored():
 		return "suppress.integration_message"
+	case thirdPartyAddressedTurn(target):
+		return "suppress.third_party_address"
 	default:
 		return ""
 	}
+}
+
+// thirdPartyAddressedTurn recognizes a narrow human-to-human handoff inside a
+// Tag-owned thread. Active-thread state remains a hard participation trigger
+// for normal continuations, but a leading Slack user address belongs to that
+// person unless the turn also mentions or explicitly addresses Tag. Mentions
+// used as the object of a request (for example, "summarize this for <@U123>")
+// do not match this gate.
+func thirdPartyAddressedTurn(target Target) bool {
+	if !target.ActiveThread || target.Envelope.IsMention || target.Envelope.ChannelKind == types.SlackChannelKindDirectMessage || strings.HasPrefix(target.Envelope.ChannelID, "D") {
+		return false
+	}
+	if explicitlyAddressesTag(target.Envelope.Text) {
+		return false
+	}
+	return leadingSlackUserAddressPattern.MatchString(target.Envelope.Text)
 }
 
 func validateDecision(decision types.ClassificationDecision, pack types.ContextPackRevision) error {

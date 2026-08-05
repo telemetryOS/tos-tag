@@ -774,7 +774,8 @@ func completedToolOperation(tool string, arguments json.RawMessage) (string, str
 	if len(request.Arguments) > 0 {
 		switch request.ToolID + "/" + request.OperationID + "/" + request.Arguments[0] {
 		case "telemetryos.wiki/read/get", "telemetryos.wiki/read/search", "telemetryos.product-docs/read/docs-index", "telemetryos.product-docs/read/docs-page", "telemetryos.product-docs/read/corporate-full",
-			"telemetryos.code/read/repos", "telemetryos.code/read/files", "telemetryos.code/read/search", "telemetryos.code/read/read", "telemetryos.code/read/versions":
+			"telemetryos.code/read/repos", "telemetryos.code/read/freshness", "telemetryos.code/read/files", "telemetryos.code/read/search", "telemetryos.code/read/semantic-search", "telemetryos.code/read/read", "telemetryos.code/read/versions",
+			"telemetryos.analytics/read/pipeline", "telemetryos.analytics/read/insights", "telemetryos.analytics/read/website", "telemetryos.analytics/read/accounts", "telemetryos.analytics/read/account", "telemetryos.analytics/read/events":
 			resourceAction = request.Arguments[0]
 		}
 	}
@@ -1050,7 +1051,7 @@ func codexDynamicTools(skills []marketplace.SkillSnapshot) []map[string]any {
 	return []map[string]any{
 		{
 			"type": "function", "name": "tos_tag_tool",
-			"description": "Run one reviewed non-Wiki tos-tag marketplace operation through the current job capability. Agent Wiki calls must use tos_tag_wiki; telemetryos.wiki is rejected here. Declare every injected skill actively being followed in skill_names so Slack can show safe live progress. Calls must be sequential, narrowly scoped, and complete within the callback deadline; never fan out parallel source searches. For a Go version/adoption question, call telemetryos.code read once with arguments [\"versions\",\"<repo>\",\"go\"] before any broader source lookup. Write, destructive, and admin operations require an independently approved approval_id.",
+			"description": "Run one reviewed non-Wiki tos-tag marketplace operation through the current job capability. Agent Wiki calls must use tos_tag_wiki; telemetryos.wiki is rejected here. Declare every injected skill actively being followed in skill_names so Slack can show safe live progress. Calls must be sequential, narrowly scoped, and complete within the callback deadline; never fan out parallel source searches. telemetryos.code refreshes only the requested repository into a verified default-branch snapshot; use one semantic-search for conceptual discovery and one exact read to verify decisive lines. For a Go version/adoption question, call telemetryos.code read once with arguments [\"versions\",\"<repo>\",\"go\"] before any broader source lookup. Write, destructive, and admin operations require an independently approved approval_id.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"skill_names", "tool_id", "operation_id", "arguments"}, "properties": map[string]any{
 				"skill_names": skillNamesSchema, "tool_id": map[string]any{"type": "string"}, "operation_id": map[string]any{"type": "string", "enum": []string{"read", "write", "delete"}}, "arguments": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"},
 			}},

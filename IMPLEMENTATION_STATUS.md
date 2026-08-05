@@ -1,6 +1,6 @@
 # tos-tag implementation status
 
-Date: 2026-08-02
+Date: 2026-08-04
 Version: `0.1.0-dev`
 Scope: development Slack control plane, membership-managed assist with live
 regression traffic constrained to `#tos-tag`
@@ -93,8 +93,10 @@ commands, tests, and active documentation have been removed.
   used capability categories; classifier-only
   replies remain unadorned.
 - Durable delivery reconciliation and special-mention rejection.
-- Slack Thinking Steps for admitted full-agent thread jobs, with durable stream
-  timestamps, one rotating current-action card for validated skills and every
+- Immediate classifier reactions plus grace-delayed Slack Thinking Steps for
+  full-agent thread jobs that remain active, with a best-effort transient native
+  thread status, plan-mode display, durable stream timestamps,
+  one rotating current-action card for validated skills and every
   native or reviewed tool call, same-message finalization, and ordinary-delivery
   fallback. Intentional reaction-only/direct classifier outcomes remain outside
   the stream path.
@@ -102,23 +104,28 @@ commands, tests, and active documentation have been removed.
 - `/tag-directive` Slack modal available to every authenticated workspace user
   for an enrolled, enabled channel, plus management-UI creation, revisioned
   Mongo persistence, and audit.
+- Read-only `/tag-status` command with an ephemeral native Block Kit table for
+  mode, active directive, availability, bot membership, and channel scope.
 - Standard five-field cron routines and classifier-gated heartbeat trigger
   subscriptions with explicit IANA timezones, legacy interval compatibility,
   and a combined management Automation view/editor.
 - Complete behavioral `base` plugin from `tag-agent-skills`, including
-  read-only code, Linear, Wiki, OTel, and `team-alignment` worker behavior.
-- Reviewed Linear, Wiki, OTel, DLA, optional Mongo, and bounded source-code
-  helper bundles with encrypted environment bindings where required.
+  read-only code, Linear, Wiki, OTel, the marketing funnel chain and leaf
+  skills, and `team-alignment` worker behavior.
+- Reviewed Linear, Wiki, OTel, privacy-filtered Analytics, DLA, optional Mongo,
+  and bounded source-code helper bundles with encrypted environment bindings
+  where required.
 - Wiki inline-body publication for source-derived documents, with the complete
   body committed in the audit receipt. Wiki capability is page CRUD only:
   read/write authoring is trusted without per-action approval, recoverable page
   soft-delete always requires approval, and namespace/admin/general-destructive
   surfaces are unavailable.
-- `telemetryos.code` provides only bounded list/search/read operations below a
-  server-owned Aion root and rejects traversal, symlinks, runtime environment
-  files, credential ledgers, and private tool state. Bundle load and execution
-  independently enforce that every code operation is read-only; mutation
-  requests are redirected to Linear bug/feature intake with no approval path.
+- `telemetryos.code` refreshes one approved TelemetryOS origin on demand into an
+  immutable remote-default-branch snapshot, returns exact commit/fetch
+  freshness, and provides bounded fixed-string/semantic discovery, exact reads,
+  and version evidence. Semble 0.5.3 and its model revision are pinned and run
+  offline; source-bearing indexes stay owner-only. Bundle load and execution
+  still enforce read risk only, and source mutation has no approval path.
 - Classifier-marked product answers are rejected unless the same worker attempt
   successfully reads a full Primer Wiki page, public docs page, or corporate
   full-content source. Search/index/web/Slack context and model memory are not
@@ -129,7 +136,10 @@ commands, tests, and active documentation have been removed.
 - Correlated redacted file logging, usage records, audit chains, TTL cleanup,
   and an activity-first management UI. Its organization-scoped SSE feed pairs
   bounded public Slack excerpts with classifier outcomes and shows payload-free
-  Codex protocol lifecycle; restricted content remains hidden.
+  Codex protocol lifecycle; restricted content remains hidden. Durable
+  classifier usage separates exact provider calls/tokens/failures from
+  deterministic avoided calls and exposes a timezone-aware 1–31 day efficiency
+  report with explicitly labeled avoided-token estimates.
 - Persistent Compose workspace/home/Mongo with disposable per-job roots.
 - Graduated response delivery: short/medium answers remain Slack-native, while
   genuinely document-sized expository work is published to Agent Wiki
@@ -138,15 +148,16 @@ commands, tests, and active documentation have been removed.
   link. Artifact segments are rejected unless the URL has successful
   same-attempt reviewed-tool provenance. References to existing Wiki pages use
   exact human HTTPS URLs returned by the reviewed `get` or `url` read operation;
-  every reviewed `get` includes that URL in its full page envelope, and bare
-  Wiki slugs are rejected before rendering.
+  every reviewed `get` includes that URL in its full page envelope. Unresolved
+  internal slugs remain readable instead of failing the entire answer, while
+  reconstructed or fabricated opaque page URLs remain forbidden.
 
 ## Verification evidence
 
 Current migration evidence:
 
 - full verification components: pass, including all Go packages, the race
-  detector, vet, security scans, and the expanded `49/49` deterministic
+  detector, vet, security scans, and the expanded `54/54` deterministic
   behavioral eval;
 - latest opt-in direct OpenAI classifier baseline: `48/48`, with `38` real provider calls
   and approximately `1.84s` mean case
