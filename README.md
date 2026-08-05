@@ -45,9 +45,9 @@ influence an answer sent elsewhere.
   Brief classifier-selected in-channel answers remain direct because Slack
   requires streamed agent responses to reply to a thread.
 - Supports Slack-native exact-action approvals, channel directive modals,
-  a `/tag-mode` slash command that shows or changes the channel's
-  participation mode, cron-scheduled routines, and classifier-gated cron
-  trigger subscriptions with explicit IANA timezones.
+  `/tag-proactive`, `/tag-assist`, and `/tag-off` level commands plus the
+  compatible `/tag-mode` status/change command, cron-scheduled routines, and
+  classifier-gated cron trigger subscriptions with explicit IANA timezones.
 - Records correlated redacted logs, usage, and append-only audit receipts.
 
 ### Verified development posture
@@ -400,6 +400,15 @@ classifier mode:
 | `assist` | Answer useful ambient questions and authorized interventions, but never launch full-agent work from an unaddressed declarative status update |
 | `proactive` | Permit classifier-gated actionable background behavior as well as assist behavior |
 
+The three fixed channel commands write those same durable modes; they do not
+create a separate level system. `/tag-proactive` and `/tag-assist` also join a
+public channel when Tag is not already present. Slack does not allow an app to
+invite itself to a private channel, so the mode is saved and the ephemeral
+result asks a human to invite Tag. `/tag-off` persists `observe` before trying
+to leave, which keeps the channel silent even when Slack refuses the leave (for
+example, in the workspace's general channel). `/tag-mode` remains available
+for status and compatibility: `/tag-mode observe | assist | proactive`.
+
 With `TAG__SLACK__AUTO_ASSIST_JOINED_CHANNELS=true`, Slack membership owns the
 `observe`/`assist` transition for public and private channels. Startup
 reconciles the human-authorized context inventory against a separate bot-token
@@ -622,7 +631,7 @@ in Slack.
 ## Slack application setup
 
 The checked-in [slack-app-manifest.yaml](slack-app-manifest.yaml) defines the
-development app's requested scopes, Socket Mode, events, slash command, and
+development app's requested scopes, Socket Mode, events, slash commands, and
 agent surfaces. Install it in the intended development workspace, generate an
 app-level token with `connections:write`, install the app, and copy the labeled
 tokens to the matching local variables above.

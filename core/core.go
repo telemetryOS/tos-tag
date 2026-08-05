@@ -317,8 +317,21 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 				return slack.ModeChangeResult{}, fmt.Errorf("resolve channel policy: %w", resolveErr)
 			}
 			previous := string(policy.ParticipationMode)
+			result := slack.ModeChangeResult{
+				Mode:               previous,
+				Previous:           previous,
+				Enrolled:           policy.Enrolled,
+				Restricted:         policy.Restricted,
+				KillSwitched:       policy.KillSwitch,
+				WorkspaceEnabled:   policy.WorkspaceEnabled,
+				BotIsMember:        policy.BotIsMember,
+				BotMembershipKnown: policy.BotMembershipKnown,
+			}
 			if request.Mode == "" || request.Mode == previous {
-				return slack.ModeChangeResult{Mode: previous, Previous: previous}, nil
+				return result, nil
+			}
+			if request.Mode != string(types.ModeObserve) && (!policy.Enrolled || policy.KillSwitch || !policy.WorkspaceEnabled) {
+				return slack.ModeChangeResult{}, fmt.Errorf("channel policy does not permit active participation")
 			}
 			policy.ParticipationMode = types.ParticipationMode(request.Mode)
 			// An explicit operator choice must survive membership reconciliation.
@@ -330,7 +343,9 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 			if auditErr := appendModeChangeAudit(ctx, auditChain, request, saved, previous); auditErr != nil {
 				logger.WithCtx(blackbox.Ctx{"organization_id": request.OrganizationID, "channel_id": request.ChannelID, "error_type": fmt.Sprintf("%T", auditErr)}).Error("channel mode change audit persistence failed")
 			}
-			return slack.ModeChangeResult{Mode: string(saved.ParticipationMode), Previous: previous, Changed: true}, nil
+			result.Mode = string(saved.ParticipationMode)
+			result.Changed = true
+			return result, nil
 		})
 	}
 	pipe, err := pipeline.New(pipeline.Dependencies{

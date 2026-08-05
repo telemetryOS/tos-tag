@@ -294,11 +294,12 @@ func retryEventsAPIEvent(envelopeID string, retryAttempt int, retryReason string
 type fakeSocketModeTransport struct {
 	events  chan socketmode.Event
 	acked   chan string
+	payload chan any
 	handled chan struct{}
 }
 
 func newFakeSocketModeTransport() *fakeSocketModeTransport {
-	return &fakeSocketModeTransport{events: make(chan socketmode.Event, 8), acked: make(chan string, 8), handled: make(chan struct{}, 8)}
+	return &fakeSocketModeTransport{events: make(chan socketmode.Event, 8), acked: make(chan string, 8), payload: make(chan any, 8), handled: make(chan struct{}, 8)}
 }
 
 func (f *fakeSocketModeTransport) RunContext(ctx context.Context) error {
@@ -306,8 +307,9 @@ func (f *fakeSocketModeTransport) RunContext(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (f *fakeSocketModeTransport) AckCtx(_ context.Context, envelopeID string, _ any) error {
+func (f *fakeSocketModeTransport) AckCtx(_ context.Context, envelopeID string, payload any) error {
 	f.acked <- envelopeID
+	f.payload <- payload
 	return nil
 }
 
@@ -790,7 +792,7 @@ func TestDirectiveCommandAndModalSubmissionRemainChannelBound(t *testing.T) {
 func TestModeCommandRemainsWorkspaceBoundAndPassesRequestedMode(t *testing.T) {
 	options := LiveOptions{OrganizationID: "org", AppID: "A123", TeamID: "T123"}
 	request, eligible, err := NormalizeModeCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: modeSlashCommand, Text: " Proactive "})
-	if err != nil || !eligible || request.ChannelID != "C_ALERTS" || request.UserID != "U_ADMIN" || request.Mode != "proactive" {
+	if err != nil || !eligible || request.ChannelID != "C_ALERTS" || request.UserID != "U_ADMIN" || request.Command != modeSlashCommand || request.Mode != "proactive" {
 		t.Fatalf("request=%#v eligible=%v err=%v", request, eligible, err)
 	}
 	if _, eligible, err := NormalizeModeCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: directiveSlashCommand}); err != nil || eligible {
@@ -798,5 +800,145 @@ func TestModeCommandRemainsWorkspaceBoundAndPassesRequestedMode(t *testing.T) {
 	}
 	if _, _, err := NormalizeModeCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T999", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: modeSlashCommand, Text: "assist"}); err == nil {
 		t.Fatal("cross-workspace mode command was accepted")
+	}
+}
+
+func TestFixedModeCommandsMapToExistingParticipationModes(t *testing.T) {
+	options := LiveOptions{OrganizationID: "org", AppID: "A123", TeamID: "T123"}
+	tests := map[string]string{
+		proactiveSlashCommand: "proactive",
+		assistSlashCommand:    "assist",
+		offSlashCommand:       "observe",
+	}
+	for command, wantMode := range tests {
+		t.Run(command, func(t *testing.T) {
+			request, eligible, err := NormalizeModeCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: command})
+			if err != nil || !eligible || request.Command != command || request.Mode != wantMode {
+				t.Fatalf("request=%#v eligible=%v err=%v", request, eligible, err)
+			}
+		})
+	}
+}
+
+type fakeMembershipAPI struct {
+	info       *slackapi.Channel
+	infoErr    error
+	joinErr    error
+	leaveErr   error
+	infoCalls  int
+	joinCalls  int
+	leaveCalls int
+}
+
+func (f *fakeMembershipAPI) GetConversationInfoContext(context.Context, *slackapi.GetConversationInfoInput) (*slackapi.Channel, error) {
+	f.infoCalls++
+	return f.info, f.infoErr
+}
+
+func (f *fakeMembershipAPI) JoinConversationContext(context.Context, string) (*slackapi.Channel, string, []string, error) {
+	f.joinCalls++
+	return &slackapi.Channel{IsMember: f.joinErr == nil}, "", nil, f.joinErr
+}
+
+func (f *fakeMembershipAPI) LeaveConversationContext(context.Context, string) (bool, error) {
+	f.leaveCalls++
+	return f.leaveErr == nil, f.leaveErr
+}
+
+func modeAckText(t *testing.T, transport *fakeSocketModeTransport) string {
+	t.Helper()
+	select {
+	case payload := <-transport.payload:
+		response, ok := payload.(map[string]any)
+		if !ok {
+			t.Fatalf("ack payload type = %T", payload)
+		}
+		return fmt.Sprint(response["text"])
+	case <-time.After(time.Second):
+		t.Fatal("mode command was not acknowledged")
+		return ""
+	}
+}
+
+func TestFixedProactiveCommandJoinsPublicChannelAndRefreshesMembership(t *testing.T) {
+	transport := newFakeSocketModeTransport()
+	members := &fakeMembershipAPI{}
+	ingress := &LiveIngress{
+		options: LiveOptions{OrganizationID: "org", TeamID: "team", BotUserID: "U_TAG"},
+		client:  transport,
+		members: members,
+	}
+	var requested []string
+	ingress.SetModeChangeHandler(func(_ context.Context, request ModeChangeRequest) (ModeChangeResult, error) {
+		requested = append(requested, request.Mode)
+		if request.Mode == "" {
+			return ModeChangeResult{Mode: "observe", Previous: "observe", Enrolled: true, WorkspaceEnabled: true, BotMembershipKnown: true}, nil
+		}
+		return ModeChangeResult{Mode: request.Mode, Previous: "observe", Changed: true}, nil
+	})
+	var membership BotMembershipChange
+	ingress.SetBotMembershipHandler(func(_ context.Context, change BotMembershipChange) error {
+		membership = change
+		return nil
+	})
+	ingress.handleModeCommand(context.Background(), blackbox.New(), "E1", ModeChangeRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "C_PUBLIC", UserID: "U_ADMIN", Command: proactiveSlashCommand, Mode: "proactive"})
+	text := modeAckText(t, transport)
+	if fmt.Sprint(requested) != "[ proactive]" || members.infoCalls != 0 || members.joinCalls != 1 || members.leaveCalls != 0 {
+		t.Fatalf("requested=%v info=%d join=%d leave=%d", requested, members.infoCalls, members.joinCalls, members.leaveCalls)
+	}
+	if !membership.Joined || membership.ChannelID != "C_PUBLIC" || !strings.Contains(text, "*proactive*") || !strings.Contains(text, "also joined") {
+		t.Fatalf("membership=%#v response=%q", membership, text)
+	}
+}
+
+func TestFixedAssistCommandSavesPrivateLevelWithoutPretendingItCanJoin(t *testing.T) {
+	transport := newFakeSocketModeTransport()
+	members := &fakeMembershipAPI{}
+	ingress := &LiveIngress{options: LiveOptions{OrganizationID: "org", TeamID: "team", BotUserID: "U_TAG"}, client: transport, members: members}
+	ingress.SetModeChangeHandler(func(_ context.Context, request ModeChangeRequest) (ModeChangeResult, error) {
+		if request.Mode == "" {
+			return ModeChangeResult{Mode: "observe", Previous: "observe", Enrolled: true, Restricted: true, WorkspaceEnabled: true, BotMembershipKnown: true}, nil
+		}
+		return ModeChangeResult{Mode: request.Mode, Previous: "observe", Changed: true}, nil
+	})
+	ingress.handleModeCommand(context.Background(), blackbox.New(), "E2", ModeChangeRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "G_PRIVATE", UserID: "U_ADMIN", Command: assistSlashCommand, Mode: "assist"})
+	text := modeAckText(t, transport)
+	if members.infoCalls != 0 || members.joinCalls != 0 || !strings.Contains(text, "*assist*") || !strings.Contains(text, "private channels") || !strings.Contains(text, "<@U_TAG>") {
+		t.Fatalf("info=%d join=%d response=%q", members.infoCalls, members.joinCalls, text)
+	}
+}
+
+func TestFixedOffCommandPersistsObserveBeforeBestEffortLeave(t *testing.T) {
+	transport := newFakeSocketModeTransport()
+	members := &fakeMembershipAPI{leaveErr: errors.New("cant_leave_general")}
+	ingress := &LiveIngress{options: LiveOptions{OrganizationID: "org", TeamID: "team", BotUserID: "U_TAG"}, client: transport, members: members}
+	modeSaved := false
+	ingress.SetModeChangeHandler(func(_ context.Context, request ModeChangeRequest) (ModeChangeResult, error) {
+		if request.Mode == "" {
+			return ModeChangeResult{Mode: "proactive", Previous: "proactive", Enrolled: true, WorkspaceEnabled: true, BotMembershipKnown: true, BotIsMember: true}, nil
+		}
+		modeSaved = request.Mode == "observe"
+		return ModeChangeResult{Mode: request.Mode, Previous: "proactive", Changed: true}, nil
+	})
+	ingress.handleModeCommand(context.Background(), blackbox.New(), "E3", ModeChangeRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "C_GENERAL", UserID: "U_ADMIN", Command: offSlashCommand, Mode: "observe"})
+	text := modeAckText(t, transport)
+	if !modeSaved || members.leaveCalls != 1 || !strings.Contains(text, "*off* (`observe`)") || !strings.Contains(text, "would not let Tag leave") {
+		t.Fatalf("mode_saved=%v leave=%d response=%q", modeSaved, members.leaveCalls, text)
+	}
+}
+
+func TestFixedActiveCommandDoesNotJoinDisabledChannel(t *testing.T) {
+	transport := newFakeSocketModeTransport()
+	members := &fakeMembershipAPI{}
+	ingress := &LiveIngress{options: LiveOptions{OrganizationID: "org", TeamID: "team", BotUserID: "U_TAG"}, client: transport, members: members}
+	calls := 0
+	ingress.SetModeChangeHandler(func(_ context.Context, _ ModeChangeRequest) (ModeChangeResult, error) {
+		calls++
+		return ModeChangeResult{Mode: "observe", Previous: "observe", Enrolled: true, WorkspaceEnabled: false, KillSwitched: true}, nil
+	})
+	ingress.handleModeCommand(context.Background(), blackbox.New(), "E4", ModeChangeRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "C_DISABLED", UserID: "U_ADMIN", Command: proactiveSlashCommand, Mode: "proactive"})
+	text := modeAckText(t, transport)
+	if calls != 1 || members.joinCalls != 0 || !strings.Contains(text, "cannot be activated") {
+		t.Fatalf("calls=%d join=%d response=%q", calls, members.joinCalls, text)
 	}
 }

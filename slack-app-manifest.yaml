@@ -15,6 +15,18 @@ features:
       description: Show or change tag's participation mode for this channel
       usage_hint: "observe | assist | proactive"
       should_escape: false
+    - command: /tag-proactive
+      description: Set tag to proactive mode in this channel
+      usage_hint: Joins the public channel when possible
+      should_escape: false
+    - command: /tag-assist
+      description: Set tag to assist mode in this channel
+      usage_hint: Joins the public channel when possible
+      should_escape: false
+    - command: /tag-off
+      description: Turn tag off in this channel
+      usage_hint: Sets observe first, then leaves when possible
+      should_escape: false
   agent_view:
     agent_description: Cross-channel AI teammate for investigation, planning, and durable agent work.
     suggested_prompts:
