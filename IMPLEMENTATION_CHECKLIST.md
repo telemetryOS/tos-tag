@@ -167,6 +167,12 @@ Only mark an item complete when source and verification evidence exist.
   actions, and one-target deletes, with isolated CLI state, server-side token
   mapping, risk-separated approval, and no auth/config, raw flag,
   creation/update, credential export, or cascading cluster-delete surface.
+- [x] Provide `pandadoc.documents` read/write/delete operations through a
+  fixed-host semantic shell CLI for bounded document/template/contact/member
+  reads, JSON-only document/contact workflows, and exact deletion, with
+  server-side API-key configuration, risk-separated approval, and no OAuth,
+  key/workspace administration, sessions, binary transfer, template mutation,
+  arbitrary URL, or raw-flag surface.
 - [x] Inject the `marketing-funnel-chain`, `marketing-funnel-review`,
   `marketing-account-journey`, and draft-only `marketing-unstall-draft`
   behavioral skills.

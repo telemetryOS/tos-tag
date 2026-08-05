@@ -253,6 +253,11 @@ The reviewed catalog currently contains:
   to reviewed inventory reads, exact Droplet power/App restart actions, and
   single-target deletes, with isolated state and no auth/config, raw flags,
   creation/update, credential export, or cascading cluster-delete surface;
+- `pandadoc.documents` (`read`, `write`, `delete`): fixed-host semantic shell
+  CLI access limited to bounded document/template/contact/member reads,
+  JSON-only document/contact workflows, and exact deletes, with no OAuth,
+  key/workspace administration, sessions, binary transfer, template mutation,
+  arbitrary URL, or raw-flag surface;
 - `telemetryos.device-logs` (`read`, `write`); and
 - `telemetryos.mongo` (`read`, disabled by default pending the human-opened
   security-key session).
@@ -262,7 +267,7 @@ Wiki content obtained through `telemetryos.code` must use the typed Wiki
 workers have no shared source filename; never invent `/workspace/...` paths.
 The exact action is committed by the Wiki execution audit receipt.
 
-Behavioral skill presence is not tool authority. The current inventory is 31
+Behavioral skill presence is not tool authority. The current inventory is 32
 skills in `base`; use the checked-in plugin manifest as the source of truth and
 keep the exact list in `README.md`.
 

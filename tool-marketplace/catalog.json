@@ -1,6 +1,6 @@
 {
   "id": "telemetryos-agent-tools",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "tools": [
     {"name": "linear", "path": "tools/linear"},
     {"name": "wiki", "path": "tools/wiki"},
@@ -12,6 +12,7 @@
     {"name": "product-docs", "path": "tools/product-docs"},
     {"name": "attio", "path": "tools/attio"},
     {"name": "stripe", "path": "tools/stripe"},
-    {"name": "digitalocean", "path": "tools/digitalocean"}
+    {"name": "digitalocean", "path": "tools/digitalocean"},
+    {"name": "pandadoc", "path": "tools/pandadoc"}
   ]
 }

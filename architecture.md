@@ -369,6 +369,7 @@ The current reviewed catalog is:
 | `attio.crm` | `read`, `write`, `delete` | Risk-based | Fixed `api.attio.com` v2 JSON routes with server-side bearer auth; explicit mutation approval, no arbitrary URLs/headers, OAuth exchange, or binary transfer |
 | `stripe.billing` | `read`, `write`, `delete` | Risk-based | Live-only official Stripe CLI limited to reviewed `/v1` and `/v2` API paths and arguments; isolated CLI state, server-side key injection, mandatory mutation idempotency, and no login/key/plugin/fixture/listener/trigger surface |
 | `digitalocean.cloud` | `read`, `write`, `delete` | Risk-based | Official doctl limited to fixed inventory reads, exact Droplet power/App restart actions, and single-target deletes; isolated state and server-side token mapping, with no auth/config, raw flags, creation/update, credential export, or cascading Kubernetes deletion |
+| `pandadoc.documents` | `read`, `write`, `delete` | Risk-based | Fixed `api.pandadoc.com` semantic shell CLI for bounded document/template/contact/member reads, JSON-only document/contact workflows, and exact deletes; server-side API-key config with no OAuth, key/workspace administration, sessions, binary transfer, template mutation, arbitrary URLs, or raw flags |
 | `telemetryos.device-logs` | `read`, `write` | Risk-based | Device-log queries and reviewed log-level changes |
 | `telemetryos.mongo` | `read` | Risk-based | Bounded Mongo fetch operations |
 

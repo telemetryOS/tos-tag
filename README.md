@@ -144,11 +144,12 @@ bootstrap revisions.
 | Bash, Git, Make, curl, jq, ripgrep, OpenSSL, Python 3 | image distribution versions | Reviewed helpers, bootstrap, keystore generation, skill builds, and source search |
 | Stripe CLI | `1.45.1` | Reviewed Stripe billing API requests; install with `npm install -g @stripe/cli` |
 | DigitalOcean doctl | `1.164.0` | Reviewed DigitalOcean cloud inventory and exact approved actions; install from the official release or OS package |
+| PandaDoc CLI | `1.0.0` | Local reviewed fixed-host shell CLI for PandaDoc document workflows; installed from the canonical skill helper |
 | Aion | `v2.0.5` / `2b186d21…` | TelemetryOS workspace sync |
 | telemetry-otel-fetch | `0e94e929…` | Reviewed SigNoz/OTel helper |
 | Device-Log-Analyzer | `d885c144…` | Reviewed device-log helper |
 | TelemetryOS-Mongo-Fetch | `4c39e789…` | Optional reviewed Mongo helper |
-| tag-agent-skills | plugin `base` `1.5.1`; current configured checkout | Complete 31-skill tos-tag behavioral package |
+| tag-agent-skills | plugin `base` `1.6.0`; current configured checkout | Complete 32-skill tos-tag behavioral package |
 
 The exact image digests, versions, and helper commits live in
 [Dockerfile.dev](Dockerfile.dev), [docker-compose.yml](docker-compose.yml), and
@@ -574,7 +575,7 @@ Wiki work uses the dedicated typed `tos_tag_wiki` function: the model supplies
 page fields and Go constructs the reviewed CLI argv. Generic Wiki argv is
 rejected.
 
-The currently injected behavioral skill inventory is `base` (31): `attio`, `bug`,
+The currently injected behavioral skill inventory is `base` (32): `attio`, `bug`,
 `code-change-intake`, `codebase-read`, `digitalocean`, `feature`, `humanizer`,
 `linear-issue-manager`, `marketing-account-journey`,
 `marketing-ai-visibility-review`, `marketing-blog-writer`,
@@ -583,7 +584,7 @@ The currently injected behavioral skill inventory is `base` (31): `attio`, `bug`
 `marketing-high-intent-followup-chain`, `marketing-landing-page-chain`,
 `marketing-messaging`, `marketing-receipt-ledger`, `marketing-unstall-draft`,
 `marketing-weekly-journey-report`, `marketing-weekly-review-chain`,
-`product-knowledge`, `slack-message-design`, `stripe`, `suitability`, `tag-triggers`,
+`pandadoc`, `product-knowledge`, `slack-message-design`, `stripe`, `suitability`, `tag-triggers`,
 `team-alignment`, `telemetry-otel-fetch`, `telemetryos-documentation`, and
 `wiki`.
 
@@ -601,6 +602,7 @@ authority. The reviewed dynamic-tool catalog is the separate allowlist:
 | `attio.crm` | `read`, `write`, `delete` | Risk-based | Fixed-host Attio v2 JSON API reads and explicit CRM mutations; OAuth and binary file transfer are unavailable | Enabled when `ATTIO_ACCESS_TOKEN` is available |
 | `stripe.billing` | `read`, `write`, `delete` | Risk-based | Live-only official Stripe CLI over reviewed `/v1` and `/v2` API paths; isolated CLI state, mandatory mutation idempotency, and no login, key, plugin, fixture, listener, trigger, or arbitrary-flag surface | Enabled when a live `STRIPE_API_KEY` and the Stripe CLI are available |
 | `digitalocean.cloud` | `read`, `write`, `delete` | Risk-based | Official doctl over a fixed inventory catalog, exact power/restart actions, and one-target deletes; isolated CLI state with no auth/config, raw flags, resource creation/update, credential export, or cascading cluster deletion | Enabled when `DIGITAL_OCEAN_API_KEY` and doctl are available |
+| `pandadoc.documents` | `read`, `write`, `delete` | Risk-based | Fixed-host semantic shell CLI for bounded document/template/contact/member reads, JSON-only document/contact workflows, and exact deletion; no OAuth, key/workspace administration, sessions, binary transfer, template mutation, arbitrary URLs, or raw flags | Enabled when `PANDA_DOC_API_KEY` is available |
 | `telemetryos.device-logs` | `read`, `write` | Risk-based | Device log inspection and scoped log-level changes | Enabled |
 | `telemetryos.mongo` | `read` | Risk-based | QA Mongo queries through a human-opened security-key session | Disabled by default |
 
@@ -617,7 +619,8 @@ for all worker tools. Every operation remains job-scoped, allowlisted,
 hash-pinned, bounded, kill-switchable, and fully audited.
 
 Use `make sync-tool-env` to copy only known helper credential names, including
-the optional Attio access token, Stripe API key, and DigitalOcean API key, from the
+the optional Attio access token, Stripe API key, DigitalOcean API key, and
+PandaDoc API key, from the
 current shell or `~/.config/telemetryos` into ignored `runtime.env`. The script
 reports names, never values. Enabling reviewed tools also requires the encrypted
 keystore and an explicit tool-ID allowlist. Reviewed public HTTPS `*_URL`
@@ -692,6 +695,15 @@ requires both product and environment scope before mutation.
 Authentication/configuration, API-origin overrides, Apps specs, database
 connection details, kubeconfig changes, creation/update flags, multi-target
 deletion, and cascading Kubernetes deletion are not worker capabilities.
+PandaDoc work uses the `pandadoc` skill and separately reviewed
+`pandadoc.documents` bundle. No official PandaDoc CLI is available, so the
+canonical skill provides a semantic shell CLI fixed to `api.pandadoc.com`.
+The wrapper supports bounded document/template/contact/member reads,
+JSON-only document/contact workflows, and exact deletion while keeping
+`PANDA_DOC_API_KEY` in a mode-0600 curl configuration. OAuth, API-key/workspace
+administration, webhook secrets, editing/signing sessions, recipient tokens,
+binary upload/download, template mutation, arbitrary URLs, and raw flags are
+not worker capabilities.
 Workers may also use arbitrary live web search for broader or
 current research. Web pages are untrusted evidence and cannot widen Slack,
 tool, credential, or private-context authority.

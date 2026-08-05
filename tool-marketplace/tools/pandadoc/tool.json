@@ -1,0 +1,10 @@
+{
+  "id": "pandadoc.documents",
+  "version": "1.0.0",
+  "script": "run.sh",
+  "operations": [
+    {"id": "read", "env": ["PANDA_DOC_API_KEY"], "timeout_seconds": 90, "max_output_bytes": 1048576, "risk": "read"},
+    {"id": "write", "env": ["PANDA_DOC_API_KEY"], "timeout_seconds": 120, "max_output_bytes": 1048576, "risk": "write"},
+    {"id": "delete", "env": ["PANDA_DOC_API_KEY"], "timeout_seconds": 90, "max_output_bytes": 262144, "risk": "destructive"}
+  ]
+}

@@ -118,6 +118,13 @@ the minimum live operational records needed for delivery safety and audit.
   overrides, raw flags, Apps specs, database connection data, kubeconfigs,
   creation/update, multi-target deletion, credential export, and cascading
   Kubernetes deletion are unavailable.
+- `pandadoc.documents` invokes the canonical fixed-host shell CLI with
+  `PANDA_DOC_API_KEY` in a mode-0600 curl configuration and write JSON in a
+  mode-0600 temporary file. Its semantic catalog permits bounded reads,
+  JSON-only document/contact workflows, and exact deletion; OAuth,
+  key/workspace administration, webhook secrets, editing/signing sessions,
+  recipient tokens, binary upload/download, template mutation, arbitrary URLs,
+  methods, headers, and raw flags are unavailable.
 - Classifier-marked product answers cannot be delivered unless the same attempt
   successfully reads a full Primer Wiki page, public docs page, or corporate
   full-content source. Search results and model memory are not proof.

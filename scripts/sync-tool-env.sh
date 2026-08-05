@@ -173,6 +173,15 @@ else
   echo "DIGITAL_OCEAN_API_KEY not found; digitalocean.cloud remains disabled" >&2
 fi
 
+pandadoc_key="$(resolve_value PANDA_DOC_API_KEY "${runtime_file}" 2>/dev/null || true)"
+if [[ -n "${pandadoc_key}" ]]; then
+  upsert PANDA_DOC_API_KEY "${pandadoc_key}"
+  imported_names+=(PANDA_DOC_API_KEY)
+  injected_tools+=",pandadoc.documents"
+else
+  echo "PANDA_DOC_API_KEY not found; pandadoc.documents remains disabled" >&2
+fi
+
 [[ -d "${code_root}" ]] || { echo "missing Aion developer path" >&2; exit 1; }
 code_root="$(cd "${code_root}" && pwd -P)"
 [[ -x "${semble_binary}" ]] || { echo "missing Semble; run make install-semantic-search" >&2; exit 1; }

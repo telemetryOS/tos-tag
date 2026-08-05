@@ -32,6 +32,7 @@ worker admission and cannot be converted into a response or approval.
 | `attio.crm` | `read`, `write`, `delete` | Risk-based | `ATTIO_ACCESS_TOKEN` |
 | `stripe.billing` | `read`, `write`, `delete` | Risk-based | `STRIPE_API_KEY` |
 | `digitalocean.cloud` | `read`, `write`, `delete` | Risk-based | `DIGITAL_OCEAN_API_KEY` |
+| `pandadoc.documents` | `read`, `write`, `delete` | Risk-based | `PANDA_DOC_API_KEY` |
 | `telemetryos.device-logs` | `read`, `write` | Risk-based | `DLA_API_BASE_URL`, `DLA_API_KEY`, `DLA_ENV` |
 | `telemetryos.mongo` | `read` | Risk-based | `MONGO_QA_URI` |
 
@@ -94,6 +95,14 @@ Droplet power/App restart actions, and one-target deletes. It rejects raw
 commands and flags, auth/config/profile changes, API-origin overrides, Apps
 specs, database connection data, kubeconfig changes, creation/update,
 multi-target deletion, credential export, and cascading Kubernetes deletion.
+`tools/pandadoc/run.sh` is copied from
+`tag-agent-skills/src/skills/pandadoc/scripts/pandadoc.sh`. No official
+PandaDoc CLI is available, so this canonical helper provides fixed-host
+semantic document commands, private curl authentication/body files, bounded
+JSON, and risk-separated operations. It rejects arbitrary paths, URLs,
+methods, headers, OAuth, key/workspace administration, webhook secrets,
+editing/signing sessions, recipient tokens, binary transfer, template
+mutation, and raw flags.
 Classifier-marked product answers require a successful same-attempt
 `docs-page`, `corporate-full`, or Agent Wiki full-page read before delivery;
 an index, search result, arbitrary web result, Slack context, or memory is not

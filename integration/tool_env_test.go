@@ -48,6 +48,7 @@ func TestToolEnvironmentSyncIsNarrowAndDoesNotPrintValues(t *testing.T) {
 		"ATTIO_ACCESS_TOKEN":      "attio-fixture-secret",
 		"STRIPE_API_KEY":          "stripe-fixture-secret",
 		"DIGITAL_OCEAN_API_KEY":   "digitalocean-fixture-secret",
+		"PANDA_DOC_API_KEY":       "pandadoc-fixture-secret",
 		"PATH":                    toolBinDir + ":" + os.Getenv("PATH"),
 		"TAG_AION_DEVELOPER_PATH": codeRoot,
 		"TAG_CODE_SEMBLE_BIN":     semanticBin,
