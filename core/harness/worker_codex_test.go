@@ -414,6 +414,18 @@ func TestPrepareToolInvocationValidatesSkillsAndStripsProgressMetadata(t *testin
 	if _, _, err := session.prepareToolInvocation("call-7", "tos_tag_tool", json.RawMessage(`{"skill_names":["product-knowledge"],"tool_id":"media.curds","operation_id":"generate","arguments":["a fox","1:1","auto"]}`)); err == nil || !strings.Contains(err.Error(), "curds skill") {
 		t.Fatalf("Curds skill gate error=%v", err)
 	}
+	for name, raw := range map[string]string{
+		"aspect":      `{"skill_names":["curds"],"tool_id":"media.curds","operation_id":"generate","arguments":["a fox","square","auto"]}`,
+		"quality":     `{"skill_names":["curds"],"tool_id":"media.curds","operation_id":"generate","arguments":["a fox","1:1","standard"]}`,
+		"arity":       `{"skill_names":["curds"],"tool_id":"media.curds","operation_id":"generate","arguments":["a fox","1:1"]}`,
+		"emptyPrompt": `{"skill_names":["curds"],"tool_id":"media.curds","operation_id":"generate","arguments":[" ","1:1","auto"]}`,
+	} {
+		t.Run("reject Curds "+name, func(t *testing.T) {
+			if _, _, err := session.prepareToolInvocation("call-invalid", "tos_tag_tool", json.RawMessage(raw)); err == nil {
+				t.Fatal("invalid Curds request was accepted")
+			}
+		})
+	}
 }
 
 func TestWorkerCodexNotificationsExposeSafeSkillAndNativeToolLifecycle(t *testing.T) {

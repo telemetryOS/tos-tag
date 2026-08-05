@@ -870,8 +870,13 @@ func (s *codexWorkerSession) prepareToolInvocation(callID, tool string, argument
 		if invocation.ToolID == "telemetryos.linear" && invocation.OperationID == "intake" && (!containsString(validatedSkills, "linear-issue-manager") || (!containsString(validatedSkills, "bug") && !containsString(validatedSkills, "feature"))) {
 			return declaredToolInvocation{}, nil, errors.New("Linear intake requires the bug or feature workflow with linear-issue-manager")
 		}
-		if invocation.ToolID == "media.curds" && (invocation.OperationID != "generate" || !containsString(validatedSkills, "curds")) {
-			return declaredToolInvocation{}, nil, errors.New("Curds image generation requires the curds skill")
+		if invocation.ToolID == "media.curds" {
+			if invocation.OperationID != "generate" || !containsString(validatedSkills, "curds") {
+				return declaredToolInvocation{}, nil, errors.New("Curds image generation requires the curds skill")
+			}
+			if err := validateCurdsToolArguments(arguments); err != nil {
+				return declaredToolInvocation{}, nil, err
+			}
 		}
 	case wikiDynamicTool:
 		request, err := decodeWikiToolRequest(arguments)
@@ -903,6 +908,26 @@ func (s *codexWorkerSession) prepareToolInvocation(callID, tool string, argument
 		return declaredToolInvocation{}, nil, errors.New("dynamic tool arguments could not be forwarded")
 	}
 	return invocation, bridgeArguments, nil
+}
+
+func validateCurdsToolArguments(raw json.RawMessage) error {
+	var request struct {
+		Arguments []string `json:"arguments"`
+	}
+	if json.Unmarshal(raw, &request) != nil || len(request.Arguments) != 3 {
+		return errors.New("Curds generate requires exactly three arguments: prompt, aspect ratio, and quality")
+	}
+	prompt := strings.TrimSpace(request.Arguments[0])
+	if prompt == "" || len(prompt) > 12000 {
+		return errors.New("Curds prompt must be between 1 and 12000 characters")
+	}
+	if !containsString([]string{"1:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16", "21:9", "9:21", "2:1", "1:2"}, request.Arguments[1]) {
+		return errors.New("Curds aspect ratio is unsupported")
+	}
+	if !containsString([]string{"auto", "low", "medium", "high"}, request.Arguments[2]) {
+		return errors.New("Curds quality is unsupported")
+	}
+	return nil
 }
 
 func validationCodeFromBridgeOutput(output string) string {
