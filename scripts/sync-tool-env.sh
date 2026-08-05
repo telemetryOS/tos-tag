@@ -136,6 +136,15 @@ else
   echo "SITE_ANALYTICS_TOKEN not found; telemetryos.analytics remains disabled" >&2
 fi
 
+attio_token="$(resolve_value ATTIO_ACCESS_TOKEN 2>/dev/null || true)"
+if [[ -n "${attio_token}" ]]; then
+  upsert ATTIO_ACCESS_TOKEN "${attio_token}"
+  imported_names+=(ATTIO_ACCESS_TOKEN)
+  injected_tools+=",attio.crm"
+else
+  echo "ATTIO_ACCESS_TOKEN not found; attio.crm remains disabled" >&2
+fi
+
 [[ -d "${code_root}" ]] || { echo "missing Aion developer path" >&2; exit 1; }
 code_root="$(cd "${code_root}" && pwd -P)"
 [[ -x "${semble_binary}" ]] || { echo "missing Semble; run make install-semantic-search" >&2; exit 1; }

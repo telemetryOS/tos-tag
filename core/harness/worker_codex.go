@@ -775,7 +775,8 @@ func completedToolOperation(tool string, arguments json.RawMessage) (string, str
 		switch request.ToolID + "/" + request.OperationID + "/" + request.Arguments[0] {
 		case "telemetryos.wiki/read/get", "telemetryos.wiki/read/search", "telemetryos.product-docs/read/docs-index", "telemetryos.product-docs/read/docs-page", "telemetryos.product-docs/read/corporate-full",
 			"telemetryos.code/read/repos", "telemetryos.code/read/freshness", "telemetryos.code/read/files", "telemetryos.code/read/search", "telemetryos.code/read/semantic-search", "telemetryos.code/read/read", "telemetryos.code/read/versions",
-			"telemetryos.analytics/read/pipeline", "telemetryos.analytics/read/insights", "telemetryos.analytics/read/website", "telemetryos.analytics/read/accounts", "telemetryos.analytics/read/account", "telemetryos.analytics/read/events":
+			"telemetryos.analytics/read/pipeline", "telemetryos.analytics/read/insights", "telemetryos.analytics/read/website", "telemetryos.analytics/read/accounts", "telemetryos.analytics/read/account", "telemetryos.analytics/read/events",
+			"attio.crm/read/get", "attio.crm/read/query", "attio.crm/write/post", "attio.crm/write/put", "attio.crm/write/patch", "attio.crm/delete/delete":
 			resourceAction = request.Arguments[0]
 		}
 	}

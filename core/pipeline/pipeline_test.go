@@ -974,6 +974,17 @@ func TestAnalyticsAgentStatusUsesPrivacySafeTitle(t *testing.T) {
 	}
 }
 
+func TestAttioAgentStatusUsesPrivacySafeTitle(t *testing.T) {
+	status := safeToolAgentStatus("attio.crm", "read", "query", agentStatusActive)
+	if status != "Checking Attio CRM…" || safeFooterActivity("attio.crm", "read", "query") != "Attio" {
+		t.Fatalf("Attio read status=%q activity=%q", status, safeFooterActivity("attio.crm", "read", "query"))
+	}
+	status = safeToolAgentStatus("attio.crm", "write", "patch", agentStatusActive)
+	if status != "Updating Attio CRM…" {
+		t.Fatalf("Attio write status=%q", status)
+	}
+}
+
 func TestClassificationActivityHidesRestrictedMessageContent(t *testing.T) {
 	activityFeed := activity.New(10)
 	pipe := &Pipeline{deps: Dependencies{Activity: activityFeed}}

@@ -1,0 +1,10 @@
+{
+  "id": "attio.crm",
+  "version": "1.0.0",
+  "script": "run.sh",
+  "operations": [
+    {"id": "read", "env": ["ATTIO_ACCESS_TOKEN"], "timeout_seconds": 90, "max_output_bytes": 1048576, "risk": "read"},
+    {"id": "write", "env": ["ATTIO_ACCESS_TOKEN"], "timeout_seconds": 90, "max_output_bytes": 1048576, "risk": "write"},
+    {"id": "delete", "env": ["ATTIO_ACCESS_TOKEN"], "timeout_seconds": 90, "max_output_bytes": 262144, "risk": "destructive"}
+  ]
+}

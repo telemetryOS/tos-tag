@@ -36,6 +36,7 @@ func TestToolEnvironmentSyncIsNarrowAndDoesNotPrintValues(t *testing.T) {
 		"DLA_API_BASE_URL":        "https://logs.example.test",
 		"DLA_API_KEY":             "dla-fixture-secret",
 		"DLA_ENV":                 "qa",
+		"ATTIO_ACCESS_TOKEN":      "attio-fixture-secret",
 		"TAG_AION_DEVELOPER_PATH": codeRoot,
 		"TAG_CODE_SEMBLE_BIN":     semanticBin,
 		"TAG_CODE_SNAPSHOT_ROOT":  snapshotRoot,

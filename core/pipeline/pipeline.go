@@ -2358,6 +2358,12 @@ func safeToolAgentStatus(toolID, operationID, resourceAction string, phase agent
 		title = statusVerb(phase, "Querying telemetry…", "Reviewing telemetry results…", "Recovering from a telemetry error…")
 	case "telemetryos.analytics":
 		title = statusVerb(phase, "Reviewing marketing analytics…", "Interpreting analytics results…", "Recovering from an analytics error…")
+	case "attio.crm":
+		if operationID == "read" {
+			title = statusVerb(phase, "Checking Attio CRM…", "Reviewing Attio results…", "Recovering from an Attio lookup error…")
+		} else {
+			title = statusVerb(phase, "Updating Attio CRM…", "Confirming the Attio update…", "Recovering from an Attio update error…")
+		}
 	case "telemetryos.device-logs":
 		title = statusVerb(phase, "Checking device logs…", "Reviewing device log results…", "Recovering from a device log error…")
 	case "telemetryos.mongo":
@@ -2401,6 +2407,8 @@ func safeFooterActivity(toolID, _ string, resourceAction string) string {
 		return "telemetry"
 	case "telemetryos.analytics":
 		return "analytics"
+	case "attio.crm":
+		return "Attio"
 	case "telemetryos.device-logs":
 		return "device logs"
 	case "telemetryos.mongo":
