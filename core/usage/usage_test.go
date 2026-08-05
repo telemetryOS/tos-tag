@@ -91,3 +91,36 @@ func TestClassifierEfficiencyKeepsLegacyCoverageExplicit(t *testing.T) {
 		t.Fatalf("legacy coverage = %#v", report.Totals)
 	}
 }
+
+func TestClassifierEfficiencyAggregateRowsPreserveDailyAndTotalAccounting(t *testing.T) {
+	query := EfficiencyQuery{
+		OrganizationID: "o",
+		Since:          time.Date(2026, 8, 4, 7, 0, 0, 0, time.UTC),
+		Until:          time.Date(2026, 8, 6, 7, 0, 0, 0, time.UTC),
+		Location:       time.FixedZone("PDT", -7*60*60),
+	}
+	measured := efficiencyAggregateRow{
+		ProviderCalls: 2, InstrumentedProviderCalls: 2, CandidateDecisions: 2,
+		InputTokens: 400, OutputTokens: 40, ContextPackTokens: 140,
+		EstimatedNonContextInputTokens: 260, MeasuredInputCalls: 2,
+		MaxInputTokens: 300, SilentProviderRecommendations: 1,
+	}
+	measured.ID.Day = "2026-08-05"
+	avoided := efficiencyAggregateRow{AvoidedProviderCalls: 2, CandidateDecisions: 2}
+	avoided.ID.Day = "2026-08-05"
+	avoided.ID.Reason = "suppress.deleted"
+	report, err := buildEfficiencyReportFromAggregates(query, []efficiencyAggregateRow{measured, avoided})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Days) != 2 || report.Days[1].Day != "2026-08-05" {
+		t.Fatalf("daily buckets = %#v", report.Days)
+	}
+	day := report.Days[1]
+	if day.ProviderCalls != 2 || day.AvoidedProviderCalls != 2 || day.CandidateDecisions != 4 || day.AverageInputTokens != 200 || day.EstimatedAvoidedInputTokens != 400 || day.MaxInputTokens != 300 || day.AvoidedReasons["suppress.deleted"] != 2 {
+		t.Fatalf("daily aggregate = %#v", day)
+	}
+	if report.Totals.ProviderCalls != day.ProviderCalls || report.Totals.EstimatedPotentialInputTokens != day.EstimatedPotentialInputTokens {
+		t.Fatalf("totals = %#v day = %#v", report.Totals, day)
+	}
+}

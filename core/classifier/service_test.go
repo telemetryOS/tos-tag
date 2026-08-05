@@ -81,11 +81,13 @@ func TestThirdPartyAddressGatePreservesActiveThreadIntent(t *testing.T) {
 		want   bool
 	}{
 		"leading handoff marker":      {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "<@U03404W4Z> ^"}}, want: true},
+		"labeled leading handoff":     {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "<@U03404W4Z|alex> ^"}}, want: true},
 		"leading direct question":     {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: " <@U03404W4Z>, can you check this?"}}, want: true},
 		"recipient later in request":  {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "Summarize this for <@U03404W4Z>."}}, want: false},
 		"Tag explicitly co-addressed": {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "<@U03404W4Z>, Tag, summarize this for both of us."}}, want: false},
 		"Tag directly mentioned":      {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{Text: "<@U03404W4Z> compare these", IsMention: true}}, want: false},
 		"direct message conversation": {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{ChannelKind: types.SlackChannelKindDirectMessage, Text: "<@U03404W4Z> is the owner"}}, want: false},
+		"replayed direct message":     {target: Target{ActiveThread: true, Envelope: types.SlackEnvelope{ChannelID: "D03404W4Z", Text: "<@U03404W4Z> is the owner"}}, want: false},
 		"inactive thread":             {target: Target{Envelope: types.SlackEnvelope{Text: "<@U03404W4Z> ^"}}, want: false},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -760,20 +762,21 @@ func TestExplicitTagAddressRequiresVocativeUse(t *testing.T) {
 		text string
 		want bool
 	}{
-		"leading punctuation":         {text: "Tag, checkout is unavailable.", want: true},
-		"leading natural question":    {text: "Tag can you check checkout", want: true},
-		"leading greeting":            {text: "Hey Tag: check checkout", want: true},
-		"mid-sentence greeting":       {text: "Morning, Tag. Hope your queues are behaving.", want: true},
-		"mid-sentence praise":         {text: "Nice work, Tag — thanks for sticking with it.", want: true},
-		"co-address after user":       {text: "<@U03404W4Z>, Tag, summarize this for both of us.", want: true},
-		"trailing vocative":           {text: "Checkout is unavailable, Tag!", want: true},
-		"unpunctuated social address": {text: "Thanks Tag!", want: true},
-		"colon request":               {text: "Tag: can you check checkout", want: true},
-		"ordinary noun":               {text: "Add the incident tag; checkout is unavailable.", want: false},
-		"ordinary trailing noun":      {text: "Apply the incident tag.", want: false},
-		"ordinary noun in list":       {text: "The required fields are owner, tag, priority.", want: false},
-		"field label":                 {text: "Tag: incident", want: false},
-		"embedded product name":       {text: "The tagging service is unavailable.", want: false},
+		"leading punctuation":           {text: "Tag, checkout is unavailable.", want: true},
+		"leading natural question":      {text: "Tag can you check checkout", want: true},
+		"leading greeting":              {text: "Hey Tag: check checkout", want: true},
+		"mid-sentence greeting":         {text: "Morning, Tag. Hope your queues are behaving.", want: true},
+		"mid-sentence praise":           {text: "Nice work, Tag — thanks for sticking with it.", want: true},
+		"co-address after user":         {text: "<@U03404W4Z>, Tag, summarize this for both of us.", want: true},
+		"co-address after labeled user": {text: "<@U03404W4Z|alex>, Tag, summarize this for both of us.", want: true},
+		"trailing vocative":             {text: "Checkout is unavailable, Tag!", want: true},
+		"unpunctuated social address":   {text: "Thanks Tag!", want: true},
+		"colon request":                 {text: "Tag: can you check checkout", want: true},
+		"ordinary noun":                 {text: "Add the incident tag; checkout is unavailable.", want: false},
+		"ordinary trailing noun":        {text: "Apply the incident tag.", want: false},
+		"ordinary noun in list":         {text: "The required fields are owner, tag, priority.", want: false},
+		"field label":                   {text: "Tag: incident", want: false},
+		"embedded product name":         {text: "The tagging service is unavailable.", want: false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := explicitlyAddressesTag(testCase.text); got != testCase.want {

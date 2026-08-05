@@ -1779,11 +1779,9 @@ func (p *Pipeline) startJobProgress(ctx context.Context, job jobs.Job, logger *b
 		logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Warn("Slack Thinking Steps start failed; continuing without progress UI")
 		return job
 	}
-	updated, transitionErr := p.deps.Jobs.Transition(ctx, job.ID, job.Lease.Token, jobs.StateRunning, func(current *jobs.Job) {
-		current.ProgressMessageTS = result.MessageTS
-	})
-	if transitionErr != nil {
-		logger.WithCtx(blackbox.Ctx{"message_ts": result.MessageTS, "error_type": fmt.Sprintf("%T", transitionErr)}).Warn("Slack Thinking Steps timestamp persistence failed")
+	updated, persistErr := p.deps.Jobs.SetProgressMessageTS(ctx, job.ID, job.Lease.Token, result.MessageTS)
+	if persistErr != nil {
+		logger.WithCtx(blackbox.Ctx{"message_ts": result.MessageTS, "error_type": fmt.Sprintf("%T", persistErr)}).Warn("Slack Thinking Steps timestamp persistence failed")
 		job.ProgressMessageTS = result.MessageTS
 		return job
 	}

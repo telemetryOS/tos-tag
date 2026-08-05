@@ -94,10 +94,6 @@ repository_for_path() {
 
 canonical_remote() {
   local remote="$1" path organization repository
-  if [[ "${TAG_CODE_TEST_ALLOW_FILE_REMOTE:-}" == "1" && "${remote}" == file://* ]]; then
-    printf '%s' "${remote}"
-    return
-  fi
   case "${remote}" in
     git@github.com:*) path="${remote#git@github.com:}" ;;
     ssh://git@github.com/*) path="${remote#ssh://git@github.com/}" ;;
@@ -115,10 +111,6 @@ canonical_remote() {
 git_remote() {
   local remote="$1"
   shift
-  if [[ "${remote}" == file://* ]]; then
-    git "$@"
-    return
-  fi
   command -v gh >/dev/null 2>&1 || die "GitHub CLI is required for source refresh"
   [[ -d "${TAG_CODE_GH_CONFIG_DIR}" ]] || die "GitHub authentication is unavailable"
   GH_CONFIG_DIR="${TAG_CODE_GH_CONFIG_DIR}" git -c credential.helper='!gh auth git-credential' "$@"
@@ -139,8 +131,8 @@ read_cached_receipt() {
   snapshot_repository="${repository}"
   snapshot_branch="${branch}"
   snapshot_commit="${commit}"
-  snapshot_fetched_at_epoch="${fetched_at}"
-  snapshot_fetched_at="$(jq -er '.fetched_at | strings' "${receipt}")"
+  snapshot_fetched_at="$(jq -er '.fetched_at | strings' "${receipt}" 2>/dev/null)" || return 1
+  [[ "${snapshot_fetched_at}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
   snapshot_path="${snapshot}"
 }
 

@@ -18,6 +18,19 @@ import (
 	"github.com/telemetryos/tos-tag/types"
 )
 
+func TestValidParticipationModeRejectsUnknownValues(t *testing.T) {
+	for _, mode := range []string{"observe", "mention", "assist", "proactive"} {
+		if !validParticipationMode(mode) {
+			t.Fatalf("valid mode %q was rejected", mode)
+		}
+	}
+	for _, mode := range []string{"", "active", "admin", "PROACTIVE"} {
+		if validParticipationMode(mode) {
+			t.Fatalf("unsupported mode %q was accepted", mode)
+		}
+	}
+}
+
 func TestModeChangeAuditHasRetentionAndDeterministicIdempotency(t *testing.T) {
 	appender, err := audit.NewMemoryAppender([]byte("01234567890123456789012345678901"))
 	if err != nil {

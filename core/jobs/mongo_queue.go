@@ -161,6 +161,30 @@ func (q *MongoQueue) Transition(ctx context.Context, id types.JobID, leaseToken 
 	return fromModel(updated), nil
 }
 
+func (q *MongoQueue) SetProgressMessageTS(ctx context.Context, id types.JobID, leaseToken, messageTS string) (Job, error) {
+	if messageTS == "" {
+		return Job{}, ErrInvalidState
+	}
+	now := q.now().UTC()
+	var updated models.Job
+	err := q.db.Collection(models.CollectionJobs).FindOneAndUpdate(ctx, bson.M{
+		"public_id":        string(id),
+		"state":            string(StateRunning),
+		"lease.token":      leaseToken,
+		"lease.expires_at": bson.M{"$gt": now},
+	}, bson.M{
+		"$set": bson.M{"progress_message_ts": messageTS, "updated_at": now},
+		"$inc": bson.M{"version": 1},
+	}, options.FindOneAndUpdate().SetReturnDocument(options.After)).Decode(&updated)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return Job{}, ErrLeaseLost
+	}
+	if err != nil {
+		return Job{}, fmt.Errorf("persist job progress message: %w", err)
+	}
+	return fromModel(updated), nil
+}
+
 // transitionSet is the Mongo persistence side of Queue.Transition's mutate
 // contract. Keep it aligned with the fields callers are permitted to change
 // through the transition callback and with MemoryQueue.Transition.

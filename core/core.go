@@ -312,6 +312,9 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 			},
 		)
 		liveIngress.SetModeChangeHandler(func(ctx context.Context, request slack.ModeChangeRequest) (slack.ModeChangeResult, error) {
+			if request.Mode != "" && !validParticipationMode(request.Mode) {
+				return slack.ModeChangeResult{}, fmt.Errorf("unsupported participation mode %q", request.Mode)
+			}
 			policy, resolveErr := organizationStore.Resolve(ctx, request.OrganizationID, request.WorkspaceID, request.ChannelID)
 			if resolveErr != nil {
 				return slack.ModeChangeResult{}, fmt.Errorf("resolve channel policy: %w", resolveErr)
@@ -392,6 +395,15 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 		liveIngress.SetReconnectHandler(app.recoverSlackContext)
 	}
 	return app, nil
+}
+
+func validParticipationMode(mode string) bool {
+	switch types.ParticipationMode(mode) {
+	case types.ModeObserve, types.ModeMention, types.ModeAssist, types.ModeProactive:
+		return true
+	default:
+		return false
+	}
 }
 
 func appendModeChangeAudit(ctx context.Context, appender audit.Appender, request slack.ModeChangeRequest, saved orgconfig.ChannelPolicy, previous string) error {

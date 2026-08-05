@@ -58,6 +58,8 @@ type LiveIngress struct {
 	directiveSave      DirectiveSaveHandler
 	modeChange         ModeChangeHandler
 	reconnectHandler   ReconnectHandler
+	recoveryWG         sync.WaitGroup
+	stopping           bool
 }
 
 type ReconnectHandler func(context.Context) error
@@ -276,6 +278,9 @@ func (s *LiveIngress) Start(parent context.Context, handler Handler) error {
 	if s.started {
 		return nil
 	}
+	if s.stopping {
+		return errors.New("Slack ingress is stopping")
+	}
 	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
 	s.done = make(chan struct{})
@@ -328,9 +333,14 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 				if reconnected {
 					s.mu.Lock()
 					reconnectHandler := s.reconnectHandler
+					launchRecovery := reconnectHandler != nil && !s.stopping
+					if launchRecovery {
+						s.recoveryWG.Add(1)
+					}
 					s.mu.Unlock()
-					if reconnectHandler != nil {
+					if launchRecovery {
 						go func() {
+							defer s.recoveryWG.Done()
 							if err := reconnectHandler(ctx); err != nil && ctx.Err() == nil {
 								s.options.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Warn("Slack reconnect context recovery failed")
 								return
@@ -655,15 +665,15 @@ func (s *LiveIngress) handleModeCommand(ctx context.Context, eventLogger *blackb
 		}
 	}
 
-	var membership modeMembershipResult
-	if fixedCommand && request.Mode != "observe" {
-		membership = s.ensureJoinedForMode(ctx, commandLogger, request, policy)
-	}
 	result, changeErr := changeMode(ctx, request)
 	if changeErr != nil {
 		commandLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", changeErr)}).Warn("Slack mode command failed")
 		_ = s.client.AckCtx(ctx, envelopeID, ephemeralCommandResponse("The participation mode could not be changed for this channel."))
 		return
+	}
+	var membership modeMembershipResult
+	if fixedCommand && request.Mode != "observe" {
+		membership = s.ensureJoinedForMode(ctx, commandLogger, request, policy)
 	}
 	if fixedCommand && request.Mode == "observe" {
 		membership = s.leaveAfterModeOff(ctx, commandLogger, request, policy)
@@ -1149,16 +1159,32 @@ func slackEnvelopeLogContext(envelope types.SlackEnvelope) blackbox.Ctx {
 
 func (s *LiveIngress) Stop(ctx context.Context) error {
 	s.mu.Lock()
-	if !s.started {
+	if !s.started && !s.stopping {
 		s.mu.Unlock()
 		return nil
 	}
 	cancel, done := s.cancel, s.done
 	s.started = false
+	s.stopping = true
 	s.mu.Unlock()
-	cancel()
+	if cancel != nil {
+		cancel()
+	}
 	select {
 	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	recoveryDone := make(chan struct{})
+	go func() {
+		s.recoveryWG.Wait()
+		close(recoveryDone)
+	}()
+	select {
+	case <-recoveryDone:
+		s.mu.Lock()
+		s.stopping = false
+		s.mu.Unlock()
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

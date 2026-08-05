@@ -91,6 +91,33 @@ func TestQueueIdempotencyAndLeaseFencing(t *testing.T) {
 	}
 }
 
+func TestProgressTimestampUpdateIsLeaseFencedWithoutAStateTransition(t *testing.T) {
+	clock := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	queue := NewMemoryQueue(func() time.Time { return clock })
+	job, _, err := queue.Enqueue(context.Background(), spec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = queue.Claim(context.Background(), "worker-1", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = queue.Transition(context.Background(), job.ID, job.Lease.Token, StateRunning, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := queue.SetProgressMessageTS(context.Background(), job.ID, job.Lease.Token, "170.42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != StateRunning || updated.ProgressMessageTS != "170.42" || updated.Version != job.Version+1 {
+		t.Fatalf("progress update = %#v", updated)
+	}
+	if _, err := queue.SetProgressMessageTS(context.Background(), job.ID, "forged", "171.00"); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("forged progress lease error = %v", err)
+	}
+}
+
 func TestExpiredRunningLeaseRequiresReconciliation(t *testing.T) {
 	clock := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 	queue := NewMemoryQueue(func() time.Time { return clock })

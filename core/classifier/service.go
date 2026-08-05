@@ -17,9 +17,9 @@ import (
 var ErrInvalidClassifierDecision = errors.New("invalid classifier decision")
 
 var (
-	leadingSlackUserAddressPattern = regexp.MustCompile(`^\s*<@U[A-Z0-9]+>(?:[\s,;:!?.]|$)`)
+	leadingSlackUserAddressPattern = regexp.MustCompile(`^\s*<@U[A-Z0-9]+(?:\|[^>\r\n]+)?>(?:[\s,;:!?.]|$)`)
 	questionURLPattern             = regexp.MustCompile(`(?i)(?:<https?://[^>\s]+(?:\|[^>]*)?>|https?://[^\s>]+)`)
-	coAddressedTagPattern          = regexp.MustCompile(`(?i)^\s*<@U[A-Z0-9]+>\s*,\s*tag\s*[,;:]`)
+	coAddressedTagPattern          = regexp.MustCompile(`(?i)^\s*<@U[A-Z0-9]+(?:\|[^>\r\n]+)?>\s*,\s*tag\s*[,;:]`)
 	trailingTagAddressPattern      = regexp.MustCompile(`(?i),\s*tag\s*[!?.]*\s*$`)
 	socialTagTokenPattern          = regexp.MustCompile(`(?i)(?:^|[\s,])tag(?:$|[\s,;:!?.—–-])`)
 )
@@ -770,7 +770,7 @@ func hardSuppression(target Target) string {
 // used as the object of a request (for example, "summarize this for <@U123>")
 // do not match this gate.
 func thirdPartyAddressedTurn(target Target) bool {
-	if !target.ActiveThread || target.Envelope.IsMention || target.Envelope.ChannelKind == types.SlackChannelKindDirectMessage {
+	if !target.ActiveThread || target.Envelope.IsMention || target.Envelope.ChannelKind == types.SlackChannelKindDirectMessage || strings.HasPrefix(target.Envelope.ChannelID, "D") {
 		return false
 	}
 	if explicitlyAddressesTag(target.Envelope.Text) {

@@ -438,6 +438,26 @@ func TestCodeReviewedHelperRefreshesDefaultSnapshotAndBoundsSemanticSearch(t *te
 	if output, err := exec.Command("git", "clone", "--quiet", "file://"+remote, filepath.Join(sourceRoot, "Demo")).CombinedOutput(); err != nil {
 		t.Fatalf("clone source: %v: %s", err, output)
 	}
+	runGit(filepath.Join(sourceRoot, "Demo"), "remote", "set-url", "origin", "https://github.com/telemetryOS/Demo.git")
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeGit := filepath.Join(binRoot, "git")
+	const fakeGitScript = `#!/usr/bin/env bash
+set -euo pipefail
+arguments=("$@")
+for index in "${!arguments[@]}"; do
+  if [[ "${arguments[index]}" == "https://github.com/telemetryOS/Demo.git" ]]; then
+    arguments[index]="file://${TEST_REMOTE_PATH}"
+  fi
+done
+exec "${REAL_GIT_BIN}" "${arguments[@]}"
+`
+	if err := os.WriteFile(fakeGit, []byte(fakeGitScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
 
 	capture := filepath.Join(temporary, "semble-arguments")
 	fakeSemble := filepath.Join(binRoot, "semble")
@@ -464,7 +484,8 @@ printf '%s\n' '{"query":"authorization path","results":[{"file_path":"core/auth.
 		"TAG_CODE_INDEX_ROOT=" + indexRoot,
 		"TAG_CODE_MODEL_PATH=" + modelRoot,
 		"TAG_CODE_GH_CONFIG_DIR=" + githubConfig,
-		"TAG_CODE_TEST_ALLOW_FILE_REMOTE=1",
+		"REAL_GIT_BIN=" + realGit,
+		"TEST_REMOTE_PATH=" + remote,
 		"CAPTURE_PATH=" + capture,
 	}
 	runHelper := func(arguments ...string) ([]byte, error) {
@@ -488,6 +509,34 @@ printf '%s\n' '{"query":"authorization path","results":[{"file_path":"core/auth.
 	}
 	if _, err := os.Stat(filepath.Join(snapshotRoot, "repos", "Demo", firstCommit, "core", "auth.go")); err != nil {
 		t.Fatalf("default snapshot missing: %v", err)
+	}
+	receiptPath := filepath.Join(snapshotRoot, "receipts", "Demo.json")
+	receiptBytes, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt map[string]any
+	if err := json.Unmarshal(receiptBytes, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	receipt["fetched_at"] = ""
+	invalidReceipt, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(receiptPath, invalidReceipt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repairedOutput, err := runHelper("freshness", "Demo")
+	if err != nil {
+		t.Fatalf("invalid receipt was not refreshed: %v: %s", err, repairedOutput)
+	}
+	var repaired map[string]any
+	if err := json.Unmarshal(repairedOutput, &repaired); err != nil {
+		t.Fatal(err)
+	}
+	if repaired["fetched_at"] == "" {
+		t.Fatalf("invalid fetched_at was accepted: %s", repairedOutput)
 	}
 
 	semanticOutput, err := runHelper("semantic-search", "Demo", "where is authorization enforced?", "3", "8")

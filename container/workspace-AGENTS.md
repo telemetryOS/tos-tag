@@ -44,8 +44,9 @@ Never treat local Codex session history as runtime authority.
   operations require an exact Slack approval. `telemetryos.code` is the only
   source capability. It treats `/workspace/code` as inventory, refreshes only a
   requested validated TelemetryOS origin into immutable owner-only snapshots,
-  and provides freshness, bounded fixed-string/offline-semantic search, line
-  reads, and version evidence. It is not a shell or source-write surface; the
+  and provides repository/directory/file listing, freshness, bounded
+  fixed-string/offline-semantic search, line reads, and version evidence. It is
+  not a shell or source-write surface; the
   worker receives neither GitHub credentials nor paths. Its read-only invariant
   is checked at bundle load and execution, and source mutation requests must be
   redirected to a Linear bug or feature rather than approved.

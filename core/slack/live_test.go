@@ -247,6 +247,47 @@ func TestLiveIngressRecoversOnlyAfterAnActualReconnect(t *testing.T) {
 	}
 }
 
+func TestLiveIngressStopWaitsForReconnectRecovery(t *testing.T) {
+	transport := newFakeSocketModeTransport()
+	ingress := &LiveIngress{
+		options: LiveOptions{OrganizationID: "org", AppID: "app", TeamID: "team", BotUserID: "bot", Logger: blackbox.New()},
+		client:  transport,
+	}
+	recoveryStarted := make(chan struct{})
+	releaseRecovery := make(chan struct{})
+	ingress.SetReconnectHandler(func(context.Context) error {
+		close(recoveryStarted)
+		<-releaseRecovery
+		return nil
+	})
+	if err := ingress.Start(context.Background(), func(context.Context, types.SlackEnvelope) (AcceptResult, error) { return AcceptResult{}, nil }); err != nil {
+		t.Fatal(err)
+	}
+	transport.events <- socketmode.Event{Type: socketmode.EventTypeConnected, Data: &socketmode.ConnectedEvent{ConnectionCount: 1}}
+	transport.events <- socketmode.Event{Type: socketmode.EventTypeConnected, Data: &socketmode.ConnectedEvent{ConnectionCount: 2}}
+	select {
+	case <-recoveryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("reconnect recovery did not start")
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- ingress.Stop(context.Background()) }()
+	select {
+	case err := <-stopped:
+		t.Fatalf("Stop returned before recovery completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseRecovery)
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not join reconnect recovery")
+	}
+}
+
 func TestLiveIngressAcknowledgesPolicyExcludedEnvelope(t *testing.T) {
 	transport := newFakeSocketModeTransport()
 	ingress := &LiveIngress{
@@ -936,6 +977,7 @@ type fakeMembershipAPI struct {
 	infoCalls  int
 	joinCalls  int
 	leaveCalls int
+	beforeJoin func()
 }
 
 func (f *fakeMembershipAPI) GetConversationInfoContext(context.Context, *slackapi.GetConversationInfoInput) (*slackapi.Channel, error) {
@@ -945,6 +987,9 @@ func (f *fakeMembershipAPI) GetConversationInfoContext(context.Context, *slackap
 
 func (f *fakeMembershipAPI) JoinConversationContext(context.Context, string) (*slackapi.Channel, string, []string, error) {
 	f.joinCalls++
+	if f.beforeJoin != nil {
+		f.beforeJoin()
+	}
 	return &slackapi.Channel{IsMember: f.joinErr == nil}, "", nil, f.joinErr
 }
 
@@ -977,13 +1022,20 @@ func TestFixedProactiveCommandJoinsPublicChannelAndRefreshesMembership(t *testin
 		members: members,
 	}
 	var requested []string
+	modePersisted := false
 	ingress.SetModeChangeHandler(func(_ context.Context, request ModeChangeRequest) (ModeChangeResult, error) {
 		requested = append(requested, request.Mode)
 		if request.Mode == "" {
 			return ModeChangeResult{Mode: "observe", Previous: "observe", Enrolled: true, WorkspaceEnabled: true, BotMembershipKnown: true}, nil
 		}
+		modePersisted = true
 		return ModeChangeResult{Mode: request.Mode, Previous: "observe", Changed: true}, nil
 	})
+	members.beforeJoin = func() {
+		if !modePersisted {
+			t.Fatal("channel join happened before participation mode persistence")
+		}
+	}
 	var membership BotMembershipChange
 	ingress.SetBotMembershipHandler(func(_ context.Context, change BotMembershipChange) error {
 		membership = change

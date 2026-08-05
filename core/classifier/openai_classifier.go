@@ -841,7 +841,7 @@ func isObviousSourceWriteRequest(text string) bool {
 	// Match source nouns as whole words. Loose prefixes such as " repo" and
 	// " pr" also match ordinary status-report words such as "reports" and
 	// product names such as "Premium".
-	sourceSurface := containsAnyWholeWord(lower, "code", "codebase", "source", "repo", "repository", "branch", "commit") || strings.Contains(lower, "pull request")
+	sourceSurface := containsAnyWholeWord(lower, "code", "codebase", "source", "sources", "repo", "repos", "repository", "repositories", "branch", "branches", "commit") || strings.Contains(lower, "pull request")
 	// tos-tag is itself a repository/source surface. Match the mutation verb and
 	// name together so a normal <@tos-tag> mention is not mistaken for a write.
 	namedRepoMutation := containsAny(lower,

@@ -149,7 +149,7 @@ if ! grep -Eq '^TAG__KEYSTORE__MASTER_KEY=.+$' "${runtime_file}"; then
   upsert TAG__KEYSTORE__MASTER_KEY "$(openssl rand -base64 32)"
 fi
 
-tool_path="${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+tool_path="$(dirname "${semble_binary}"):${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 upsert TAG__MARKETPLACES__TOOL_ROOT "${repo_root}/tool-marketplace"
 upsert TAG__MARKETPLACES__TOOL_CATALOG_PATH catalog.json
 upsert TAG__MARKETPLACES__INJECTED_TOOLS "${injected_tools}"
