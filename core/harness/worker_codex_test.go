@@ -358,6 +358,13 @@ func TestCodexDynamicToolsRequireValidatedSkillNames(t *testing.T) {
 			t.Fatalf("%s skill schema = %#v", tool["name"], skillSchema)
 		}
 	}
+	toolSchema, _ := tools[0]["inputSchema"].(map[string]any)
+	toolProperties, _ := toolSchema["properties"].(map[string]any)
+	operationSchema, _ := toolProperties["operation_id"].(map[string]any)
+	operations, _ := operationSchema["enum"].([]string)
+	if !slices.Contains(operations, "generate") {
+		t.Fatalf("reviewed tool operations = %#v", operations)
+	}
 	var wikiTool map[string]any
 	for _, tool := range tools {
 		if tool["name"] == wikiDynamicTool {
