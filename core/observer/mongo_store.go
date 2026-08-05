@@ -82,6 +82,7 @@ func (s *MongoStore) accept(ctx context.Context, envelope types.SlackEnvelope, s
 		EventType:               string(envelope.Kind),
 		Subtype:                 envelope.Subtype,
 		Text:                    envelope.Text,
+		Images:                  append([]types.SlackImageRef(nil), envelope.Images...),
 		MutationTargetTS:        envelope.TargetTS,
 		ScopeState:              scopeState,
 		DecisionState:           decisionState,
@@ -181,6 +182,10 @@ func (s *MongoStore) applyProjection(ctx context.Context, envelope types.SlackEn
 		deleted = true
 		text = ""
 	}
+	images := append([]types.SlackImageRef(nil), envelope.Images...)
+	if deleted {
+		images = nil
+	}
 	newer := bson.M{"$or": bson.A{
 		bson.M{"$eq": bson.A{bson.M{"$type": "$source_event_at"}, "missing"}},
 		bson.M{"$lt": bson.A{"$source_event_at", eventAt}},
@@ -204,6 +209,7 @@ func (s *MongoStore) applyProjection(ctx context.Context, envelope types.SlackEn
 		"restricted":         choose(envelope.Restricted, "$restricted"),
 		"deleted":            choose(deleted, "$deleted"),
 		"text":               choose(text, "$text"),
+		"images":             choose(images, "$images"),
 		"projection_version": bson.M{"$cond": bson.A{newer, bson.M{"$add": bson.A{bson.M{"$ifNull": bson.A{"$projection_version", 0}}, 1}}, "$projection_version"}},
 	}}}, {{Key: "$unset", Value: "expires_at"}}}
 	if _, err := s.db.Collection(models.CollectionMessages).UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true)); err != nil {

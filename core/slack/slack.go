@@ -103,3 +103,9 @@ type Delivery interface {
 	SetAgentStatus(context.Context, types.SlackAgentStatusRequest) (types.SlackAgentStatusResult, error)
 	SetThreadTitle(context.Context, types.SlackThreadTitleRequest) (types.SlackThreadTitleResult, error)
 }
+
+// Media keeps private Slack file retrieval behind the control plane. Workers
+// receive validated bytes, never Slack URLs or OAuth credentials.
+type Media interface {
+	DownloadImages(context.Context, string, []types.SlackImageRef) ([]types.SlackImageData, error)
+}

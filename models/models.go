@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+
+	"github.com/telemetryos/tos-tag/types"
 )
 
 const (
@@ -47,61 +49,63 @@ const (
 )
 
 type Observation struct {
-	ID                      bson.ObjectID `bson:"_id,omitempty"`
-	PublicID                string        `bson:"public_id"`
-	OrganizationID          string        `bson:"organization_id"`
-	TeamID                  string        `bson:"team_id"`
-	ChannelID               string        `bson:"channel_id"`
-	EventID                 string        `bson:"event_id"`
-	EnvelopeID              string        `bson:"envelope_id"`
-	ReceivedSeq             int64         `bson:"received_seq"`
-	OrganizationReceivedSeq int64         `bson:"organization_received_seq"`
-	SlackEventTime          time.Time     `bson:"slack_event_time"`
-	ReceivedAt              time.Time     `bson:"received_at"`
-	MessageTS               string        `bson:"message_ts"`
-	RootThreadTS            string        `bson:"root_thread_ts"`
-	UserID                  string        `bson:"user_id,omitempty"`
-	BotID                   string        `bson:"bot_id,omitempty"`
-	Restricted              bool          `bson:"restricted"`
-	IsMention               bool          `bson:"is_mention"`
-	OriginTag               string        `bson:"origin_tag,omitempty"`
-	EventType               string        `bson:"event_type"`
-	Subtype                 string        `bson:"subtype,omitempty"`
-	Text                    string        `bson:"text,omitempty"`
-	MutationTargetTS        string        `bson:"mutation_target_ts,omitempty"`
-	ScopeState              string        `bson:"scope_state"`
-	DecisionState           string        `bson:"decision_state"`
-	DecisionLeaseOwner      string        `bson:"decision_lease_owner,omitempty"`
-	DecisionLeaseToken      string        `bson:"decision_lease_token,omitempty"`
-	DecisionLeaseExpiresAt  time.Time     `bson:"decision_lease_expires_at,omitempty"`
-	OutputProduced          bool          `bson:"output_produced"`
-	OutputReservationID     string        `bson:"output_reservation_id,omitempty"`
-	OutputJobID             string        `bson:"output_job_id,omitempty"`
-	OutputDeliveryID        string        `bson:"output_delivery_id,omitempty"`
-	CreatedAt               time.Time     `bson:"created_at"`
-	ExpiresAt               time.Time     `bson:"expires_at"`
-	Version                 int64         `bson:"version"`
+	ID                      bson.ObjectID         `bson:"_id,omitempty"`
+	PublicID                string                `bson:"public_id"`
+	OrganizationID          string                `bson:"organization_id"`
+	TeamID                  string                `bson:"team_id"`
+	ChannelID               string                `bson:"channel_id"`
+	EventID                 string                `bson:"event_id"`
+	EnvelopeID              string                `bson:"envelope_id"`
+	ReceivedSeq             int64                 `bson:"received_seq"`
+	OrganizationReceivedSeq int64                 `bson:"organization_received_seq"`
+	SlackEventTime          time.Time             `bson:"slack_event_time"`
+	ReceivedAt              time.Time             `bson:"received_at"`
+	MessageTS               string                `bson:"message_ts"`
+	RootThreadTS            string                `bson:"root_thread_ts"`
+	UserID                  string                `bson:"user_id,omitempty"`
+	BotID                   string                `bson:"bot_id,omitempty"`
+	Restricted              bool                  `bson:"restricted"`
+	IsMention               bool                  `bson:"is_mention"`
+	OriginTag               string                `bson:"origin_tag,omitempty"`
+	EventType               string                `bson:"event_type"`
+	Subtype                 string                `bson:"subtype,omitempty"`
+	Text                    string                `bson:"text,omitempty"`
+	Images                  []types.SlackImageRef `bson:"images,omitempty"`
+	MutationTargetTS        string                `bson:"mutation_target_ts,omitempty"`
+	ScopeState              string                `bson:"scope_state"`
+	DecisionState           string                `bson:"decision_state"`
+	DecisionLeaseOwner      string                `bson:"decision_lease_owner,omitempty"`
+	DecisionLeaseToken      string                `bson:"decision_lease_token,omitempty"`
+	DecisionLeaseExpiresAt  time.Time             `bson:"decision_lease_expires_at,omitempty"`
+	OutputProduced          bool                  `bson:"output_produced"`
+	OutputReservationID     string                `bson:"output_reservation_id,omitempty"`
+	OutputJobID             string                `bson:"output_job_id,omitempty"`
+	OutputDeliveryID        string                `bson:"output_delivery_id,omitempty"`
+	CreatedAt               time.Time             `bson:"created_at"`
+	ExpiresAt               time.Time             `bson:"expires_at"`
+	Version                 int64                 `bson:"version"`
 }
 
 type ChannelMessage struct {
-	ID                bson.ObjectID `bson:"_id,omitempty"`
-	OrganizationID    string        `bson:"organization_id"`
-	TeamID            string        `bson:"team_id"`
-	ChannelID         string        `bson:"channel_id"`
-	MessageTS         string        `bson:"message_ts"`
-	RootThreadTS      string        `bson:"root_thread_ts"`
-	AuthorID          string        `bson:"author_id,omitempty"`
-	BotID             string        `bson:"bot_id,omitempty"`
-	Subtype           string        `bson:"subtype,omitempty"`
-	Text              string        `bson:"text,omitempty"`
-	Deleted           bool          `bson:"deleted"`
-	Restricted        bool          `bson:"restricted"`
-	SourceEventID     string        `bson:"source_event_id"`
-	SourceEventAt     time.Time     `bson:"source_event_at"`
-	SourceEventRank   int           `bson:"source_event_rank"`
-	ProjectionVersion int64         `bson:"projection_version"`
-	OriginalAt        time.Time     `bson:"original_at"`
-	UpdatedAt         time.Time     `bson:"updated_at"`
+	ID                bson.ObjectID         `bson:"_id,omitempty"`
+	OrganizationID    string                `bson:"organization_id"`
+	TeamID            string                `bson:"team_id"`
+	ChannelID         string                `bson:"channel_id"`
+	MessageTS         string                `bson:"message_ts"`
+	RootThreadTS      string                `bson:"root_thread_ts"`
+	AuthorID          string                `bson:"author_id,omitempty"`
+	BotID             string                `bson:"bot_id,omitempty"`
+	Subtype           string                `bson:"subtype,omitempty"`
+	Text              string                `bson:"text,omitempty"`
+	Images            []types.SlackImageRef `bson:"images,omitempty"`
+	Deleted           bool                  `bson:"deleted"`
+	Restricted        bool                  `bson:"restricted"`
+	SourceEventID     string                `bson:"source_event_id"`
+	SourceEventAt     time.Time             `bson:"source_event_at"`
+	SourceEventRank   int                   `bson:"source_event_rank"`
+	ProjectionVersion int64                 `bson:"projection_version"`
+	OriginalAt        time.Time             `bson:"original_at"`
+	UpdatedAt         time.Time             `bson:"updated_at"`
 	// ExpiresAt decodes legacy rows written before normalized messages became
 	// durable. Current persistence and query paths do not use it.
 	ExpiresAt time.Time `bson:"expires_at,omitempty"`
@@ -268,40 +272,41 @@ type Lease struct {
 }
 
 type Job struct {
-	ID                     bson.ObjectID `bson:"_id,omitempty"`
-	PublicID               string        `bson:"public_id"`
-	OrganizationID         string        `bson:"organization_id"`
-	WorkspaceID            string        `bson:"workspace_id"`
-	ChannelID              string        `bson:"channel_id"`
-	RootThreadTS           string        `bson:"root_thread_ts"`
-	ReplyInChannel         bool          `bson:"reply_in_channel,omitempty"`
-	SessionID              string        `bson:"session_id"`
-	Generation             int64         `bson:"generation"`
-	ObservationID          string        `bson:"observation_id,omitempty"`
-	RequesterID            string        `bson:"requester_id,omitempty"`
-	IdempotencyKey         string        `bson:"idempotency_key"`
-	Kind                   string        `bson:"kind"`
-	Input                  string        `bson:"input"`
-	State                  string        `bson:"state"`
-	Attempt                int           `bson:"attempt"`
-	MaxAttempts            int           `bson:"max_attempts"`
-	AdmissionReservationID string        `bson:"admission_reservation_id,omitempty"`
-	ResolvedModel          any           `bson:"resolved_model,omitempty"`
-	RouteTrace             any           `bson:"route_trace,omitempty"`
-	SteeringEpoch          int64         `bson:"steering_epoch"`
-	Lease                  Lease         `bson:"lease"`
-	Result                 any           `bson:"result,omitempty"`
-	FailureReason          string        `bson:"failure_reason,omitempty"`
-	ApprovalID             string        `bson:"approval_id,omitempty"`
-	ApprovedActionHash     string        `bson:"approved_action_hash,omitempty"`
-	ProgressMessageTS      string        `bson:"progress_message_ts,omitempty"`
-	FinalDeliveryEnqueued  bool          `bson:"final_delivery_enqueued,omitempty"`
-	WriterActive           bool          `bson:"writer_active"`
-	AvailableAt            time.Time     `bson:"available_at"`
-	CreatedAt              time.Time     `bson:"created_at"`
-	UpdatedAt              time.Time     `bson:"updated_at"`
-	ExpiresAt              time.Time     `bson:"expires_at"`
-	Version                int64         `bson:"version"`
+	ID                     bson.ObjectID         `bson:"_id,omitempty"`
+	PublicID               string                `bson:"public_id"`
+	OrganizationID         string                `bson:"organization_id"`
+	WorkspaceID            string                `bson:"workspace_id"`
+	ChannelID              string                `bson:"channel_id"`
+	RootThreadTS           string                `bson:"root_thread_ts"`
+	ReplyInChannel         bool                  `bson:"reply_in_channel,omitempty"`
+	SessionID              string                `bson:"session_id"`
+	Generation             int64                 `bson:"generation"`
+	ObservationID          string                `bson:"observation_id,omitempty"`
+	RequesterID            string                `bson:"requester_id,omitempty"`
+	IdempotencyKey         string                `bson:"idempotency_key"`
+	Kind                   string                `bson:"kind"`
+	Input                  string                `bson:"input"`
+	Images                 []types.SlackImageRef `bson:"images,omitempty"`
+	State                  string                `bson:"state"`
+	Attempt                int                   `bson:"attempt"`
+	MaxAttempts            int                   `bson:"max_attempts"`
+	AdmissionReservationID string                `bson:"admission_reservation_id,omitempty"`
+	ResolvedModel          any                   `bson:"resolved_model,omitempty"`
+	RouteTrace             any                   `bson:"route_trace,omitempty"`
+	SteeringEpoch          int64                 `bson:"steering_epoch"`
+	Lease                  Lease                 `bson:"lease"`
+	Result                 any                   `bson:"result,omitempty"`
+	FailureReason          string                `bson:"failure_reason,omitempty"`
+	ApprovalID             string                `bson:"approval_id,omitempty"`
+	ApprovedActionHash     string                `bson:"approved_action_hash,omitempty"`
+	ProgressMessageTS      string                `bson:"progress_message_ts,omitempty"`
+	FinalDeliveryEnqueued  bool                  `bson:"final_delivery_enqueued,omitempty"`
+	WriterActive           bool                  `bson:"writer_active"`
+	AvailableAt            time.Time             `bson:"available_at"`
+	CreatedAt              time.Time             `bson:"created_at"`
+	UpdatedAt              time.Time             `bson:"updated_at"`
+	ExpiresAt              time.Time             `bson:"expires_at"`
+	Version                int64                 `bson:"version"`
 }
 
 type Session struct {

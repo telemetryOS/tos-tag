@@ -9,6 +9,7 @@ RUN npm install --global "@openai/codex@${CODEX_VERSION}" "pnpm@${PNPM_VERSION}"
 FROM golang:1.26.5@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647
 
 ARG GH_VERSION
+ARG CURDS_VERSION=v0.0.0-20260624213910-9c746c5532ab
 ARG USER_ID=10001
 ARG GROUP_ID=10001
 
@@ -32,6 +33,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=node-tools /usr/local/ /usr/local/
+
+RUN GOBIN=/usr/local/bin go install github.com/gersham/curds/cmd/curds@${CURDS_VERSION}
 
 RUN architecture="$(dpkg --print-architecture)" \
     && archive="gh_${GH_VERSION}_linux_${architecture}.tar.gz" \

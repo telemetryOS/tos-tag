@@ -173,6 +173,10 @@ commands, tests, and active documentation have been removed.
   every reviewed `get` includes that URL in its full page envelope. Unresolved
   internal slugs remain readable instead of failing the entire answer, while
   reconstructed or fabricated opaque page URLs remain forbidden.
+- Slack image input and output are end-to-end: bounded PNG/JPEG/WebP file
+  identities are authenticated and materialized as disposable App Server
+  images, while reviewed Curds generation uses a keystore-only OpenAI key and
+  durable, retry-reconciled publication to the current Slack destination.
 
 ## Verification evidence
 

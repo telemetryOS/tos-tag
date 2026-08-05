@@ -1,10 +1,14 @@
 package slack
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +44,8 @@ const (
 	automationConfidenceID  = "automation_confidence"
 	automationEnabledID     = "automation_enabled"
 	automationValueActionID = "value"
+	maxSlackInputImages     = 4
+	maxSlackInputImageBytes = 15 << 20
 )
 
 type LiveOptions struct {
@@ -157,6 +163,9 @@ type deliveryAPI interface {
 	AddReactionContext(context.Context, string, slackapi.ItemRef) error
 	GetConversationHistoryContext(context.Context, *slackapi.GetConversationHistoryParameters) (*slackapi.GetConversationHistoryResponse, error)
 	GetConversationRepliesContext(context.Context, *slackapi.GetConversationRepliesParameters) ([]slackapi.Message, bool, string, error)
+	GetFileInfoContext(context.Context, string, int, int) (*slackapi.File, []slackapi.Comment, *slackapi.Paging, error)
+	GetFileContext(context.Context, string, io.Writer) error
+	UploadFileContext(context.Context, slackapi.UploadFileParameters) (*slackapi.FileSummary, error)
 }
 
 type LiveDelivery struct {
@@ -1494,12 +1503,16 @@ func NormalizeEventsAPI(organizationID, botUserID, envelopeID string, data any) 
 	case *slackevents.AppMentionEvent:
 		base.ChannelID, base.MessageTS, base.ThreadTS = inner.Channel, inner.TimeStamp, inner.ThreadTimeStamp
 		base.UserID, base.BotID, base.Text = inner.User, inner.BotID, inner.Text
+		base.Images = slackImageRefs(inner.Files)
 		base.Kind, base.IsMention, base.OriginTag = types.SlackEventMessage, true, "slack_app_mention"
 		base.EventID = canonicalMessageEventID(base.EventID, base.TeamID, base.ChannelID, base.MessageTS)
 		return base, true, nil
 	case *slackevents.MessageEvent:
 		base.ChannelID, base.MessageTS, base.ThreadTS = inner.Channel, inner.TimeStamp, inner.ThreadTimeStamp
 		base.UserID, base.BotID, base.Text, base.Subtype = inner.User, inner.BotID, inner.Text, inner.SubType
+		if inner.Message != nil {
+			base.Images = slackImageRefs(inner.Message.Files)
+		}
 		base.ChannelKind = inner.ChannelType
 		base.Restricted = inner.ChannelType == slackevents.ChannelTypeGroup || inner.ChannelType == slackevents.ChannelTypeIM || inner.ChannelType == slackevents.ChannelTypeMPIM
 		base.Kind, base.OriginTag = types.SlackEventMessage, "slack_message"
@@ -1509,6 +1522,7 @@ func NormalizeEventsAPI(organizationID, botUserID, envelopeID string, data any) 
 			if inner.Message != nil {
 				base.TargetTS, base.MessageTS, base.ThreadTS = inner.Message.Timestamp, inner.Message.Timestamp, inner.Message.ThreadTimestamp
 				base.UserID, base.BotID, base.Text = inner.Message.User, inner.Message.BotID, inner.Message.Text
+				base.Images = slackImageRefs(inner.Message.Files)
 			}
 		case "message_deleted":
 			base.Kind, base.TargetTS, base.MessageTS, base.Text = types.SlackEventDelete, inner.DeletedTimeStamp, inner.DeletedTimeStamp, ""
@@ -1524,6 +1538,89 @@ func NormalizeEventsAPI(organizationID, botUserID, envelopeID string, data any) 
 	default:
 		return types.SlackEnvelope{}, false, nil
 	}
+}
+
+func slackImageRefs(files []slackapi.File) []types.SlackImageRef {
+	images := make([]types.SlackImageRef, 0, min(len(files), maxSlackInputImages))
+	for _, file := range files {
+		mediaType := strings.ToLower(strings.TrimSpace(file.Mimetype))
+		if file.ID == "" || file.Size <= 0 || file.Size > maxSlackInputImageBytes || !supportedSlackImageMediaType(mediaType) {
+			continue
+		}
+		images = append(images, types.SlackImageRef{FileID: file.ID, Name: filepath.Base(file.Name), MediaType: mediaType, Size: file.Size, Width: file.OriginalW, Height: file.OriginalH})
+		if len(images) == maxSlackInputImages {
+			break
+		}
+	}
+	return images
+}
+
+func supportedSlackImageMediaType(mediaType string) bool {
+	switch mediaType {
+	case "image/png", "image/jpeg", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *LiveDelivery) DownloadImages(ctx context.Context, teamID string, refs []types.SlackImageRef) ([]types.SlackImageData, error) {
+	if teamID != d.teamID {
+		return nil, errors.New("Slack image team does not match the configured installation")
+	}
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	if len(refs) > maxSlackInputImages {
+		return nil, errors.New("Slack message exceeds the image attachment limit")
+	}
+	images := make([]types.SlackImageData, 0, len(refs))
+	for _, ref := range refs {
+		file, _, _, err := d.api.GetFileInfoContext(ctx, ref.FileID, 0, 0)
+		if err != nil {
+			return nil, fmt.Errorf("load Slack image metadata: %w", err)
+		}
+		mediaType := strings.ToLower(strings.TrimSpace(file.Mimetype))
+		if file.ID != ref.FileID || file.Size <= 0 || file.Size > maxSlackInputImageBytes || !supportedSlackImageMediaType(mediaType) {
+			return nil, errors.New("Slack image metadata is unsupported or changed")
+		}
+		downloadURL := file.URLPrivateDownload
+		if downloadURL == "" {
+			downloadURL = file.URLPrivate
+		}
+		if downloadURL == "" {
+			return nil, errors.New("Slack image has no private download URL")
+		}
+		buffer := &limitedImageBuffer{limit: maxSlackInputImageBytes}
+		if err := d.api.GetFileContext(ctx, downloadURL, buffer); err != nil {
+			return nil, fmt.Errorf("download Slack image: %w", err)
+		}
+		data := buffer.Bytes()
+		if buffer.exceeded || len(data) == 0 || !sameImageMediaType(mediaType, http.DetectContentType(data)) {
+			return nil, errors.New("Slack image content failed validation")
+		}
+		images = append(images, types.SlackImageData{Name: filepath.Base(file.Name), MediaType: mediaType, Data: append([]byte(nil), data...)})
+	}
+	return images, nil
+}
+
+type limitedImageBuffer struct {
+	bytes.Buffer
+	limit    int
+	exceeded bool
+}
+
+func (w *limitedImageBuffer) Write(value []byte) (int, error) {
+	if w.Buffer.Len()+len(value) > w.limit {
+		w.exceeded = true
+		return 0, errors.New("Slack image exceeds the download limit")
+	}
+	return w.Buffer.Write(value)
+}
+
+func sameImageMediaType(declared, detected string) bool {
+	detected = strings.ToLower(strings.TrimSpace(strings.SplitN(detected, ";", 2)[0]))
+	return declared == detected || (declared == "image/jpeg" && detected == "image/jpeg")
 }
 
 // canonicalMessageEventID coalesces Slack's app_mention and message callbacks
@@ -1559,6 +1656,27 @@ func (d *LiveDelivery) Send(ctx context.Context, request types.SlackDeliveryRequ
 	}
 	if request.Destination.UpdateTS != "" && len(payloads) != 1 {
 		return types.SlackDeliveryResult{}, errors.New("Slack message updates must render as exactly one payload")
+	}
+	if request.Destination.UpdateTS != "" && len(request.Result.Files) > 0 {
+		return types.SlackDeliveryResult{}, errors.New("Slack message updates cannot attach generated files")
+	}
+	if err := validateSlackFileUploads(request.Result.Files); err != nil {
+		return types.SlackDeliveryResult{}, err
+	}
+	existingFiles, err := d.deliveryFiles(ctx, request)
+	if err != nil {
+		return types.SlackDeliveryResult{}, fmt.Errorf("reconcile Slack files: %w", err)
+	}
+	for index, file := range request.Result.Files {
+		filename := deliveryFilename(request.ID, index, file.MediaType)
+		if existingFiles[filename] {
+			continue
+		}
+		_, err := d.api.UploadFileContext(ctx, slackapi.UploadFileParameters{Reader: bytes.NewReader(file.Data), FileSize: len(file.Data), Filename: filename, Title: file.Title, AltTxt: file.AltText, Channel: request.Destination.ChannelID, ThreadTimestamp: request.Destination.ThreadTS})
+		if err != nil {
+			return types.SlackDeliveryResult{}, fmt.Errorf("upload generated Slack file: %w", err)
+		}
+		requestLogger.WithCtx(blackbox.Ctx{"file_index": index + 1, "media_type": file.MediaType, "size_bytes": len(file.Data)}).Info("Slack generated file accepted")
 	}
 	existing, err := d.deliveryParts(ctx, request)
 	if err != nil {
@@ -1668,6 +1786,68 @@ func (d *LiveDelivery) Send(ctx context.Context, request types.SlackDeliveryRequ
 	result := types.SlackDeliveryResult{MessageTS: firstTimestamp, DeliveredAt: time.Now().UTC(), Duplicate: len(existing) == len(payloads)}
 	requestLogger.WithCtx(blackbox.Ctx{"duration_ms": time.Since(started).Milliseconds(), "duplicate": result.Duplicate, "message_ts": result.MessageTS}).Info("Slack delivery completed")
 	return result, nil
+}
+
+func validateSlackFileUploads(files []types.SlackFileUpload) error {
+	if len(files) > maxSlackInputImages {
+		return errors.New("Slack delivery exceeds the generated file limit")
+	}
+	for _, file := range files {
+		if len(file.Data) == 0 || len(file.Data) > 10<<20 || !supportedSlackImageMediaType(file.MediaType) || !sameImageMediaType(file.MediaType, http.DetectContentType(file.Data)) {
+			return errors.New("Slack generated file is invalid")
+		}
+	}
+	return nil
+}
+
+func deliveryFilename(deliveryID types.DeliveryID, index int, mediaType string) string {
+	extension := ".bin"
+	switch mediaType {
+	case "image/png":
+		extension = ".png"
+	case "image/jpeg":
+		extension = ".jpg"
+	case "image/webp":
+		extension = ".webp"
+	}
+	return fmt.Sprintf("tos-tag-%s-%02d%s", deliveryID, index+1, extension)
+}
+
+func (d *LiveDelivery) deliveryFiles(ctx context.Context, request types.SlackDeliveryRequest) (map[string]bool, error) {
+	found := make(map[string]bool)
+	cursor := ""
+	for page := 0; page < 20; page++ {
+		var messages []slackapi.Message
+		var hasMore bool
+		var next string
+		if request.Destination.ThreadTS != "" {
+			var err error
+			messages, hasMore, next, err = d.api.GetConversationRepliesContext(ctx, &slackapi.GetConversationRepliesParameters{ChannelID: request.Destination.ChannelID, Timestamp: request.Destination.ThreadTS, Cursor: cursor, Limit: 100})
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			response, err := d.api.GetConversationHistoryContext(ctx, &slackapi.GetConversationHistoryParameters{ChannelID: request.Destination.ChannelID, Cursor: cursor, Limit: 100})
+			if err != nil {
+				return nil, err
+			}
+			messages, hasMore, next = response.Messages, response.HasMore, response.ResponseMetaData.NextCursor
+		}
+		for _, message := range messages {
+			for _, file := range message.Files {
+				for index, upload := range request.Result.Files {
+					if file.Name == deliveryFilename(request.ID, index, upload.MediaType) {
+						found[file.Name] = true
+					}
+				}
+			}
+		}
+		if !hasMore || next == "" {
+			break
+		}
+		cursor = next
+	}
+	return found, nil
 }
 
 func (d *LiveDelivery) React(ctx context.Context, request types.SlackReactionRequest) (types.SlackReactionResult, error) {

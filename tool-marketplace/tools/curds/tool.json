@@ -1,0 +1,21 @@
+{
+  "id": "media.curds",
+  "version": "1.0.0",
+  "script": "run.sh",
+  "operations": [
+    {
+      "id": "generate",
+      "env": ["OPENAI_API_KEY"],
+      "timeout_seconds": 300,
+      "max_output_bytes": 65536,
+      "risk": "write",
+      "approval": "never",
+      "artifact": {
+        "filename": "generated.webp",
+        "title": "Generated image",
+        "media_type": "image/webp",
+        "max_bytes": 10485760
+      }
+    }
+  ]
+}

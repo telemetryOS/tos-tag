@@ -1,6 +1,7 @@
 package slack
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -49,6 +50,19 @@ func TestNormalizeSlackMessageEditDeleteAndMention(t *testing.T) {
 	envelope, eligible, err = NormalizeEventsAPI("org", "bot", "envelope-4", event)
 	if err != nil || !eligible || !envelope.Restricted {
 		t.Fatalf("private message was not marked restricted: %#v, eligible=%v err=%v", envelope, eligible, err)
+	}
+}
+
+func TestNormalizeSlackMessageRetainsBoundedImageIdentityWithoutPrivateURL(t *testing.T) {
+	callback := slackevents.EventsAPICallbackEvent{TeamID: "team", EventID: "event", EventTime: 100}
+	file := slackapi.File{ID: "F123", Name: "screen.png", Mimetype: "image/png", Size: 1024, OriginalW: 640, OriginalH: 480, URLPrivateDownload: "https://files.slack.test/secret"}
+	event := slackevents.EventsAPIEvent{Type: slackevents.CallbackEvent, Data: callback, InnerEvent: slackevents.EventsAPIInnerEvent{Data: &slackevents.AppMentionEvent{Channel: "channel", TimeStamp: "100.1", User: "user", Text: "<@bot> what is this?", Files: []slackapi.File{file}}}}
+	envelope, eligible, err := NormalizeEventsAPI("org", "bot", "envelope", event)
+	if err != nil || !eligible || len(envelope.Images) != 1 {
+		t.Fatalf("envelope=%#v eligible=%v err=%v", envelope, eligible, err)
+	}
+	if envelope.Images[0].FileID != "F123" || envelope.Images[0].MediaType != "image/png" || strings.Contains(fmt.Sprint(envelope.Images[0]), "files.slack") {
+		t.Fatalf("image ref = %#v", envelope.Images[0])
 	}
 }
 
@@ -545,6 +559,9 @@ type fakePostMessage struct {
 	reactions      []slackapi.ItemRef
 	statusRequests []slackapi.AssistantThreadsSetStatusParameters
 	titleRequests  []slackapi.AssistantThreadsSetTitleParameters
+	files          map[string]*slackapi.File
+	fileData       map[string][]byte
+	uploads        []slackapi.UploadFileParameters
 }
 
 type fakeSlackHTTPClient struct {
@@ -594,6 +611,27 @@ func (f *fakePostMessage) GetConversationRepliesContext(_ context.Context, _ *sl
 	return f.messages, false, "", nil
 }
 
+func (f *fakePostMessage) GetFileInfoContext(_ context.Context, fileID string, _, _ int) (*slackapi.File, []slackapi.Comment, *slackapi.Paging, error) {
+	if file := f.files[fileID]; file != nil {
+		return file, nil, nil, nil
+	}
+	return nil, nil, nil, errors.New("file not found")
+}
+
+func (f *fakePostMessage) GetFileContext(_ context.Context, downloadURL string, writer io.Writer) error {
+	data, ok := f.fileData[downloadURL]
+	if !ok {
+		return errors.New("file content not found")
+	}
+	_, err := writer.Write(data)
+	return err
+}
+
+func (f *fakePostMessage) UploadFileContext(_ context.Context, params slackapi.UploadFileParameters) (*slackapi.FileSummary, error) {
+	f.uploads = append(f.uploads, params)
+	return &slackapi.FileSummary{ID: fmt.Sprintf("file-%d", len(f.uploads)), Title: params.Title}, nil
+}
+
 func TestLiveDeliveryReconcilesAcceptedPartBeforeRetry(t *testing.T) {
 	fake := &fakePostMessage{messages: []slackapi.Message{{Msg: slackapi.Msg{Timestamp: "199.9", Metadata: slackapi.SlackMetadata{EventType: "tos_tag_delivery", EventPayload: map[string]any{"delivery_id": "delivery-1", "part": 1}}}}}}
 	delivery := &LiveDelivery{teamID: "team", api: fake, renderer: deliveries.NewRenderer()}
@@ -604,6 +642,33 @@ func TestLiveDeliveryReconcilesAcceptedPartBeforeRetry(t *testing.T) {
 	}
 	if fake.calls != 0 || !result.Duplicate || result.MessageTS != "199.9" {
 		t.Fatalf("calls=%d result=%#v", fake.calls, result)
+	}
+}
+
+func TestLiveDeliveryDownloadsValidatedSlackImageAndUploadsGeneratedFileOnce(t *testing.T) {
+	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	fake := &fakePostMessage{
+		files:    map[string]*slackapi.File{"F1": {ID: "F1", Name: "screen.png", Mimetype: "image/png", Size: len(png), URLPrivateDownload: "https://files.slack.test/F1"}},
+		fileData: map[string][]byte{"https://files.slack.test/F1": png},
+	}
+	delivery := &LiveDelivery{teamID: "team", api: fake, renderer: deliveries.NewRenderer()}
+	images, err := delivery.DownloadImages(context.Background(), "team", []types.SlackImageRef{{FileID: "F1", MediaType: "image/png", Size: len(png)}})
+	if err != nil || len(images) != 1 || !bytes.Equal(images[0].Data, png) {
+		t.Fatalf("images=%#v err=%v", images, err)
+	}
+	request := types.SlackDeliveryRequest{ID: "delivery-image", Destination: types.SlackDestination{TeamID: "team", ChannelID: "channel"}, Result: types.SlackResult{Segments: []types.SlackSegment{{Kind: types.SlackSegmentMRKDWN, Text: "Generated."}}, Files: []types.SlackFileUpload{{Title: "Generated image", MediaType: "image/png", Data: png}}}}
+	if _, err := delivery.Send(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.uploads) != 1 || fake.uploads[0].Filename != "tos-tag-delivery-image-01.png" || fake.uploads[0].Channel != "channel" {
+		t.Fatalf("uploads=%#v", fake.uploads)
+	}
+	fake.messages = []slackapi.Message{{Msg: slackapi.Msg{Files: []slackapi.File{{Name: "tos-tag-delivery-image-01.png"}}, Timestamp: "201.1", Metadata: slackapi.SlackMetadata{EventType: "tos_tag_delivery", EventPayload: map[string]any{"delivery_id": "delivery-image", "part": 1}}}}}
+	if _, err := delivery.Send(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.uploads) != 1 {
+		t.Fatalf("reconciled upload repeated: %#v", fake.uploads)
 	}
 }
 

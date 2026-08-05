@@ -236,6 +236,10 @@ Only mark an item complete when source and verification evidence exist.
   special mentions.
 - [x] Validate Block Kit before posting.
 - [x] Persist, lease, retry, reconcile, and deduplicate deliveries.
+- [x] Normalize bounded Slack PNG/JPEG/WebP attachments without persisting
+  private URLs, then materialize validated bytes as App Server local images.
+- [x] Capture reviewed Curds artifacts outside model JSON and reconcile their
+  deterministic Slack file uploads through durable delivery state.
 - [x] Distinguish channel replies from thread replies according to classifier
   placement.
 - [x] Title each newly created one-to-one DM full-agent session once through

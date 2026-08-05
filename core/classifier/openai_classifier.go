@@ -132,8 +132,13 @@ func (c *OpenAIClassifier) Decide(ctx context.Context, target Target, pack types
 	}
 	recentParticipantIDs := destinationRecentParticipantIDs(target.Envelope.ChannelID, pack.Sources)
 	conversationFocus := destinationConversationFocus(target, pack.Sources, 8)
+	message := target.Envelope.Text
+	if strings.TrimSpace(message) == "" && len(target.Envelope.Images) > 0 {
+		message = "[image attachment]"
+	}
 	payload := classifierInput{
-		Message:                             target.Envelope.Text,
+		Message:                             message,
+		ImageAttachmentCount:                len(target.Envelope.Images),
 		MessageAuthorID:                     target.Envelope.UserID,
 		DestinationChannelID:                target.Envelope.ChannelID,
 		Mode:                                target.Mode,
@@ -318,6 +323,7 @@ func modelStrength(profile types.ModelProfile) string {
 
 type classifierInput struct {
 	Message                             string                   `json:"message"`
+	ImageAttachmentCount                int                      `json:"image_attachment_count,omitempty"`
 	MessageAuthorID                     string                   `json:"message_author_id,omitempty"`
 	DestinationChannelID                string                   `json:"destination_channel_id,omitempty"`
 	Mode                                types.ParticipationMode  `json:"mode"`

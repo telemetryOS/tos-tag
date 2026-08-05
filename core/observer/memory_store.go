@@ -81,6 +81,7 @@ func (s *MemoryStore) accept(envelope types.SlackEnvelope, scopeState, decisionS
 		EventType:               string(envelope.Kind),
 		Subtype:                 envelope.Subtype,
 		Text:                    envelope.Text,
+		Images:                  append([]types.SlackImageRef(nil), envelope.Images...),
 		MutationTargetTS:        envelope.TargetTS,
 		ScopeState:              scopeState,
 		DecisionState:           decisionState,
@@ -168,9 +169,11 @@ func (s *MemoryStore) applyProjection(envelope types.SlackEnvelope, observation 
 		if envelope.Kind == types.SlackEventDelete {
 			current.Deleted = true
 			current.Text = ""
+			current.Images = nil
 		} else {
 			current.Deleted = false
 			current.Text = envelope.Text
+			current.Images = append([]types.SlackImageRef(nil), envelope.Images...)
 		}
 		current.Subtype = envelope.Subtype
 		current.Restricted = envelope.Restricted
@@ -192,6 +195,7 @@ func (s *MemoryStore) applyProjection(envelope types.SlackEnvelope, observation 
 		BotID:             envelope.BotID,
 		Subtype:           envelope.Subtype,
 		Text:              text,
+		Images:            append([]types.SlackImageRef(nil), envelope.Images...),
 		Deleted:           envelope.Kind == types.SlackEventDelete,
 		Restricted:        envelope.Restricted,
 		SourceEventID:     envelope.EventID,

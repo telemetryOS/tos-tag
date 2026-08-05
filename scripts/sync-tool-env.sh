@@ -122,8 +122,14 @@ import_one SIGNOZ_API_KEY "${telemetry_config}/otel-fetch.conf"
 import_one DLA_API_BASE_URL "${telemetry_config}/dla.conf"
 import_one DLA_API_KEY "${telemetry_config}/dla.conf"
 import_one DLA_ENV "${telemetry_config}/dla.conf"
+import_one OPENAI_API_KEY "${runtime_file}"
 
-injected_tools="telemetryos.linear,telemetryos.wiki,telemetryos.otel,telemetryos.device-logs,telemetryos.code,telemetryos.product-docs"
+curds_binary="$(command -v curds 2>/dev/null || true)"
+[[ -n "${curds_binary}" && -x "${curds_binary}" ]] || {
+  echo "OPENAI_API_KEY found but curds is not installed" >&2
+  exit 1
+}
+injected_tools="telemetryos.linear,telemetryos.wiki,telemetryos.otel,telemetryos.device-logs,telemetryos.code,telemetryos.product-docs,media.curds"
 analytics_token="$(resolve_value SITE_ANALYTICS_TOKEN 2>/dev/null || true)"
 if [[ -n "${analytics_token}" ]]; then
   analytics_url="$(resolve_value TELEMETRYOS_ANALYTICS_URL 2>/dev/null || true)"

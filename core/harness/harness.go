@@ -36,13 +36,20 @@ type JobScopedHarness interface {
 }
 
 type Prompt struct {
-	Text         string `json:"text"`
-	System       string `json:"system,omitempty"`
-	Model        string `json:"model"`
-	Variant      string `json:"variant,omitempty"`
-	RequestID    string `json:"request_id"`
-	SlackFormat  string `json:"slack_format"`
-	ToolSnapshot string `json:"tool_snapshot,omitempty"`
+	Text         string       `json:"text"`
+	Images       []ImageInput `json:"-"`
+	System       string       `json:"system,omitempty"`
+	Model        string       `json:"model"`
+	Variant      string       `json:"variant,omitempty"`
+	RequestID    string       `json:"request_id"`
+	SlackFormat  string       `json:"slack_format"`
+	ToolSnapshot string       `json:"tool_snapshot,omitempty"`
+}
+
+type ImageInput struct {
+	Name      string `json:"-"`
+	MediaType string `json:"-"`
+	Data      []byte `json:"-"`
 }
 
 type Event struct {

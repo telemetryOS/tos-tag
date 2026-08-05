@@ -54,6 +54,7 @@ type Spec struct {
 	IdempotencyKey         string
 	Kind                   string
 	Input                  string
+	Images                 []types.SlackImageRef
 	MaxAttempts            int
 	AdmissionReservationID string
 	ResolvedModel          types.ResolvedModel
@@ -62,38 +63,39 @@ type Spec struct {
 }
 
 type Job struct {
-	ID                     types.JobID         `json:"id"`
-	OrganizationID         string              `json:"organization_id"`
-	WorkspaceID            string              `json:"workspace_id"`
-	ChannelID              string              `json:"channel_id"`
-	RootThreadTS           string              `json:"root_thread_ts"`
-	ReplyInChannel         bool                `json:"reply_in_channel,omitempty"`
-	SessionID              types.SessionID     `json:"session_id"`
-	Generation             int64               `json:"generation"`
-	ObservationID          types.ObservationID `json:"observation_id,omitempty"`
-	RequesterID            string              `json:"requester_id,omitempty"`
-	IdempotencyKey         string              `json:"idempotency_key"`
-	Kind                   string              `json:"kind"`
-	Input                  string              `json:"input"`
-	State                  State               `json:"state"`
-	Attempt                int                 `json:"attempt"`
-	MaxAttempts            int                 `json:"max_attempts"`
-	AdmissionReservationID string              `json:"admission_reservation_id,omitempty"`
-	ResolvedModel          types.ResolvedModel `json:"resolved_model"`
-	RouteTrace             types.DecisionTrace `json:"route_trace"`
-	SteeringEpoch          int64               `json:"steering_epoch"`
-	Lease                  Lease               `json:"lease"`
-	Result                 types.SlackResult   `json:"result,omitempty"`
-	FailureReason          string              `json:"failure_reason,omitempty"`
-	ApprovalID             string              `json:"approval_id,omitempty"`
-	ApprovedActionHash     string              `json:"approved_action_hash,omitempty"`
-	ProgressMessageTS      string              `json:"progress_message_ts,omitempty"`
-	FinalDeliveryEnqueued  bool                `json:"final_delivery_enqueued,omitempty"`
-	AvailableAt            time.Time           `json:"available_at"`
-	CreatedAt              time.Time           `json:"created_at"`
-	UpdatedAt              time.Time           `json:"updated_at"`
-	ExpiresAt              time.Time           `json:"expires_at"`
-	Version                int64               `json:"version"`
+	ID                     types.JobID           `json:"id"`
+	OrganizationID         string                `json:"organization_id"`
+	WorkspaceID            string                `json:"workspace_id"`
+	ChannelID              string                `json:"channel_id"`
+	RootThreadTS           string                `json:"root_thread_ts"`
+	ReplyInChannel         bool                  `json:"reply_in_channel,omitempty"`
+	SessionID              types.SessionID       `json:"session_id"`
+	Generation             int64                 `json:"generation"`
+	ObservationID          types.ObservationID   `json:"observation_id,omitempty"`
+	RequesterID            string                `json:"requester_id,omitempty"`
+	IdempotencyKey         string                `json:"idempotency_key"`
+	Kind                   string                `json:"kind"`
+	Input                  string                `json:"input"`
+	Images                 []types.SlackImageRef `json:"images,omitempty"`
+	State                  State                 `json:"state"`
+	Attempt                int                   `json:"attempt"`
+	MaxAttempts            int                   `json:"max_attempts"`
+	AdmissionReservationID string                `json:"admission_reservation_id,omitempty"`
+	ResolvedModel          types.ResolvedModel   `json:"resolved_model"`
+	RouteTrace             types.DecisionTrace   `json:"route_trace"`
+	SteeringEpoch          int64                 `json:"steering_epoch"`
+	Lease                  Lease                 `json:"lease"`
+	Result                 types.SlackResult     `json:"result,omitempty"`
+	FailureReason          string                `json:"failure_reason,omitempty"`
+	ApprovalID             string                `json:"approval_id,omitempty"`
+	ApprovedActionHash     string                `json:"approved_action_hash,omitempty"`
+	ProgressMessageTS      string                `json:"progress_message_ts,omitempty"`
+	FinalDeliveryEnqueued  bool                  `json:"final_delivery_enqueued,omitempty"`
+	AvailableAt            time.Time             `json:"available_at"`
+	CreatedAt              time.Time             `json:"created_at"`
+	UpdatedAt              time.Time             `json:"updated_at"`
+	ExpiresAt              time.Time             `json:"expires_at"`
+	Version                int64                 `json:"version"`
 }
 
 type Queue interface {

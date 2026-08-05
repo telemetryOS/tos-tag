@@ -207,6 +207,9 @@ Behavioral skills come from the complete validated `base` plugin in sibling
 `tag-agent-skills`. It includes Slack composition and routing, product
 knowledge, read-only code inspection, Linear issue management, bug/feature
 intake, suitability, OTel, Wiki, triggers, and team alignment.
+The `curds` skill may invoke only reviewed `media.curds/generate` for an
+explicit image request. `OPENAI_API_KEY` is a separate encrypted helper binding;
+it is never a Codex login or classifier-key path.
 
 Codex discovers materialized snapshots at `.agents/skills/<name>/SKILL.md`.
 Names are flat and unique. Files and references are
@@ -254,8 +257,9 @@ injection, no raw flags or auth/config surface, and risk-based mutation approval
 document/contact workflows, server-side API-key injection, no OAuth,
 key/workspace administration, sessions, binary transfer, template mutation,
 arbitrary URL, or raw-flag surface, and risk-based mutation approval),
-`telemetryos.device-logs` (read/write), `telemetryos.mongo` (read), and
-`telemetryos.code` (read), plus `telemetryos.product-docs` (credential-free
+`telemetryos.device-logs` (read/write), `telemetryos.mongo` (read),
+`telemetryos.code` (read), and `media.curds` (fixed OpenAI image generation),
+plus `telemetryos.product-docs` (credential-free
 fixed-host public product reads). `telemetryos.code` is the only source-tree
 capability: it refreshes only a requested approved TelemetryOS origin into an
 immutable default-branch snapshot, returns commit/fetch freshness evidence,
@@ -337,6 +341,10 @@ rejects any model-created artifact segment whose URL is not in that set.
 
 All output passes renderer validation, special-mention rejection, immutable
 delivery metadata checks, live policy rechecks, and durable idempotent delivery.
+Generated image bytes are control-plane-owned file uploads on the durable
+delivery record. Incoming Slack PNG/JPEG/WebP files are fetched by ID only
+after admission and materialized as disposable App Server `localImage` inputs;
+private file URLs and bot credentials never enter worker state.
 
 ## Development practices
 

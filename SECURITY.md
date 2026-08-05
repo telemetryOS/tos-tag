@@ -152,6 +152,9 @@ the minimum live operational records needed for delivery safety and audit.
   or kill-switch checks.
 - The direct OpenAI classifier key is control-plane-only and is never reused for
   Codex App Server. Codex authenticates through its private persisted home.
+- Curds uses a separate reviewed `OPENAI_API_KEY` keystore binding. It is
+  resolved only into the fixed `media.curds/generate` subprocess and never
+  enters model input, argv, logs, artifact bytes, or Slack output.
 - A Mongo-authoritative organization/workspace flood bucket is charged before
   context construction or direct classification. Exhaustion and bucket-store
   failures fail closed without reactions, agent work, or Slack output, limiting
@@ -181,6 +184,13 @@ admin Wiki operations are unavailable. All permitted calls remain constrained
 by job-scoped capabilities, the selected tool/version/operation, exact argv,
 environment allowlists, kill switches, bounds, and tamper-evident execution
 receipts. The model cannot alter approval policy at runtime.
+
+`media.curds/generate` is a reviewed no-prompt write exception only when the
+validated `curds` skill is active and the user explicitly requested an image.
+Provider, model, count, format, output path, and Slack destination are fixed by
+the control plane. Incoming Slack images are downloaded by authenticated file
+ID after admission; private URLs are not retained, and MIME/magic/size/count
+validation fails closed before worker input.
 
 When approval applies, inline document bodies are included in the canonical
 action hash and Slack cards replace them with a byte count and digest. Wiki

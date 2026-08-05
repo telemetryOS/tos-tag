@@ -20,8 +20,20 @@ const (
 
 type SlackResult struct {
 	Segments        []SlackSegment        `json:"segments" bson:"segments"`
+	Files           []SlackFileUpload     `json:"-" bson:"files,omitempty"`
 	AllowedMentions SlackMentionAllowlist `json:"-" bson:"allowed_mentions,omitempty"`
 	AgentFooter     *SlackAgentFooter     `json:"-" bson:"agent_footer,omitempty"`
+}
+
+// SlackFileUpload is a control-plane-owned generated artifact. Model output
+// cannot populate this field. The bytes are retained only with the durable job
+// and delivery records until Slack accepts the upload.
+type SlackFileUpload struct {
+	Name      string `json:"-" bson:"name"`
+	Title     string `json:"-" bson:"title,omitempty"`
+	AltText   string `json:"-" bson:"alt_text,omitempty"`
+	MediaType string `json:"-" bson:"media_type"`
+	Data      []byte `json:"-" bson:"data"`
 }
 
 // SlackMentionAllowlist is control-plane-owned provenance derived from exact

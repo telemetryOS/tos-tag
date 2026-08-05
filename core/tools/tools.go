@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -32,13 +33,21 @@ type Manifest struct {
 }
 
 type Operation struct {
-	ID             string   `json:"id"`
-	Env            []string `json:"env,omitempty"`
-	PublicEnv      []string `json:"public_env,omitempty"`
-	TimeoutSeconds int      `json:"timeout_seconds"`
-	MaxOutputBytes int      `json:"max_output_bytes"`
-	Risk           string   `json:"risk"`
-	Approval       string   `json:"approval,omitempty"`
+	ID             string        `json:"id"`
+	Env            []string      `json:"env,omitempty"`
+	PublicEnv      []string      `json:"public_env,omitempty"`
+	TimeoutSeconds int           `json:"timeout_seconds"`
+	MaxOutputBytes int           `json:"max_output_bytes"`
+	Risk           string        `json:"risk"`
+	Approval       string        `json:"approval,omitempty"`
+	Artifact       *ArtifactSpec `json:"artifact,omitempty"`
+}
+
+type ArtifactSpec struct {
+	Filename  string `json:"filename"`
+	Title     string `json:"title,omitempty"`
+	MediaType string `json:"media_type"`
+	MaxBytes  int    `json:"max_bytes"`
 }
 
 const (
@@ -90,6 +99,16 @@ type Result struct {
 	Output   string        `json:"output"`
 	ExitCode int           `json:"exit_code"`
 	Duration time.Duration `json:"duration_ns"`
+	Artifact *Artifact     `json:"artifact,omitempty"`
+}
+
+type Artifact struct {
+	Name      string `json:"name"`
+	Title     string `json:"title,omitempty"`
+	MediaType string `json:"media_type"`
+	Size      int    `json:"size"`
+	Digest    string `json:"digest"`
+	Data      []byte `json:"-"`
 }
 
 type Executor struct {
@@ -134,6 +153,12 @@ func LoadBundle(root, manifestPath string) (Bundle, error) {
 		}
 		if manifest.ID == "telemetryos.code" && (operation.ID != "read" || operation.Risk != "read") {
 			return Bundle{}, errors.New("telemetryos.code is permanently read-only")
+		}
+		if operation.Artifact != nil {
+			artifact := operation.Artifact
+			if filepath.Base(artifact.Filename) != artifact.Filename || artifact.Filename == "" || artifact.MaxBytes <= 0 || artifact.MaxBytes > 16<<20 || !supportedArtifactMediaType(artifact.MediaType) {
+				return Bundle{}, errors.New("invalid tool artifact declaration")
+			}
 		}
 		seen[operation.ID] = true
 		declaredEnvironment := make(map[string]struct{}, len(operation.Env))
@@ -204,6 +229,15 @@ func (e Executor) Execute(parent context.Context, bundle Bundle, request Request
 	}
 	defer func() { _ = os.RemoveAll(privateHome) }()
 	environment := []string{"PATH=" + toolPath, "LANG=C.UTF-8", "HOME=" + privateHome, "TMPDIR=" + privateHome, "TOS_TAG_OPERATION_ID=" + operation.ID}
+	artifactPath := ""
+	if operation.Artifact != nil {
+		artifactDirectory := filepath.Join(privateHome, "artifact")
+		if err := os.Mkdir(artifactDirectory, 0o700); err != nil {
+			return Result{}, fmt.Errorf("create private tool artifact directory: %w", err)
+		}
+		artifactPath = filepath.Join(artifactDirectory, operation.Artifact.Filename)
+		environment = append(environment, "TOS_TAG_ARTIFACT_PATH="+artifactPath)
+	}
 	for _, name := range operation.Env {
 		allowed[name] = true
 		value, exists := request.SecretValues[name]
@@ -254,10 +288,48 @@ func (e Executor) Execute(parent context.Context, bundle Bundle, request Request
 	if err != nil {
 		return result, fmt.Errorf("tool failed with exit code %d", result.ExitCode)
 	}
+	if operation.Artifact != nil {
+		artifact, artifactErr := readProducedArtifact(artifactPath, *operation.Artifact)
+		if artifactErr != nil {
+			return result, artifactErr
+		}
+		result.Artifact = &artifact
+	}
 	if e.Usage != nil && request.OrganizationID != "" {
 		_ = e.Usage.Record(parent, usage.Event{OrganizationID: request.OrganizationID, JobID: request.JobID, Category: "tool", Calls: 1, DurationMS: result.Duration.Milliseconds()})
 	}
 	return result, nil
+}
+
+func supportedArtifactMediaType(mediaType string) bool {
+	switch mediaType {
+	case "image/png", "image/jpeg", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
+
+func readProducedArtifact(path string, spec ArtifactSpec) (Artifact, error) {
+	directory, filename := filepath.Split(path)
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		return Artifact{}, fmt.Errorf("open reviewed tool artifact directory: %w", err)
+	}
+	defer root.Close()
+	info, err := root.Lstat(filename)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > int64(spec.MaxBytes) {
+		return Artifact{}, errors.New("reviewed tool did not produce a valid artifact")
+	}
+	data, err := root.ReadFile(filename)
+	if err != nil {
+		return Artifact{}, fmt.Errorf("read reviewed tool artifact: %w", err)
+	}
+	detected := strings.ToLower(strings.TrimSpace(strings.SplitN(http.DetectContentType(data), ";", 2)[0]))
+	if detected != spec.MediaType {
+		return Artifact{}, errors.New("reviewed tool artifact media type does not match its declaration")
+	}
+	return Artifact{Name: spec.Filename, Title: spec.Title, MediaType: spec.MediaType, Size: len(data), Digest: digest(data), Data: data}, nil
 }
 
 // sensitiveEnvironmentValues separates reviewed public URL configuration from

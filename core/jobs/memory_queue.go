@@ -44,7 +44,8 @@ func (q *MemoryQueue) Enqueue(_ context.Context, spec Spec) (Job, bool, error) {
 		ID: types.JobID(types.NewID("job")), OrganizationID: spec.OrganizationID, WorkspaceID: spec.WorkspaceID,
 		ChannelID: spec.ChannelID, RootThreadTS: spec.RootThreadTS, ReplyInChannel: spec.ReplyInChannel, SessionID: spec.SessionID, Generation: spec.Generation,
 		ObservationID: spec.ObservationID, RequesterID: spec.RequesterID, IdempotencyKey: spec.IdempotencyKey, Kind: spec.Kind, Input: spec.Input,
-		State: StateQueued, MaxAttempts: spec.MaxAttempts, SteeringEpoch: 1, AvailableAt: now, CreatedAt: now, UpdatedAt: now, ExpiresAt: expiresAt, Version: 1,
+		Images: append([]types.SlackImageRef(nil), spec.Images...),
+		State:  StateQueued, MaxAttempts: spec.MaxAttempts, SteeringEpoch: 1, AvailableAt: now, CreatedAt: now, UpdatedAt: now, ExpiresAt: expiresAt, Version: 1,
 		AdmissionReservationID: spec.AdmissionReservationID,
 		ResolvedModel:          spec.ResolvedModel, RouteTrace: spec.RouteTrace,
 	}

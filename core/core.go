@@ -257,6 +257,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	}
 	var ingress slack.Ingress
 	var transport slack.Delivery
+	var media slack.Media
 	var stubIngress *slack.StubIngress
 	var stubTransport *slack.StubDelivery
 	var slackContextSync *slack.ContextSyncer
@@ -304,6 +305,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 			}
 		}
 		ingress, transport = liveIngress, liveDelivery
+		media = liveDelivery
 		liveIngress.SetApprovalInteractionHandler(func(ctx context.Context, interaction slack.ApprovalInteraction) error {
 			return approvalCoordinator.HandleSlackDecision(ctx, approvals.SlackDecision{OrganizationID: interaction.OrganizationID, WorkspaceID: interaction.WorkspaceID, ChannelID: interaction.ChannelID, UserID: interaction.UserID, ApprovalID: interaction.ApprovalID, MessageTS: interaction.MessageTS, Approve: interaction.Approve})
 		})
@@ -369,7 +371,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 		)
 	}
 	pipe, err := pipeline.New(pipeline.Dependencies{
-		Config: cfg, Logger: logger, Activity: activityFeed, Ingress: ingress, Transport: transport,
+		Config: cfg, Logger: logger, Activity: activityFeed, Ingress: ingress, Transport: transport, Media: media,
 		Observations: observations, Sessions: sessionStore, Jobs: jobQueue,
 		Decisions: decisionStore, Deliveries: deliveryQueue, ContextPacks: contextBuilder, ContextStore: contextStore,
 		Classifier: classificationService, Renderer: renderer, Scopes: scopeResolver, Intelligence: intelligenceProjector, Admissions: admissionController, FloodProtection: classifierFloodGate, ModelRouter: responseRouter, Harness: responseHarness, Usage: usageRecorder, ChannelConfig: channelConfiguration, Audit: auditChain, Approvals: approvalStore, ContextSyncState: contextSyncState, Memory: memoryStore,

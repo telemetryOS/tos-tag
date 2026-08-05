@@ -656,7 +656,7 @@ func TestCheckedInReviewedToolMarketplace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"telemetryos.linear": true, "telemetryos.wiki": true, "telemetryos.otel": true, "telemetryos.analytics": true, "telemetryos.device-logs": true, "telemetryos.mongo": true, "telemetryos.code": true, "telemetryos.product-docs": true}
+	want := map[string]bool{"telemetryos.linear": true, "telemetryos.wiki": true, "telemetryos.otel": true, "telemetryos.analytics": true, "telemetryos.device-logs": true, "telemetryos.mongo": true, "telemetryos.code": true, "telemetryos.product-docs": true, "media.curds": true}
 	for _, snapshot := range registry.List() {
 		delete(want, snapshot.ToolID)
 		if snapshot.ContentHash == "" || len(snapshot.Operations) == 0 {
@@ -713,6 +713,14 @@ func TestCheckedInReviewedToolMarketplace(t *testing.T) {
 	if productRead.ID != "read" || productRead.Risk != "read" || productRead.RequiresApproval() || len(productRead.Env) != 0 || productRead.TimeoutSeconds != 30 || productRead.MaxOutputBytes != 524288 {
 		t.Fatalf("product docs read boundary is invalid: %#v", productRead)
 	}
+	curds, ok := registry.Resolve("media.curds")
+	if !ok || len(curds.Manifest.Operations) != 1 {
+		t.Fatalf("Curds tool was not resolved safely: %#v", curds.Manifest)
+	}
+	generate := curds.Manifest.Operations[0]
+	if generate.ID != "generate" || generate.Risk != "write" || generate.RequiresApproval() || !reflect.DeepEqual(generate.Env, []string{"OPENAI_API_KEY"}) || generate.Artifact == nil || generate.Artifact.MediaType != "image/webp" || generate.Artifact.MaxBytes != 10485760 {
+		t.Fatalf("Curds generation boundary is invalid: %#v", generate)
+	}
 	analytics, ok := registry.Resolve("telemetryos.analytics")
 	if !ok || len(analytics.Manifest.Operations) != 1 {
 		t.Fatalf("analytics tool was not resolved safely: %#v", analytics.Manifest)
@@ -728,7 +736,7 @@ func TestConfiguredBasePluginWhenAvailable(t *testing.T) {
 	if _, err := os.Stat(baseRoot); errors.Is(err, os.ErrNotExist) {
 		t.Skipf("checkout not present: %s", baseRoot)
 	}
-	expectedNames := []string{"bug", "code-change-intake", "codebase-read", "digitalocean", "feature", "linear-issue-manager", "marketing-account-journey", "marketing-funnel-chain", "marketing-funnel-review", "marketing-messaging", "marketing-unstall-draft", "pandadoc", "product-knowledge", "slack-message-design", "suitability", "tag-triggers", "team-alignment", "telemetry-otel-fetch", "telemetryos-documentation", "wiki"}
+	expectedNames := []string{"bug", "code-change-intake", "codebase-read", "curds", "digitalocean", "feature", "linear-issue-manager", "marketing-account-journey", "marketing-funnel-chain", "marketing-funnel-review", "marketing-messaging", "marketing-unstall-draft", "pandadoc", "product-knowledge", "slack-message-design", "suitability", "tag-triggers", "team-alignment", "telemetry-otel-fetch", "telemetryos-documentation", "wiki"}
 	base, err := marketplace.LoadPlugin(baseRoot, filepath.Join(".claude-plugin", "marketplace.json"), "base")
 	if err != nil || len(base) < len(expectedNames) {
 		t.Fatalf("base skills=%d err=%v", len(base), err)

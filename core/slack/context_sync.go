@@ -869,6 +869,7 @@ func (s *ContextSyncer) historyEnvelope(channel slackapi.Channel, restricted boo
 		Kind:           types.SlackEventMessage,
 		Subtype:        message.SubType,
 		Text:           message.Text,
+		Images:         slackImageRefs(message.Files),
 		EventTime:      eventTime,
 		ReceivedAt:     time.Now().UTC(),
 		IsMention:      mentionsSlackUser(message.Text, s.options.BotUserID),

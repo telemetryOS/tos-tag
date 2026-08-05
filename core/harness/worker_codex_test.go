@@ -372,7 +372,7 @@ func TestCodexDynamicToolsRequireValidatedSkillNames(t *testing.T) {
 }
 
 func TestPrepareToolInvocationValidatesSkillsAndStripsProgressMetadata(t *testing.T) {
-	session := &codexWorkerSession{allowedSkills: map[string]struct{}{"product-knowledge": {}, "wiki": {}, "bug": {}, "feature": {}, "linear-issue-manager": {}}}
+	session := &codexWorkerSession{allowedSkills: map[string]struct{}{"product-knowledge": {}, "wiki": {}, "bug": {}, "feature": {}, "linear-issue-manager": {}, "curds": {}}}
 	invocation, forwarded, err := session.prepareToolInvocation("call-1", wikiDynamicTool, json.RawMessage(`{"skill_names":["product-knowledge","wiki","wiki"],"operation":"get","page_reference":"primer/node-mini"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -395,6 +395,13 @@ func TestPrepareToolInvocationValidatesSkillsAndStripsProgressMetadata(t *testin
 	}
 	if _, _, err := session.prepareToolInvocation("call-5", "tos_tag_tool", json.RawMessage(`{"skill_names":["linear-issue-manager"],"tool_id":"telemetryos.linear","operation_id":"intake","arguments":["create","--title","Feature","--description","Body","--label","Feature"]}`)); err == nil || !strings.Contains(err.Error(), "bug or feature workflow") {
 		t.Fatalf("unscoped Linear intake error = %v", err)
+	}
+	curds, _, err := session.prepareToolInvocation("call-6", "tos_tag_tool", json.RawMessage(`{"skill_names":["curds"],"tool_id":"media.curds","operation_id":"generate","arguments":["a fox","1:1","auto"]}`))
+	if err != nil || curds.ToolID != "media.curds" || curds.OperationID != "generate" {
+		t.Fatalf("Curds invocation=%#v err=%v", curds, err)
+	}
+	if _, _, err := session.prepareToolInvocation("call-7", "tos_tag_tool", json.RawMessage(`{"skill_names":["product-knowledge"],"tool_id":"media.curds","operation_id":"generate","arguments":["a fox","1:1","auto"]}`)); err == nil || !strings.Contains(err.Error(), "curds skill") {
+		t.Fatalf("Curds skill gate error=%v", err)
 	}
 }
 

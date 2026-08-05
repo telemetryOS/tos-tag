@@ -37,25 +37,45 @@ const SlackChannelKindGroupDM = "mpim"
 const SlackChannelKindDirectMessage = "im"
 
 type SlackEnvelope struct {
-	OrganizationID string         `json:"organization_id"`
-	EnvelopeID     string         `json:"envelope_id"`
-	EventID        string         `json:"event_id"`
-	TeamID         string         `json:"team_id"`
-	ChannelID      string         `json:"channel_id"`
-	ChannelKind    string         `json:"channel_kind,omitempty"`
-	MessageTS      string         `json:"message_ts"`
-	ThreadTS       string         `json:"thread_ts,omitempty"`
-	UserID         string         `json:"user_id,omitempty"`
-	BotID          string         `json:"bot_id,omitempty"`
-	Kind           SlackEventKind `json:"kind"`
-	Subtype        string         `json:"subtype,omitempty"`
-	Text           string         `json:"text,omitempty"`
-	TargetTS       string         `json:"target_ts,omitempty"`
-	EventTime      time.Time      `json:"event_time"`
-	ReceivedAt     time.Time      `json:"received_at"`
-	IsMention      bool           `json:"is_mention"`
-	OriginTag      string         `json:"origin_tag,omitempty"`
-	Restricted     bool           `json:"restricted"`
+	OrganizationID string          `json:"organization_id"`
+	EnvelopeID     string          `json:"envelope_id"`
+	EventID        string          `json:"event_id"`
+	TeamID         string          `json:"team_id"`
+	ChannelID      string          `json:"channel_id"`
+	ChannelKind    string          `json:"channel_kind,omitempty"`
+	MessageTS      string          `json:"message_ts"`
+	ThreadTS       string          `json:"thread_ts,omitempty"`
+	UserID         string          `json:"user_id,omitempty"`
+	BotID          string          `json:"bot_id,omitempty"`
+	Kind           SlackEventKind  `json:"kind"`
+	Subtype        string          `json:"subtype,omitempty"`
+	Text           string          `json:"text,omitempty"`
+	Images         []SlackImageRef `json:"images,omitempty"`
+	TargetTS       string          `json:"target_ts,omitempty"`
+	EventTime      time.Time       `json:"event_time"`
+	ReceivedAt     time.Time       `json:"received_at"`
+	IsMention      bool            `json:"is_mention"`
+	OriginTag      string          `json:"origin_tag,omitempty"`
+	Restricted     bool            `json:"restricted"`
+}
+
+// SlackImageRef is the bounded, non-secret identity of an image attached to a
+// Slack message. Private download URLs and bot credentials are never persisted;
+// the control plane resolves FileID through the authenticated Slack client only
+// when an admitted job is ready to run.
+type SlackImageRef struct {
+	FileID    string `json:"file_id" bson:"file_id"`
+	Name      string `json:"name,omitempty" bson:"name,omitempty"`
+	MediaType string `json:"media_type" bson:"media_type"`
+	Size      int    `json:"size,omitempty" bson:"size,omitempty"`
+	Width     int    `json:"width,omitempty" bson:"width,omitempty"`
+	Height    int    `json:"height,omitempty" bson:"height,omitempty"`
+}
+
+type SlackImageData struct {
+	Name      string `json:"-"`
+	MediaType string `json:"-"`
+	Data      []byte `json:"-"`
 }
 
 func (e SlackEnvelope) RootThreadTS() string {

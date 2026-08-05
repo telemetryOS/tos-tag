@@ -25,6 +25,7 @@ worker admission and cannot be converted into a response or approval.
 | --- | --- | --- | --- |
 | `telemetryos.code` | `read` | Risk-based | Aion inventory, owner-only snapshot/index/model paths, and GitHub CLI credential-store path; none are worker-visible |
 | `telemetryos.product-docs` | `read` | Never | None; fixed public TelemetryOS HTTPS sources only |
+| `media.curds` | `generate` | Never for an explicit image request | `OPENAI_API_KEY` |
 | `telemetryos.linear` | `read`, `intake`, `write` | Never for bounded bug/feature intake; risk-based otherwise | `LINEAR_API_KEY` |
 | `telemetryos.wiki` | `read`, `write`, `delete` | Never for read/write; always for recoverable page soft-delete | `WIKI_URL`, `WIKI_TOKEN` |
 | `telemetryos.otel` | `read` | Risk-based | `SIGNOZ_URL`, `SIGNOZ_API_KEY` |
@@ -53,6 +54,13 @@ requested/completed audit receipts and retain every other gateway constraint.
 Tool selection is also constrained by
 the configured tool-ID allowlist and by each injected skill's declared
 requirements.
+
+The Curds exception is bounded to explicit image requests under the validated
+`curds` skill. Its helper fixes OpenAI `gpt-image-2`, one WebP output,
+aspect/quality allowlists, and a server-owned artifact path. The executor
+validates the bytes and the durable Slack reconciler publishes them to the
+already-authorized destination; the model never receives the API key, bytes,
+file path, or Slack token.
 
 `tools/linear/run.sh` and `tools/wiki/run.sh` are self-contained reviewed
 tos-tag helpers with operation guards driven by the executor-owned

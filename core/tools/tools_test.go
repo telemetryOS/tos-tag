@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,51 @@ func TestToolExecutionUsesExactArgvAndDeclaredEnvironmentOnly(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "arg=value; echo injection") || !strings.Contains(result.Output, "operation=read") || !strings.Contains(result.Output, "linear=[REDACTED]") || !strings.Contains(result.Output, "slack=unset") {
 		t.Fatalf("unexpected output: %q", result.Output)
+	}
+}
+
+func TestToolExecutionCapturesOnlyDeclaredArtifact(t *testing.T) {
+	root := t.TempDir()
+	script := filepath.Join(root, "generate.sh")
+	content := "#!/bin/sh\nprintf '\\211PNG\\r\\n\\032\\n' > \"$TOS_TAG_ARTIFACT_PATH\"\nprintf generated\n"
+	if err := os.WriteFile(script, []byte(content), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"id":"media.curds","version":"1.0.0","script":"generate.sh","operations":[{"id":"generate","timeout_seconds":2,"max_output_bytes":4096,"risk":"write","approval":"never","artifact":{"filename":"generated.png","title":"Generated image","media_type":"image/png","max_bytes":1024}}]}`
+	if err := os.WriteFile(filepath.Join(root, "tool.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := LoadBundle(root, "tool.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Request{OperationID: "generate", Capability: Capability{ToolID: "media.curds", ToolVersion: "1.0.0", OperationID: "generate", AttemptToken: "lease", SteeringEpoch: 1, ExpiresAt: time.Now().Add(time.Minute)}}
+	result, err := (Executor{Enabled: true}).Execute(context.Background(), bundle, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Artifact == nil || result.Artifact.MediaType != "image/png" || result.Artifact.Size != 8 || len(result.Artifact.Data) != 8 || !strings.HasPrefix(result.Artifact.Digest, "sha256:") {
+		t.Fatalf("artifact = %#v", result.Artifact)
+	}
+	encoded, _ := json.Marshal(result)
+	if strings.Contains(string(encoded), "iVBOR") || strings.Contains(string(encoded), "data") {
+		t.Fatalf("artifact bytes entered JSON: %s", encoded)
+	}
+}
+
+func TestReadProducedArtifactRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target.webp")
+	if err := os.WriteFile(target, []byte("not an image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "generated.webp")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readProducedArtifact(link, ArtifactSpec{Filename: "generated.webp", MediaType: "image/webp", MaxBytes: 1024})
+	if err == nil || !strings.Contains(err.Error(), "valid artifact") {
+		t.Fatalf("symlink artifact error = %v", err)
 	}
 }
 

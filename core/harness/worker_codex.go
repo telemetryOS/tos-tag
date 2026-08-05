@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -252,6 +253,27 @@ func (w *WorkerCodex) Prompt(ctx context.Context, sessionID string, prompt Promp
 		w.terminate(sessionID)
 		return errors.New("Codex prompt model and request ID are required")
 	}
+	inputItems := []map[string]any{{"type": "text", "text": prompt.Text}}
+	if len(prompt.Images) > 0 {
+		inputDirectory := filepath.Join(session.workspace.WorkDir, ".inputs")
+		if err := os.MkdirAll(inputDirectory, 0o700); err != nil {
+			w.terminate(sessionID)
+			return fmt.Errorf("create worker image input directory: %w", err)
+		}
+		for index, image := range prompt.Images {
+			extension, ok := inputImageExtension(image.MediaType)
+			if !ok || len(image.Data) == 0 {
+				w.terminate(sessionID)
+				return errors.New("worker image input is invalid")
+			}
+			path := filepath.Join(inputDirectory, fmt.Sprintf("image-%02d%s", index+1, extension))
+			if err := os.WriteFile(path, image.Data, 0o400); err != nil {
+				w.terminate(sessionID)
+				return fmt.Errorf("materialize worker image input: %w", err)
+			}
+			inputItems = append(inputItems, map[string]any{"type": "localImage", "path": path, "detail": "auto"})
+		}
+	}
 	dynamicTools := []map[string]any{}
 	if session.access.Capability != "" {
 		dynamicTools = codexDynamicTools(w.skills)
@@ -296,7 +318,7 @@ func (w *WorkerCodex) Prompt(ctx context.Context, sessionID string, prompt Promp
 	session.publish("thread/start", "inbound", "completed", "Codex thread started")
 	turnParams := map[string]any{
 		"threadId":            threadResponse.Thread.ID,
-		"input":               []map[string]any{{"type": "text", "text": prompt.Text}},
+		"input":               inputItems,
 		"clientUserMessageId": prompt.RequestID,
 		"model":               model,
 		"effort":              prompt.Variant,
@@ -328,6 +350,19 @@ func (w *WorkerCodex) Prompt(ctx context.Context, sessionID string, prompt Promp
 	session.mu.Unlock()
 	session.publish("turn/start", "inbound", "completed", "Codex turn started")
 	return nil
+}
+
+func inputImageExtension(mediaType string) (string, bool) {
+	switch mediaType {
+	case "image/png":
+		return ".png", true
+	case "image/jpeg":
+		return ".jpg", true
+	case "image/webp":
+		return ".webp", true
+	default:
+		return "", false
+	}
 }
 
 func (w *WorkerCodex) Events(ctx context.Context, sessionID string) (<-chan Event, <-chan error) {
@@ -639,6 +674,9 @@ func (w *WorkerCodex) serverRequest(ctx context.Context, session *codexWorkerSes
 		}
 		session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: resultType, Data: resultData, CreatedAt: time.Now().UTC()})
 		if success {
+			for _, file := range w.toolBridge.TakeArtifacts(session.attemptID) {
+				session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "file.produced", Data: map[string]any{"file": file}, CreatedAt: time.Now().UTC()})
+			}
 			if artifactURL := producedWikiArtifactURL("tos_tag_tool", bridgeArguments, output); artifactURL != "" {
 				session.emit(Event{ID: types.NewID("event"), SessionID: threadID, Type: "artifact.produced", Data: map[string]any{"url": artifactURL}, CreatedAt: time.Now().UTC()})
 			}
@@ -831,6 +869,9 @@ func (s *codexWorkerSession) prepareToolInvocation(callID, tool string, argument
 		}
 		if invocation.ToolID == "telemetryos.linear" && invocation.OperationID == "intake" && (!containsString(validatedSkills, "linear-issue-manager") || (!containsString(validatedSkills, "bug") && !containsString(validatedSkills, "feature"))) {
 			return declaredToolInvocation{}, nil, errors.New("Linear intake requires the bug or feature workflow with linear-issue-manager")
+		}
+		if invocation.ToolID == "media.curds" && (invocation.OperationID != "generate" || !containsString(validatedSkills, "curds")) {
+			return declaredToolInvocation{}, nil, errors.New("Curds image generation requires the curds skill")
 		}
 	case wikiDynamicTool:
 		request, err := decodeWikiToolRequest(arguments)
