@@ -245,6 +245,14 @@ The reviewed catalog currently contains:
 - `attio.crm` (`read`, `write`, `delete`): fixed-host Attio v2 JSON access with
   a server-side bearer token, risk-based approval for writes and deletes, and
   no arbitrary URL, OAuth, header, or binary-transfer surface;
+- `stripe.billing` (`read`, `write`, `delete`): live-only official Stripe CLI
+  access limited to reviewed `/v1` and `/v2` API requests, isolated CLI state,
+  mandatory mutation idempotency, and no login, key, plugin, fixture, listener,
+  trigger, arbitrary URL, or arbitrary-flag surface;
+- `digitalocean.cloud` (`read`, `write`, `delete`): official doctl access limited
+  to reviewed inventory reads, exact Droplet power/App restart actions, and
+  single-target deletes, with isolated state and no auth/config, raw flags,
+  creation/update, credential export, or cascading cluster-delete surface;
 - `telemetryos.device-logs` (`read`, `write`); and
 - `telemetryos.mongo` (`read`, disabled by default pending the human-opened
   security-key session).
@@ -254,7 +262,7 @@ Wiki content obtained through `telemetryos.code` must use the typed Wiki
 workers have no shared source filename; never invent `/workspace/...` paths.
 The exact action is committed by the Wiki execution audit receipt.
 
-Behavioral skill presence is not tool authority. The current inventory is 29
+Behavioral skill presence is not tool authority. The current inventory is 31
 skills in `base`; use the checked-in plugin manifest as the source of truth and
 keep the exact list in `README.md`.
 

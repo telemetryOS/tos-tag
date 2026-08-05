@@ -1,0 +1,10 @@
+{
+  "id": "stripe.billing",
+  "version": "1.1.0",
+  "script": "run.sh",
+  "operations": [
+    {"id": "read", "env": ["STRIPE_API_KEY"], "timeout_seconds": 90, "max_output_bytes": 1048576, "risk": "read"},
+    {"id": "write", "env": ["STRIPE_API_KEY"], "timeout_seconds": 90, "max_output_bytes": 1048576, "risk": "write"},
+    {"id": "delete", "env": ["STRIPE_API_KEY"], "timeout_seconds": 90, "max_output_bytes": 262144, "risk": "destructive"}
+  ]
+}

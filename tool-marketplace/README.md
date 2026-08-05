@@ -30,6 +30,8 @@ worker admission and cannot be converted into a response or approval.
 | `telemetryos.otel` | `read` | Risk-based | `SIGNOZ_URL`, `SIGNOZ_API_KEY` |
 | `telemetryos.analytics` | `read` | Never | `TELEMETRYOS_ANALYTICS_URL` (validated public origin), `SITE_ANALYTICS_TOKEN` |
 | `attio.crm` | `read`, `write`, `delete` | Risk-based | `ATTIO_ACCESS_TOKEN` |
+| `stripe.billing` | `read`, `write`, `delete` | Risk-based | `STRIPE_API_KEY` |
+| `digitalocean.cloud` | `read`, `write`, `delete` | Risk-based | `DIGITAL_OCEAN_API_KEY` |
 | `telemetryos.device-logs` | `read`, `write` | Risk-based | `DLA_API_BASE_URL`, `DLA_API_KEY`, `DLA_ENV` |
 | `telemetryos.mongo` | `read` | Risk-based | `MONGO_QA_URI` |
 
@@ -84,6 +86,14 @@ read authority, maps JSON `post`/`put`/`patch` to write authority, and isolates
 deletes as destructive. Only documented v2 JSON path shapes are available;
 arbitrary URLs, headers, OAuth exchanges, and binary upload/download are
 rejected. Bearer authentication is passed through a mode-0600 curl config.
+`tools/digitalocean/run.sh` is copied from
+`tag-agent-skills/src/skills/digitalocean/scripts/digitalocean.sh`. It invokes
+the official doctl CLI with an isolated empty home, maps the server-side key to
+doctl's token environment, and exposes only fixed inventory reads, exact
+Droplet power/App restart actions, and one-target deletes. It rejects raw
+commands and flags, auth/config/profile changes, API-origin overrides, Apps
+specs, database connection data, kubeconfig changes, creation/update,
+multi-target deletion, credential export, and cascading Kubernetes deletion.
 Classifier-marked product answers require a successful same-attempt
 `docs-page`, `corporate-full`, or Agent Wiki full-page read before delivery;
 an index, search result, arbitrary web result, Slack context, or memory is not

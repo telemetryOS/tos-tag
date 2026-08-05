@@ -145,6 +145,34 @@ else
   echo "ATTIO_ACCESS_TOKEN not found; attio.crm remains disabled" >&2
 fi
 
+stripe_key="$(resolve_value STRIPE_API_KEY "${runtime_file}" 2>/dev/null || true)"
+if [[ -n "${stripe_key}" ]]; then
+  stripe_binary="$(command -v stripe 2>/dev/null || true)"
+  [[ -n "${stripe_binary}" && -x "${stripe_binary}" ]] || {
+    echo "STRIPE_API_KEY found but the official Stripe CLI is not installed" >&2
+    exit 1
+  }
+  upsert STRIPE_API_KEY "${stripe_key}"
+  imported_names+=(STRIPE_API_KEY)
+  injected_tools+=",stripe.billing"
+else
+  echo "STRIPE_API_KEY not found; stripe.billing remains disabled" >&2
+fi
+
+digitalocean_key="$(resolve_value DIGITAL_OCEAN_API_KEY "${runtime_file}" 2>/dev/null || true)"
+if [[ -n "${digitalocean_key}" ]]; then
+  doctl_binary="$(command -v doctl 2>/dev/null || true)"
+  [[ -n "${doctl_binary}" && -x "${doctl_binary}" ]] || {
+    echo "DIGITAL_OCEAN_API_KEY found but the official doctl CLI is not installed" >&2
+    exit 1
+  }
+  upsert DIGITAL_OCEAN_API_KEY "${digitalocean_key}"
+  imported_names+=(DIGITAL_OCEAN_API_KEY)
+  injected_tools+=",digitalocean.cloud"
+else
+  echo "DIGITAL_OCEAN_API_KEY not found; digitalocean.cloud remains disabled" >&2
+fi
+
 [[ -d "${code_root}" ]] || { echo "missing Aion developer path" >&2; exit 1; }
 code_root="$(cd "${code_root}" && pwd -P)"
 [[ -x "${semble_binary}" ]] || { echo "missing Semble; run make install-semantic-search" >&2; exit 1; }
@@ -158,7 +186,7 @@ if ! grep -Eq '^TAG__KEYSTORE__MASTER_KEY=.+$' "${runtime_file}"; then
   upsert TAG__KEYSTORE__MASTER_KEY "$(openssl rand -base64 32)"
 fi
 
-tool_path="$(dirname "${semble_binary}"):${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+tool_path="$(dirname "${semble_binary}"):${HOME}/.local/bin:${HOME}/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 upsert TAG__MARKETPLACES__TOOL_ROOT "${repo_root}/tool-marketplace"
 upsert TAG__MARKETPLACES__TOOL_CATALOG_PATH catalog.json
 upsert TAG__MARKETPLACES__INJECTED_TOOLS "${injected_tools}"

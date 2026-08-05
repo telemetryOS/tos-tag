@@ -1,0 +1,10 @@
+{
+  "id": "digitalocean.cloud",
+  "version": "1.0.0",
+  "script": "run.sh",
+  "operations": [
+    {"id": "read", "env": ["DIGITAL_OCEAN_API_KEY"], "timeout_seconds": 90, "max_output_bytes": 1048576, "risk": "read"},
+    {"id": "write", "env": ["DIGITAL_OCEAN_API_KEY"], "timeout_seconds": 180, "max_output_bytes": 262144, "risk": "write"},
+    {"id": "delete", "env": ["DIGITAL_OCEAN_API_KEY"], "timeout_seconds": 90, "max_output_bytes": 262144, "risk": "destructive"}
+  ]
+}

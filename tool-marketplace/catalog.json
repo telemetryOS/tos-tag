@@ -1,6 +1,6 @@
 {
   "id": "telemetryos-agent-tools",
-  "version": "0.7.0",
+  "version": "0.9.0",
   "tools": [
     {"name": "linear", "path": "tools/linear"},
     {"name": "wiki", "path": "tools/wiki"},
@@ -10,6 +10,8 @@
     {"name": "mongo", "path": "tools/mongo"},
     {"name": "code", "path": "tools/code"},
     {"name": "product-docs", "path": "tools/product-docs"},
-    {"name": "attio", "path": "tools/attio"}
+    {"name": "attio", "path": "tools/attio"},
+    {"name": "stripe", "path": "tools/stripe"},
+    {"name": "digitalocean", "path": "tools/digitalocean"}
   ]
 }

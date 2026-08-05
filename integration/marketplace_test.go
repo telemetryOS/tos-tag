@@ -728,7 +728,7 @@ func TestConfiguredBasePluginWhenAvailable(t *testing.T) {
 	if _, err := os.Stat(baseRoot); errors.Is(err, os.ErrNotExist) {
 		t.Skipf("checkout not present: %s", baseRoot)
 	}
-	expectedNames := []string{"bug", "code-change-intake", "codebase-read", "feature", "linear-issue-manager", "marketing-account-journey", "marketing-funnel-chain", "marketing-funnel-review", "marketing-messaging", "marketing-unstall-draft", "product-knowledge", "slack-message-design", "suitability", "tag-triggers", "team-alignment", "telemetry-otel-fetch", "telemetryos-documentation", "wiki"}
+	expectedNames := []string{"bug", "code-change-intake", "codebase-read", "digitalocean", "feature", "linear-issue-manager", "marketing-account-journey", "marketing-funnel-chain", "marketing-funnel-review", "marketing-messaging", "marketing-unstall-draft", "product-knowledge", "slack-message-design", "suitability", "tag-triggers", "team-alignment", "telemetry-otel-fetch", "telemetryos-documentation", "wiki"}
 	base, err := marketplace.LoadPlugin(baseRoot, filepath.Join(".claude-plugin", "marketplace.json"), "base")
 	if err != nil || len(base) < len(expectedNames) {
 		t.Fatalf("base skills=%d err=%v", len(base), err)

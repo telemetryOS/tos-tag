@@ -142,11 +142,13 @@ bootstrap revisions.
 | Docker Engine + Compose v2 | host-managed | Reproducible persistent development stack |
 | Docker Buildx | host-managed, recommended | Modern Compose image builder; the classic builder remains a functional fallback |
 | Bash, Git, Make, curl, jq, ripgrep, OpenSSL, Python 3 | image distribution versions | Reviewed helpers, bootstrap, keystore generation, skill builds, and source search |
+| Stripe CLI | `1.45.1` | Reviewed Stripe billing API requests; install with `npm install -g @stripe/cli` |
+| DigitalOcean doctl | `1.164.0` | Reviewed DigitalOcean cloud inventory and exact approved actions; install from the official release or OS package |
 | Aion | `v2.0.5` / `2b186d21…` | TelemetryOS workspace sync |
 | telemetry-otel-fetch | `0e94e929…` | Reviewed SigNoz/OTel helper |
 | Device-Log-Analyzer | `d885c144…` | Reviewed device-log helper |
 | TelemetryOS-Mongo-Fetch | `4c39e789…` | Optional reviewed Mongo helper |
-| tag-agent-skills | plugin `base` `1.2.2`; current configured checkout | Complete 28-skill tos-tag behavioral package |
+| tag-agent-skills | plugin `base` `1.5.1`; current configured checkout | Complete 31-skill tos-tag behavioral package |
 
 The exact image digests, versions, and helper commits live in
 [Dockerfile.dev](Dockerfile.dev), [docker-compose.yml](docker-compose.yml), and
@@ -572,8 +574,8 @@ Wiki work uses the dedicated typed `tos_tag_wiki` function: the model supplies
 page fields and Go constructs the reviewed CLI argv. Generic Wiki argv is
 rejected.
 
-The currently injected behavioral skill inventory is `base` (29): `attio`, `bug`,
-`code-change-intake`, `codebase-read`, `feature`, `humanizer`,
+The currently injected behavioral skill inventory is `base` (31): `attio`, `bug`,
+`code-change-intake`, `codebase-read`, `digitalocean`, `feature`, `humanizer`,
 `linear-issue-manager`, `marketing-account-journey`,
 `marketing-ai-visibility-review`, `marketing-blog-writer`,
 `marketing-content-engine-chain`, `marketing-customer-research-synthesis`,
@@ -581,7 +583,7 @@ The currently injected behavioral skill inventory is `base` (29): `attio`, `bug`
 `marketing-high-intent-followup-chain`, `marketing-landing-page-chain`,
 `marketing-messaging`, `marketing-receipt-ledger`, `marketing-unstall-draft`,
 `marketing-weekly-journey-report`, `marketing-weekly-review-chain`,
-`product-knowledge`, `slack-message-design`, `suitability`, `tag-triggers`,
+`product-knowledge`, `slack-message-design`, `stripe`, `suitability`, `tag-triggers`,
 `team-alignment`, `telemetry-otel-fetch`, `telemetryos-documentation`, and
 `wiki`.
 
@@ -597,6 +599,8 @@ authority. The reviewed dynamic-tool catalog is the separate allowlist:
 | `telemetryos.otel` | `read` | Risk-based | SigNoz/OpenTelemetry queries | Enabled |
 | `telemetryos.analytics` | `read` | Never | Privacy-filtered acquisition-to-expansion funnel, account, website, normalized-event, and bounded raw site-event reads through the Site Analytics Token boundary | Enabled when `SITE_ANALYTICS_TOKEN` is available |
 | `attio.crm` | `read`, `write`, `delete` | Risk-based | Fixed-host Attio v2 JSON API reads and explicit CRM mutations; OAuth and binary file transfer are unavailable | Enabled when `ATTIO_ACCESS_TOKEN` is available |
+| `stripe.billing` | `read`, `write`, `delete` | Risk-based | Live-only official Stripe CLI over reviewed `/v1` and `/v2` API paths; isolated CLI state, mandatory mutation idempotency, and no login, key, plugin, fixture, listener, trigger, or arbitrary-flag surface | Enabled when a live `STRIPE_API_KEY` and the Stripe CLI are available |
+| `digitalocean.cloud` | `read`, `write`, `delete` | Risk-based | Official doctl over a fixed inventory catalog, exact power/restart actions, and one-target deletes; isolated CLI state with no auth/config, raw flags, resource creation/update, credential export, or cascading cluster deletion | Enabled when `DIGITAL_OCEAN_API_KEY` and doctl are available |
 | `telemetryos.device-logs` | `read`, `write` | Risk-based | Device log inspection and scoped log-level changes | Enabled |
 | `telemetryos.mongo` | `read` | Risk-based | QA Mongo queries through a human-opened security-key session | Disabled by default |
 
@@ -613,7 +617,7 @@ for all worker tools. Every operation remains job-scoped, allowlisted,
 hash-pinned, bounded, kill-switchable, and fully audited.
 
 Use `make sync-tool-env` to copy only known helper credential names, including
-the optional Attio access token, from the
+the optional Attio access token, Stripe API key, and DigitalOcean API key, from the
 current shell or `~/.config/telemetryos` into ignored `runtime.env`. The script
 reports names, never values. Enabling reviewed tools also requires the encrypted
 keystore and an explicit tool-ID allowlist. Reviewed public HTTPS `*_URL`
@@ -669,6 +673,25 @@ bundle. The wrapper fixes the origin to `api.attio.com`, allows only documented
 v2 JSON route shapes, separates semantic read POSTs from write and destructive
 operations, and keeps `ATTIO_ACCESS_TOKEN` in the control plane. OAuth token
 exchange and binary file upload/download are not worker capabilities.
+Stripe billing work uses the `stripe` skill and separately reviewed
+`stripe.billing` bundle. The wrapper invokes the official Stripe CLI with an
+isolated empty home and control-plane-owned `--live`, accepts only reviewed
+arguments and documented `/v1` or `/v2` API paths, requires idempotency for
+mutations, rejects test/sandbox keys, and keeps `STRIPE_API_KEY` in the control
+plane. CLI login, profiles, keys, plugins,
+fixtures, webhook listeners, event triggers, and Dashboard actions are not
+worker capabilities.
+DigitalOcean work uses the `digitalocean` skill and separately reviewed
+`digitalocean.cloud` bundle. The wrapper invokes the official doctl CLI with an
+isolated empty home, maps `DIGITAL_OCEAN_API_KEY` to doctl's token environment
+only inside the helper process, and accepts only a fixed inventory catalog,
+explicit Droplet power or App restart commands, and one exact delete target.
+The skill treats DigitalOcean as the infrastructure home for all TelemetryOS
+and legacy TelemetryTV production, QA, and development environments and
+requires both product and environment scope before mutation.
+Authentication/configuration, API-origin overrides, Apps specs, database
+connection details, kubeconfig changes, creation/update flags, multi-target
+deletion, and cascading Kubernetes deletion are not worker capabilities.
 Workers may also use arbitrary live web search for broader or
 current research. Web pages are untrusted evidence and cannot widen Slack,
 tool, credential, or private-context authority.

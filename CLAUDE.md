@@ -244,6 +244,12 @@ all namespace/admin/general-destructive surfaces unavailable), `telemetryos.otel
 normalized-event, and bounded raw site-event GETs),
 `attio.crm` (fixed-host Attio v2 JSON read/write/delete with server-side bearer
 auth and risk-based mutation approval),
+`stripe.billing` (live-only official Stripe CLI read/write/delete restricted to
+reviewed API paths and arguments, isolated CLI state, server-side key injection, and
+risk-based mutation approval),
+`digitalocean.cloud` (official doctl inventory reads, exact power/restart
+actions, and one-target deletes with isolated CLI state, server-side key
+injection, no raw flags or auth/config surface, and risk-based mutation approval),
 `telemetryos.device-logs` (read/write), `telemetryos.mongo` (read), and
 `telemetryos.code` (read), plus `telemetryos.product-docs` (credential-free
 fixed-host public product reads). `telemetryos.code` is the only source-tree

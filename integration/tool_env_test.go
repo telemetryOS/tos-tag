@@ -14,11 +14,20 @@ func TestToolEnvironmentSyncIsNarrowAndDoesNotPrintValues(t *testing.T) {
 	runtimeFile := filepath.Join(t.TempDir(), "runtime.env")
 	codeRoot := t.TempDir()
 	semanticBin := filepath.Join(t.TempDir(), "semble")
+	toolBinDir := t.TempDir()
+	stripeBin := filepath.Join(toolBinDir, "stripe")
+	doctlBin := filepath.Join(toolBinDir, "doctl")
 	modelRoot := t.TempDir()
 	githubConfig := t.TempDir()
 	snapshotRoot := t.TempDir()
 	indexRoot := t.TempDir()
 	if err := os.WriteFile(semanticBin, []byte("#!/bin/sh\nprintf '0.5.3\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stripeBin, []byte("#!/bin/sh\nprintf 'stripe version 1.45.1\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(doctlBin, []byte("#!/bin/sh\nprintf 'doctl version 1.164.0-release\\n'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(modelRoot, ".tos-tag-model-revision"), []byte("e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b\n"), 0o600); err != nil {
@@ -37,6 +46,9 @@ func TestToolEnvironmentSyncIsNarrowAndDoesNotPrintValues(t *testing.T) {
 		"DLA_API_KEY":             "dla-fixture-secret",
 		"DLA_ENV":                 "qa",
 		"ATTIO_ACCESS_TOKEN":      "attio-fixture-secret",
+		"STRIPE_API_KEY":          "stripe-fixture-secret",
+		"DIGITAL_OCEAN_API_KEY":   "digitalocean-fixture-secret",
+		"PATH":                    toolBinDir + ":" + os.Getenv("PATH"),
 		"TAG_AION_DEVELOPER_PATH": codeRoot,
 		"TAG_CODE_SEMBLE_BIN":     semanticBin,
 		"TAG_CODE_SNAPSHOT_ROOT":  snapshotRoot,
@@ -60,7 +72,7 @@ func TestToolEnvironmentSyncIsNarrowAndDoesNotPrintValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name := range fixtures {
-		if name == "TAG_CODE_SEMBLE_BIN" {
+		if name == "TAG_CODE_SEMBLE_BIN" || name == "PATH" {
 			continue
 		}
 		if !strings.Contains(string(contents), name+"=") {

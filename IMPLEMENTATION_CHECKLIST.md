@@ -158,6 +158,15 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Provide `attio.crm` read/write/delete operations over fixed Attio v2 JSON
   routes, with server-side bearer auth, risk-separated mutation approval, and
   no arbitrary URL, OAuth, or binary-transfer surface.
+- [x] Provide live-only `stripe.billing` read/write/delete operations through
+  the official Stripe CLI over reviewed `/v1` and `/v2` API paths, with isolated CLI state,
+  server-side key injection, mandatory mutation idempotency, risk-separated
+  approval, and no login, key, plugin, fixture, listener, or trigger surface.
+- [x] Provide `digitalocean.cloud` read/write/delete operations through the
+  official doctl CLI over a fixed inventory catalog, exact power/restart
+  actions, and one-target deletes, with isolated CLI state, server-side token
+  mapping, risk-separated approval, and no auth/config, raw flag,
+  creation/update, credential export, or cascading cluster-delete surface.
 - [x] Inject the `marketing-funnel-chain`, `marketing-funnel-review`,
   `marketing-account-journey`, and draft-only `marketing-unstall-draft`
   behavioral skills.

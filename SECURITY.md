@@ -104,6 +104,20 @@ the minimum live operational records needed for delivery safety and audit.
   config, never argv or worker context. Semantic read POSTs are isolated from
   approval-gated writes and destructive deletes; arbitrary URLs, headers,
   OAuth exchanges, and binary file transfer are unavailable.
+- `stripe.billing` invokes the official Stripe CLI with an isolated empty home
+  and control-plane-owned `--live`, accepts only reviewed arguments and `/v1`
+  or `/v2` API paths, rejects test/sandbox keys, and supplies
+  `STRIPE_API_KEY` only in the helper subprocess environment. Writes and deletes
+  require idempotency and approval; login, config, keys, plugins, fixtures,
+  webhook listeners, event triggers, Dashboard actions, arbitrary URLs, and
+  arbitrary flags are unavailable.
+- `digitalocean.cloud` invokes the official doctl CLI with an isolated empty
+  home and maps `DIGITAL_OCEAN_API_KEY` to doctl's token environment only for
+  that subprocess. Its fixed catalog permits inventory reads, exact Droplet
+  power/App restart actions, and one-target deletes; auth/config, API-origin
+  overrides, raw flags, Apps specs, database connection data, kubeconfigs,
+  creation/update, multi-target deletion, credential export, and cascading
+  Kubernetes deletion are unavailable.
 - Classifier-marked product answers cannot be delivered unless the same attempt
   successfully reads a full Primer Wiki page, public docs page, or corporate
   full-content source. Search results and model memory are not proof.
