@@ -1,6 +1,6 @@
 {
   "id": "telemetryos-agent-tools",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "tools": [
     {"name": "linear", "path": "tools/linear"},
     {"name": "wiki", "path": "tools/wiki"},

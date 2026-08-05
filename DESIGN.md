@@ -59,7 +59,9 @@ source-mutation intent to a Linear bug or feature instead of granting a worker
 source-write authority.
 Executable access is limited to `tos_tag_tool` operations in the reviewed tool
 catalog plus the typed `tos_tag_wiki` page-CRUD facade; Aion source is not mounted and can be inspected only through bounded
-`telemetryos.code` reads. Linear, Wiki, and OTel workflows are likewise
+`telemetryos.code` reads against an on-demand verified remote-default-branch
+snapshot. Conceptual discovery uses pinned offline semantic search before an
+exact decisive read. Linear, Wiki, and OTel workflows are likewise
 described by base skills and executed only through their reviewed tools. Public
 product content is available only through the
 fixed-host `telemetryos.product-docs` read tool, while arbitrary public research

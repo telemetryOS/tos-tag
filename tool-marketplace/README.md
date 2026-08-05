@@ -6,11 +6,15 @@ the generic `tos_tag_tool` capability, and the dedicated typed `tos_tag_wiki`
 page facade; it does not receive this directory,
 the control-plane environment, or keystore references.
 
-`telemetryos.code` is the only source-tree capability. Its server-owned root is
-bound from `TAG_AION_DEVELOPER_PATH`; it permits repository/file listing,
-fixed-string search, and bounded line reads while rejecting traversal,
-symlinks, runtime environment files, credential ledgers, and private tool
-state. It deliberately provides neither a generic shell nor a write operation.
+`telemetryos.code` is the only source-tree capability. It uses
+`TAG_AION_DEVELOPER_PATH` only as a server-owned repository inventory, validates
+the requested repository's fixed `telemetryOS` origin, and refreshes its remote
+default branch into an immutable owner-only snapshot without touching the
+developer worktree. It exposes bounded freshness, repository/file listing,
+fixed-string search, pinned offline Semble discovery, version evidence, and
+line reads while rejecting arbitrary remotes/branches, traversal, symlinks,
+runtime environment files, credential ledgers, and private tool state. It
+deliberately provides neither a generic shell nor a source-write operation.
 The loader and executor both reject the bundle unless every operation remains
 exactly `read` risk. Source-mutation intent is routed to Linear bug/feature
 intake and cannot be converted into an approval.
@@ -19,7 +23,7 @@ intake and cannot be converted into an approval.
 
 | Tool ID | Operations | Approval | Declared environment |
 | --- | --- | --- | --- |
-| `telemetryos.code` | `read` | Risk-based | `TAG_AION_DEVELOPER_PATH` (server-owned path binding, not a credential) |
+| `telemetryos.code` | `read` | Risk-based | Aion inventory, owner-only snapshot/index/model paths, and GitHub CLI credential-store path; none are worker-visible |
 | `telemetryos.product-docs` | `read` | Never | None; fixed public TelemetryOS HTTPS sources only |
 | `telemetryos.linear` | `read`, `write` | Risk-based | `LINEAR_API_KEY` |
 | `telemetryos.wiki` | `read`, `write`, `delete` | Never for read/write; always for recoverable page soft-delete | `WIKI_URL`, `WIKI_TOKEN` |
@@ -83,6 +87,13 @@ To update a bundle:
 
 Do not add a generic shell, accept credentials in argv, or let a model select a
 secret reference. Add a narrow operation or a separate reviewed bundle instead.
+
+The code bundle pins Semble 0.5.3 through
+`scripts/requirements-semantic-search.txt` and pins
+`minishlab/potion-code-16M-v2` at revision
+`e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b` with per-file SHA-256 checks.
+`make install-semantic-search` installs and verifies both before
+`make sync-tool-env` binds their owner-only paths.
 
 When adding or changing a tool, also update the root `README.md`, `AGENTS.md`,
 `CLAUDE.md`, `architecture.md`, implementation status/checklist,

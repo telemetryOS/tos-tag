@@ -118,11 +118,12 @@ commands, tests, and active documentation have been removed.
   read/write authoring is trusted without per-action approval, recoverable page
   soft-delete always requires approval, and namespace/admin/general-destructive
   surfaces are unavailable.
-- `telemetryos.code` provides only bounded list/search/read operations below a
-  server-owned Aion root and rejects traversal, symlinks, runtime environment
-  files, credential ledgers, and private tool state. Bundle load and execution
-  independently enforce that every code operation is read-only; mutation
-  requests are redirected to Linear bug/feature intake with no approval path.
+- `telemetryos.code` refreshes one approved TelemetryOS origin on demand into an
+  immutable remote-default-branch snapshot, returns exact commit/fetch
+  freshness, and provides bounded fixed-string/semantic discovery, exact reads,
+  and version evidence. Semble 0.5.3 and its model revision are pinned and run
+  offline; source-bearing indexes stay owner-only. Bundle load and execution
+  still enforce read risk only, and source mutation has no approval path.
 - Classifier-marked product answers are rejected unless the same worker attempt
   successfully reads a full Primer Wiki page, public docs page, or corporate
   full-content source. Search/index/web/Slack context and model memory are not

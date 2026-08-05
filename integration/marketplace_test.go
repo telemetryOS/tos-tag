@@ -387,6 +387,158 @@ printf '200'
 	}
 }
 
+func TestCodeReviewedHelperRefreshesDefaultSnapshotAndBoundsSemanticSearch(t *testing.T) {
+	temporary := t.TempDir()
+	remote := filepath.Join(temporary, "remote.git")
+	seed := filepath.Join(temporary, "seed")
+	sourceRoot := filepath.Join(temporary, "source")
+	snapshotRoot := filepath.Join(temporary, "snapshots")
+	indexRoot := filepath.Join(temporary, "indexes")
+	modelRoot := filepath.Join(temporary, "model")
+	githubConfig := filepath.Join(temporary, "gh")
+	binRoot := filepath.Join(temporary, "bin")
+	for _, directory := range []string{sourceRoot, snapshotRoot, indexRoot, modelRoot, githubConfig, binRoot} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(modelRoot, ".tos-tag-model-revision"), []byte("e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	runGit := func(directory string, arguments ...string) string {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", directory}, arguments...)...)
+		command.Env = append(os.Environ(), "GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.com", "GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.com")
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	if output, err := exec.Command("git", "init", "--bare", "--initial-branch=main", remote).CombinedOutput(); err != nil {
+		t.Fatalf("init remote: %v: %s", err, output)
+	}
+	if output, err := exec.Command("git", "init", "--initial-branch=main", seed).CombinedOutput(); err != nil {
+		t.Fatalf("init seed: %v: %s", err, output)
+	}
+	if err := os.MkdirAll(filepath.Join(seed, "core"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(seed, "core", "auth.go"), []byte("package core\n\nfunc Authorize() bool { return true }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(seed, ".env"), []byte("TOKEN=must-not-be-readable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(seed, "add", "core/auth.go", ".env")
+	runGit(seed, "commit", "-m", "initial")
+	runGit(seed, "remote", "add", "origin", "file://"+remote)
+	runGit(seed, "push", "-u", "origin", "main")
+	if output, err := exec.Command("git", "clone", "--quiet", "file://"+remote, filepath.Join(sourceRoot, "Demo")).CombinedOutput(); err != nil {
+		t.Fatalf("clone source: %v: %s", err, output)
+	}
+
+	capture := filepath.Join(temporary, "semble-arguments")
+	fakeSemble := filepath.Join(binRoot, "semble")
+	const fakeSembleScript = `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  printf '0.5.3\n'
+  exit 0
+fi
+printf '%s\n' "$@" >"${CAPTURE_PATH}"
+printf '%s\n' '{"query":"authorization path","results":[{"file_path":"core/auth.go","start_line":3,"end_line":3,"score":0.91,"content":"func Authorize() bool { return true }"}]}'
+`
+	if err := os.WriteFile(fakeSemble, []byte(fakeSembleScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	helper := filepath.Join("..", "tool-marketplace", "tools", "code", "run.sh")
+	environment := []string{
+		"PATH=" + binRoot + ":" + os.Getenv("PATH"),
+		"HOME=" + temporary,
+		"TOS_TAG_OPERATION_ID=read",
+		"TAG_AION_DEVELOPER_PATH=" + sourceRoot,
+		"TAG_CODE_SNAPSHOT_ROOT=" + snapshotRoot,
+		"TAG_CODE_INDEX_ROOT=" + indexRoot,
+		"TAG_CODE_MODEL_PATH=" + modelRoot,
+		"TAG_CODE_GH_CONFIG_DIR=" + githubConfig,
+		"TAG_CODE_TEST_ALLOW_FILE_REMOTE=1",
+		"CAPTURE_PATH=" + capture,
+	}
+	runHelper := func(arguments ...string) ([]byte, error) {
+		t.Helper()
+		command := exec.Command("/bin/bash", append([]string{helper}, arguments...)...)
+		command.Env = environment
+		return command.CombinedOutput()
+	}
+
+	freshnessOutput, err := runHelper("freshness", "Demo")
+	if err != nil {
+		t.Fatalf("freshness failed: %v: %s", err, freshnessOutput)
+	}
+	var freshness map[string]any
+	if err := json.Unmarshal(freshnessOutput, &freshness); err != nil {
+		t.Fatalf("freshness JSON: %v: %s", err, freshnessOutput)
+	}
+	firstCommit, _ := freshness["commit"].(string)
+	if freshness["repository"] != "Demo" || freshness["default_branch"] != "main" || freshness["status"] != "current" || len(firstCommit) != 40 {
+		t.Fatalf("unexpected freshness: %#v", freshness)
+	}
+	if _, err := os.Stat(filepath.Join(snapshotRoot, "repos", "Demo", firstCommit, "core", "auth.go")); err != nil {
+		t.Fatalf("default snapshot missing: %v", err)
+	}
+
+	semanticOutput, err := runHelper("semantic-search", "Demo", "where is authorization enforced?", "3", "8")
+	if err != nil {
+		t.Fatalf("semantic search failed: %v: %s", err, semanticOutput)
+	}
+	if !bytes.Contains(semanticOutput, []byte(`"file_path": "Demo/core/auth.go"`)) || !bytes.Contains(semanticOutput, []byte(`"commit": "`+firstCommit+`"`)) {
+		t.Fatalf("semantic output lacks bounded provenance: %s", semanticOutput)
+	}
+	semanticArguments, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"search", "where is authorization enforced?", "--top-k", "3", "--max-snippet-lines", "8", "--content", "all"} {
+		if !bytes.Contains(semanticArguments, []byte(expected)) {
+			t.Fatalf("Semble invocation is missing %q: %s", expected, semanticArguments)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(seed, "core", "auth.go"), []byte("package core\n\nfunc Authorize() bool { return false }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(seed, "add", "core/auth.go")
+	runGit(seed, "commit", "-m", "change default")
+	runGit(seed, "push", "origin", "main")
+	if err := os.Remove(filepath.Join(snapshotRoot, "receipts", "Demo.json")); err != nil {
+		t.Fatal(err)
+	}
+	refreshedOutput, err := runHelper("freshness", "Demo")
+	if err != nil {
+		t.Fatalf("refreshed freshness failed: %v: %s", err, refreshedOutput)
+	}
+	var refreshed map[string]any
+	if err := json.Unmarshal(refreshedOutput, &refreshed); err != nil {
+		t.Fatal(err)
+	}
+	if refreshed["commit"] == firstCommit {
+		t.Fatalf("default branch did not refresh: %s", refreshedOutput)
+	}
+	readOutput, err := runHelper("read", "Demo/core/auth.go", "1", "5")
+	if err != nil || !bytes.Contains(readOutput, []byte("return false")) {
+		t.Fatalf("exact read did not use refreshed snapshot: %v: %s", err, readOutput)
+	}
+	if restrictedOutput, restrictedErr := runHelper("read", "Demo/.env", "1", "5"); restrictedErr == nil || bytes.Contains(restrictedOutput, []byte("must-not-be-readable")) {
+		t.Fatalf("restricted default-branch file escaped: %v: %s", restrictedErr, restrictedOutput)
+	}
+	if unsafeOutput, unsafeErr := runHelper("semantic-search", "../Demo", "authorization", "3", "8"); unsafeErr == nil {
+		t.Fatalf("unsafe semantic repository succeeded: %s", unsafeOutput)
+	}
+}
+
 func TestCheckedInReviewedToolMarketplace(t *testing.T) {
 	registry, err := tools.LoadMarketplace(filepath.Join("..", "tool-marketplace"), "catalog.json")
 	if err != nil {
@@ -405,6 +557,10 @@ func TestCheckedInReviewedToolMarketplace(t *testing.T) {
 	code, ok := registry.Resolve("telemetryos.code")
 	if !ok || len(code.Manifest.Operations) != 1 || code.Manifest.Operations[0].ID != "read" || code.Manifest.Operations[0].Risk != "read" {
 		t.Fatalf("source capability is not permanently read-only: %#v", code.Manifest)
+	}
+	codeRead := code.Manifest.Operations[0]
+	if codeRead.TimeoutSeconds != 120 || codeRead.MaxOutputBytes != 1048576 || !reflect.DeepEqual(codeRead.Env, []string{"TAG_AION_DEVELOPER_PATH", "TAG_CODE_SNAPSHOT_ROOT", "TAG_CODE_INDEX_ROOT", "TAG_CODE_MODEL_PATH", "TAG_CODE_GH_CONFIG_DIR"}) {
+		t.Fatalf("source refresh/semantic boundary is invalid: %#v", codeRead)
 	}
 	wiki, ok := registry.Resolve("telemetryos.wiki")
 	if !ok {

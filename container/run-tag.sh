@@ -30,5 +30,9 @@ export TAG__MARKETPLACES__TOOL_PATH=/home/tag/.local/bin:/usr/local/bin:/usr/bin
 # Inside the persistent image, the reviewed code tool must always bind Aion's
 # container-owned developer_path instead.
 export TAG_AION_DEVELOPER_PATH=/workspace/code
+export TAG_CODE_SNAPSHOT_ROOT=/workspace/state/code-snapshots
+export TAG_CODE_INDEX_ROOT=/workspace/state/code-indexes
+export TAG_CODE_MODEL_PATH=/opt/tos-tag-semantic/releases/semble-0.5.3-model-e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b/model
+export TAG_CODE_GH_CONFIG_DIR=/home/tag/.config/gh
 
 exec go run ./cmd/api

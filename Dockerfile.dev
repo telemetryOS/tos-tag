@@ -24,6 +24,7 @@ RUN apt-get update \
         openssl \
         openssh-client \
         python3 \
+        python3-venv \
         ripgrep \
         tini \
         unzip \
@@ -47,14 +48,23 @@ RUN architecture="$(dpkg --print-architecture)" \
 COPY container/bootstrap-workspace.sh /usr/local/bin/bootstrap-workspace
 COPY container/run-tag.sh /usr/local/bin/run-tag-container
 COPY container/workspace-AGENTS.md /usr/local/share/tos-tag/workspace-AGENTS.md
+COPY scripts/install-semantic-search.sh scripts/requirements-semantic-search.txt scripts/semantic-model.sha256 /usr/local/share/tos-tag/semantic-search/
 RUN chmod 0755 /usr/local/bin/bootstrap-workspace /usr/local/bin/run-tag-container \
-    && chmod 0644 /usr/local/share/tos-tag/workspace-AGENTS.md
+    && chmod 0755 /usr/local/share/tos-tag/semantic-search/install-semantic-search.sh \
+    && chmod 0644 /usr/local/share/tos-tag/workspace-AGENTS.md \
+    && TAG_CODE_SEMANTIC_ROOT=/opt/tos-tag-semantic \
+       TAG_CODE_SEMBLE_BIN=/usr/local/bin/semble \
+       /usr/local/share/tos-tag/semantic-search/install-semantic-search.sh
 
 ENV HOME=/home/tag \
     GOPATH=/home/tag/go \
     PATH=/home/tag/go/bin:/home/tag/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin \
     TAG_WORKSPACE_ROOT=/workspace \
-    TAG_AION_DEVELOPER_PATH=/workspace/code
+    TAG_AION_DEVELOPER_PATH=/workspace/code \
+    TAG_CODE_SNAPSHOT_ROOT=/workspace/state/code-snapshots \
+    TAG_CODE_INDEX_ROOT=/workspace/state/code-indexes \
+    TAG_CODE_MODEL_PATH=/opt/tos-tag-semantic/releases/semble-0.5.3-model-e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b/model \
+    TAG_CODE_GH_CONFIG_DIR=/home/tag/.config/gh
 
 USER tag:tag
 WORKDIR /workspace

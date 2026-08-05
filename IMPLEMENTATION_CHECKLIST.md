@@ -134,9 +134,12 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Resolve connector secrets only in the exact helper subprocess.
 - [x] Publish source-derived Wiki bodies without a shared worker filename and
   summarize document-sized bodies safely in exact-action approval cards.
-- [x] Provide `telemetryos.code` list/search/read operations and reject
-  traversal, symlinks, environment files, credential ledgers, and private tool
-  state.
+- [x] Provide `telemetryos.code` on-demand default-branch freshness, immutable
+  snapshots, list/fixed/semantic search/read/version operations, and reject
+  arbitrary remotes/branches, traversal, symlinks, environment files,
+  credential ledgers, and private tool state.
+- [x] Pin Semble and its local embedding model, keep query-time semantic search
+  offline, and retain source-bearing indexes only in owner-only server state.
 - [x] Enforce the code tool's permanent read-only boundary at both bundle load
   and execution, and redirect source mutation intent to Linear bug/feature
   intake instead of an approval flow.
@@ -232,6 +235,8 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Keep per-job workers disposable and omit the host Docker socket.
 - [x] Override a host `TAG_AION_DEVELOPER_PATH` after loading `runtime.env` so
   the container-reviewed code root remains `/workspace/code`.
+- [x] Override host snapshot/index/model/GitHub-config paths with private
+  container-owned paths and install the pinned semantic runtime in the image.
 
 ## 11. Verification
 

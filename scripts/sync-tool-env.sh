@@ -5,6 +5,13 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 runtime_file="${1:-${repo_root}/runtime.env}"
 telemetry_config="${TELEMETRYOS_CONFIG_HOME:-${HOME}/.config/telemetryos}"
 code_root="${TAG_AION_DEVELOPER_PATH:-$(dirname "${repo_root}")}"
+semantic_root="${TAG_CODE_SEMANTIC_ROOT:-${HOME}/.local/lib/tos-tag-semantic}"
+semantic_release="${semantic_root}/releases/semble-0.5.3-model-e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b"
+code_snapshot_root="${TAG_CODE_SNAPSHOT_ROOT:-${HOME}/.local/state/tos-tag/code-snapshots}"
+code_index_root="${TAG_CODE_INDEX_ROOT:-${HOME}/.local/state/tos-tag/code-indexes}"
+code_model_path="${TAG_CODE_MODEL_PATH:-${semantic_release}/model}"
+code_gh_config_dir="${TAG_CODE_GH_CONFIG_DIR:-${HOME}/.config/gh}"
+semble_binary="${TAG_CODE_SEMBLE_BIN:-${HOME}/.local/bin/semble}"
 
 if [[ ! -f "${runtime_file}" ]]; then
   echo "missing ${runtime_file}; copy runtime.env.example first" >&2
@@ -131,6 +138,11 @@ fi
 
 [[ -d "${code_root}" ]] || { echo "missing Aion developer path" >&2; exit 1; }
 code_root="$(cd "${code_root}" && pwd -P)"
+[[ -x "${semble_binary}" ]] || { echo "missing Semble; run make install-semantic-search" >&2; exit 1; }
+[[ -f "${code_model_path}/.tos-tag-model-revision" ]] || { echo "missing verified semantic model; run make install-semantic-search" >&2; exit 1; }
+[[ -d "${code_gh_config_dir}" ]] || { echo "missing GitHub CLI configuration; run gh auth login" >&2; exit 1; }
+mkdir -p "${code_snapshot_root}" "${code_index_root}"
+chmod 0700 "${code_snapshot_root}" "${code_index_root}"
 
 if ! grep -Eq '^TAG__KEYSTORE__MASTER_KEY=.+$' "${runtime_file}"; then
   command -v openssl >/dev/null 2>&1 || { echo "openssl is required to generate the keystore master key" >&2; exit 1; }
@@ -145,6 +157,10 @@ upsert TAG__MARKETPLACES__TOOL_PATH "${tool_path}"
 upsert TAG__MARKETPLACES__TOOLS_ENABLED true
 upsert TAG__KEYSTORE__ENABLED true
 upsert TAG_AION_DEVELOPER_PATH "${code_root}"
+upsert TAG_CODE_SNAPSHOT_ROOT "${code_snapshot_root}"
+upsert TAG_CODE_INDEX_ROOT "${code_index_root}"
+upsert TAG_CODE_MODEL_PATH "${code_model_path}"
+upsert TAG_CODE_GH_CONFIG_DIR "${code_gh_config_dir}"
 
 echo "configured reviewed tool environment in ${runtime_file}"
 printf 'imported %s\n' "$(printf '%s\n' "${imported_names[@]}" | sort | paste -sd, -)"

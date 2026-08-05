@@ -217,10 +217,13 @@ normalized-event, and bounded raw site-event GETs),
 `telemetryos.device-logs` (read/write), `telemetryos.mongo` (read), and
 `telemetryos.code` (read), plus `telemetryos.product-docs` (credential-free
 fixed-host public product reads). `telemetryos.code` is the only source-tree
-capability: it supports bounded repository/file listing, fixed-string search,
-and line reads under `TAG_AION_DEVELOPER_PATH`, while rejecting traversal,
+capability: it refreshes only a requested approved TelemetryOS origin into an
+immutable default-branch snapshot, returns commit/fetch freshness evidence,
+and supports bounded repository/file listing, fixed-string or pinned offline
+semantic search, and line reads. It rejects remote/branch selection, traversal,
 symlinks, runtime environment files, credential ledgers, and private tool
-state. Workers receive neither that tree nor a generic shell.
+state. Workers receive neither source/snapshot paths, GitHub credentials, nor a
+generic shell.
 
 The `product-knowledge` base skill requires retrieval for named product claims
 and routes by authority: Agent Wiki Primer for internal product truth and

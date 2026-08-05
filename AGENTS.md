@@ -203,10 +203,12 @@ deterministic and never add an arbitrary shell operation.
 
 The reviewed catalog currently contains:
 
-- `telemetryos.code` (`read` only): bounded repository/file listing,
-  fixed-string search, numbered source reads, and deterministic manifest/build/
-  CI version evidence under the server-owned `TAG_AION_DEVELOPER_PATH`; rejects
-  traversal, symlinks, runtime environment files, and credential ledgers;
+- `telemetryos.code` (`read` only): on-demand approved-origin refresh into an
+  immutable verified default-branch snapshot, bounded repository/file listing,
+  fixed-string and pinned offline semantic search, numbered source reads, and
+  deterministic manifest/build/CI version evidence; rejects arbitrary remotes,
+  branches, traversal, symlinks, runtime environment files, and credential
+  ledgers;
 - `telemetryos.product-docs` (`read` only, no approval): fixed-host HTTPS reads
   of the public documentation index/pages and corporate `llms-full.txt`; no
   arbitrary URLs, redirects, headers, methods, credentials, or shell;
@@ -273,10 +275,12 @@ Linear, Wiki, SigNoz, DLA, and optional Site Analytics variables from the curren
 `~/.config/telemetryos`, writes them to ignored mode-0600 `runtime.env`, and
 enables the corresponding reviewed tools. Analytics remains disabled when no
 Site Analytics Token is available. It reports variable names only.
-It also binds `TAG_AION_DEVELOPER_PATH` for the read-only `telemetryos.code`
-tool. Workers may list repositories/files, fixed-string search, and read a
-bounded source range through that capability; never mount the source tree into
-their disposable workspace or add shell/write operations to the code tool.
+It also binds the Aion inventory, owner-only snapshot/index roots, pinned model,
+and GitHub CLI credential-store location for `telemetryos.code`. Run
+`make install-semantic-search` first. Workers may request freshness, list
+repositories/files, run one bounded semantic or fixed-string search, and read a
+bounded source range through that capability; they never receive those paths,
+credentials, a source mount, or shell/write operations.
 Never print, inspect, commit, or paste their values. Mongo access remains
 disabled until `MONGO_QA_URI` exists and a human has opened the security-key
 session; adding it requires an explicit injected-tool allowlist change.

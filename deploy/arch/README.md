@@ -14,6 +14,8 @@ without the same trusted-firewall posture.
 Install or refresh the user unit:
 
 ```bash
+make install-semantic-search
+make sync-tool-env
 mkdir -p ~/.config/systemd/user ~/.local/lib/tos-tag
 go build -trimpath -buildvcs=false -o ~/.local/lib/tos-tag/api ./cmd/api
 cp deploy/arch/tos-tag.service ~/.config/systemd/user/tos-tag.service

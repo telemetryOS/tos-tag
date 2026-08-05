@@ -469,6 +469,9 @@ func TestCompletedToolOperationExposesOnlyToolIdentity(t *testing.T) {
 	if toolID, operationID, resourceAction := completedToolOperation("tos_tag_tool", json.RawMessage(`{"tool_id":"telemetryos.analytics","operation_id":"read","arguments":["account","0123456789abcdef01234567"]}`)); toolID != "telemetryos.analytics" || operationID != "read" || resourceAction != "account" {
 		t.Fatalf("analytics operation=%q/%q/%q", toolID, operationID, resourceAction)
 	}
+	if toolID, operationID, resourceAction := completedToolOperation("tos_tag_tool", json.RawMessage(`{"tool_id":"telemetryos.code","operation_id":"read","arguments":["semantic-search","tos-tag","source freshness"]}`)); toolID != "telemetryos.code" || operationID != "read" || resourceAction != "semantic-search" {
+		t.Fatalf("semantic source operation=%q/%q/%q", toolID, operationID, resourceAction)
+	}
 	if toolID, operationID, resourceAction := completedToolOperation("tos_tag_trigger", json.RawMessage(`{"operation":"list"}`)); toolID != "" || operationID != "" || resourceAction != "" {
 		t.Fatalf("non-marketplace operation leaked as tool completion=%q/%q/%q", toolID, operationID, resourceAction)
 	}

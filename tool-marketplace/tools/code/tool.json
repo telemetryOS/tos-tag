@@ -1,8 +1,8 @@
 {
   "id": "telemetryos.code",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "script": "run.sh",
   "operations": [
-    {"id": "read", "env": ["TAG_AION_DEVELOPER_PATH"], "timeout_seconds": 8, "max_output_bytes": 1048576, "risk": "read"}
+    {"id": "read", "env": ["TAG_AION_DEVELOPER_PATH", "TAG_CODE_SNAPSHOT_ROOT", "TAG_CODE_INDEX_ROOT", "TAG_CODE_MODEL_PATH", "TAG_CODE_GH_CONFIG_DIR"], "timeout_seconds": 120, "max_output_bytes": 1048576, "risk": "read"}
   ]
 }

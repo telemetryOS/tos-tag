@@ -65,10 +65,14 @@ the minimum live operational records needed for delivery safety and audit.
   justify intervention.
 - Workers receive no long-lived credentials or MongoDB connection string.
 - Tool secrets may enter only the exact reviewed subprocess that declares them.
-- Workers receive no direct Aion source mount or shell. `telemetryos.code` is a
-  server-side read capability limited to bounded list/search/read requests and
-  rejects traversal, symlinks, environment files, credential ledgers, and
-  private tool state.
+- Workers receive no direct Aion source mount, GitHub credential, or shell.
+  `telemetryos.code` can refresh only the requested locally inventoried
+  repository's validated `telemetryOS` origin into a server-owned immutable
+  remote-default-branch snapshot. It exposes bounded freshness, exact and
+  pinned offline semantic search/read results while rejecting arbitrary
+  remotes/branches, traversal, symlinks, environment files, credential ledgers,
+  and private tool state. Snapshots and Semble indexes are owner-only because
+  they contain source.
 - The code bundle is rejected at load and execution unless every operation is
   exactly `read` risk. Source edits, patches, commits, pushes, merges, and
   deploys have no worker approval path; the classifier redirects them to

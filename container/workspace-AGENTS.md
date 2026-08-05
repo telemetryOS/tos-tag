@@ -42,11 +42,13 @@ Never treat local Codex session history as runtime authority.
   reads/writes, `telemetryos.code` reads, and
   fixed-host public `telemetryos.product-docs` reads. Non-read
   operations require an exact Slack approval. `telemetryos.code` is the only
-  source capability and provides bounded repository/file listing,
-  fixed-string search, and line reads below `/workspace/code`; it is not a
-  shell or write surface. Its read-only invariant is checked at bundle load and
-  execution, and source mutation requests must be redirected to a Linear bug or
-  feature rather than approved.
+  source capability. It treats `/workspace/code` as inventory, refreshes only a
+  requested validated TelemetryOS origin into immutable owner-only snapshots,
+  and provides freshness, bounded fixed-string/offline-semantic search, line
+  reads, and version evidence. It is not a shell or source-write surface; the
+  worker receives neither GitHub credentials nor paths. Its read-only invariant
+  is checked at bundle load and execution, and source mutation requests must be
+  redirected to a Linear bug or feature rather than approved.
 - Apply the `product-knowledge` skill to TelemetryOS product questions. Retrieve
   internal facts from the Agent Wiki Primer, customer procedures/reference from
   public docs, and published positioning from the corporate full-content

@@ -218,6 +218,12 @@ Run `make sync-tool-env` after those checkouts exist. It imports only the
 documented helper bindings, generates a keystore key if needed, enables the
 reviewed default tools, and writes names and values only to ignored mode-0600
 `runtime.env`. Its terminal output contains variable names, never values.
+Install the pinned local semantic runtime first:
+
+```bash
+make install-semantic-search
+make sync-tool-env
+```
 
 For live Slack, fill the required values in `runtime.env`, set the explicit
 live flags and channel allowlist, then:
@@ -498,7 +504,10 @@ Each job launches `codex app-server --stdio`, performs the official handshake,
 creates an ephemeral thread, registers the scoped dynamic tools, and starts a
 read-only turn with the classifier-selected model and effort. In the live
 development configuration, Codex's first-party web search is unrestricted and
-current; shell commands and subprocesses still have no network access.
+current; worker shell commands and subprocesses still have no network access.
+The separately reviewed source helper is the narrow exception: server-side Git
+may contact only the validated origin of one requested TelemetryOS repository
+to refresh its default-branch snapshot.
 
 ### Model profiles
 
@@ -541,7 +550,7 @@ authority. The reviewed dynamic-tool catalog is the separate allowlist:
 
 | Tool ID | Operations | Approval | Purpose | Default sync |
 | --- | --- | --- | --- | --- |
-| `telemetryos.code` | `read` | Risk-based | Permanently read-only list/search/read and deterministic version evidence for bounded Aion source without a mount or shell | Enabled |
+| `telemetryos.code` | `read` | Risk-based | Permanently source-read-only default-branch freshness, exact search/read, semantic discovery, and deterministic version evidence without a worker mount or shell | Enabled |
 | `telemetryos.product-docs` | `read` | Never | Fixed-host reads of the public docs index/pages and corporate `llms-full.txt` | Enabled |
 | `telemetryos.linear` | `read`, `write` | Risk-based | Linear issue workflows | Enabled |
 | `telemetryos.wiki` | `read`, `write`, `delete` | Never for page read/write; always for recoverable page soft-delete | Page-only Agent Wiki CRUD | Enabled |
@@ -568,11 +577,15 @@ bindings may be returned by a helper only when the manifest marks them
 `public_env` and the value contains no credentials, query, or fragment; all
 tokens and other bindings remain argv-blocked and output-redacted. The same
 setup enables
-`telemetryos.code`, a reviewed read-only view of `TAG_AION_DEVELOPER_PATH` with
-fixed-string search, bounded file reads, and a single-call version-evidence path
-covering manifests, standard build pins, and relevant CI selectors. Full-agent
-workers do not receive a source mount, a generic shell, runtime environment
-files, or credential paths. Tool failures return bounded redacted diagnostics,
+`telemetryos.code`, a reviewed source-read-only view of requested TelemetryOS
+repositories. It refreshes one approved origin on demand into an immutable
+default-branch snapshot, returns a five-minute freshness receipt with the exact
+commit, and provides fixed-string search, bounded file reads, pinned offline
+Semble discovery, and a single-call version-evidence path covering manifests,
+standard build pins, and relevant CI selectors. Git fetches and source-bearing
+semantic indexes exist only in owner-only server state. Full-agent workers do
+not receive a source mount, GitHub credentials, a branch/remote selector, a
+generic shell, runtime environment files, or credential paths. Tool failures return bounded redacted diagnostics,
 produce content-free audit receipts, and appear in the real-time activity feed
 with only tool, operation, and allowlisted action identity.
 The credential-free `telemetryos.product-docs` tool remains separately restricted
@@ -808,6 +821,7 @@ make eval-live            # opt-in 50-case live OpenAI classifier gate
 make security             # gosec + govulncheck
 make verify               # full local gate
 make run-live             # host live runtime from ignored runtime.env
+make install-semantic-search # install pinned Semble and verified local model
 make sync-tool-env         # configure reviewed helper bindings without printing values
 make container-build      # reproducible dev image
 make container-bootstrap  # clone/sync code, skills, Aion, helpers

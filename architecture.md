@@ -352,7 +352,7 @@ The current reviewed catalog is:
 
 | Tool | Risk classes | Approval | Boundary |
 | --- | --- | --- | --- |
-| `telemetryos.code` | `read` | Risk-based | Bounded list/search/read below the server-owned Aion source root; no mount, shell, traversal, symlinks, runtime env, credential ledger, or private tool state |
+| `telemetryos.code` | `read` | Risk-based | On-demand fixed-origin default-branch snapshot freshness plus bounded exact/semantic search/read; no worker mount, credentials, branch/remote selector, shell, traversal, runtime env, or credential ledger |
 | `telemetryos.product-docs` | `read` | Never | Credential-free, fixed-host reads of `docs.telemetryos.com/llms.txt`, its `docs/` or `reference/` Markdown pages, and `www.telemetryos.com/llms-full.txt`; no redirects or arbitrary URLs |
 | `telemetryos.linear` | `read`, `write` | Risk-based | Typed Linear helper operations |
 | `telemetryos.wiki` | `read`, `write`, `delete` | Never for page read/write; always for recoverable page soft-delete | Page-only CRUD; namespace, asset, publish-file, cascading move, activity, undo, and admin operations are unavailable |
@@ -362,9 +362,14 @@ The current reviewed catalog is:
 | `telemetryos.mongo` | `read` | Risk-based | Bounded Mongo fetch operations |
 
 `telemetryos.code` is the only source-tree capability. The worker never receives
-the Aion checkout or its path. The server validates typed read arguments against
-`TAG_AION_DEVELOPER_PATH` and returns only bounded results through the same
-capability gateway.
+the Aion checkout, owner-only snapshots/indexes, their paths, or GitHub
+credentials. For a repository-scoped call, the reviewed server helper validates
+the repository's `telemetryOS` origin, resolves its remote default branch, and
+fetches that branch into a dedicated bare cache without touching the developer
+worktree. It materializes an immutable commit snapshot and content-free
+five-minute freshness receipt. Exact operations and pinned Semble 0.5.3 search
+then read that snapshot; Semble networking is disabled and its verified
+`potion-code-16M-v2` model is local. Source-bearing indexes remain owner-only.
 The tool loader and executor independently reject any `telemetryos.code`
 operation that is not exactly read-only. There is no Slack approval path for
 source edits, patches, commits, pushes, merges, or deployments.
@@ -534,8 +539,9 @@ the browser form.
 
 The development stack uses one Mongo container and a persistent workspace/home
 volume shared by an operator container and the tos-tag service. Persistent data
-includes source checkouts, Aion-managed code, Codex login state, logs, and
-Mongo data. Slack job workspaces remain disposable under
+includes source checkouts, Aion-managed code, immutable default-branch source
+snapshots, source-bearing semantic indexes, Codex login state, logs, and Mongo
+data. Slack job workspaces remain disposable under
 `/workspace/state/workers`.
 
 The host Docker socket is not mounted. Runtime secrets are bind-mounted as one
@@ -545,8 +551,9 @@ does not expand them.
 The same ignored `runtime.env` may be used for host development and can contain
 a host `TAG_AION_DEVELOPER_PATH`. Container startup overrides that value after
 sourcing the file so reviewed source access always binds `/workspace/code`.
-It also replaces host HTTP, Mongo, log, Codex, skill, and tool locations with
-their container-owned addresses.
+It also replaces snapshot, semantic index/model, GitHub credential-store, HTTP,
+Mongo, log, Codex, skill, and tool locations with their container-owned
+addresses.
 
 ## Logging, audit, and retention
 

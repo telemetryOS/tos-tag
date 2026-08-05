@@ -2,7 +2,7 @@ GOVULNCHECK_VERSION := v1.6.0
 GOSEC_VERSION := v2.28.0
 COMPOSE := ./container/docker-compose.sh
 
-.PHONY: fmt test race vet vuln gosec security eval eval-live verify build run run-live sync-tool-env container-build container-bootstrap container-up container-shell container-codex container-codex-login
+.PHONY: fmt test race vet vuln gosec security eval eval-live verify build run run-live install-semantic-search sync-tool-env container-build container-bootstrap container-up container-shell container-codex container-codex-login
 
 fmt:
 	gofmt -w $$(rg --files -g '*.go')
@@ -43,6 +43,9 @@ run:
 run-live:
 	@test -f runtime.env || { echo "runtime.env is required; copy runtime.env.example and fill the live Slack values" >&2; exit 1; }
 	@set -a; . ./runtime.env; set +a; exec go run ./cmd/api
+
+install-semantic-search:
+	@./scripts/install-semantic-search.sh
 
 sync-tool-env:
 	@./scripts/sync-tool-env.sh
