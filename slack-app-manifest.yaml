@@ -15,6 +15,10 @@ features:
       description: Show or change tag's participation mode for this channel
       usage_hint: "observe | assist | proactive"
       should_escape: false
+    - command: /tag-status
+      description: Show tag's current status for this channel
+      usage_hint: Mode, directive, availability, presence, and scope
+      should_escape: false
     - command: /tag-proactive
       description: Set tag to proactive mode in this channel
       usage_hint: Joins the public channel when possible

@@ -174,6 +174,8 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Implement `/tag-directive` modal load/save for every authenticated
   workspace user in an enrolled, enabled channel, plus explicit management-UI
   creation, revision history, activation, and audit.
+- [x] Implement channel-bound `/tag-status` with an ephemeral native Block Kit
+  table for participation, directive, availability, membership, and scope.
 - [x] Persist and reauthorize standard five-field cron routines with explicit
   IANA timezones while advancing legacy interval records safely.
 - [x] Persist classifier-gated cron heartbeat subscriptions and manage them in

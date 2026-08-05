@@ -670,6 +670,22 @@ func TestAssistModeBlocksUnsolicitedDeclarativeAgentWork(t *testing.T) {
 	}
 }
 
+func TestAssistModeBlocksUnsolicitedSourceWriteRedirect(t *testing.T) {
+	redirect := types.ClassificationDecision{
+		Outcome: types.OutcomeReplyInChannel, Confidence: .99,
+		ReasonCodes: []string{"policy.source_write_to_linear"}, ResponseIntent: "redirect source writes to Linear",
+		DirectReply: sourceWriteRedirectReply, SourceWriteRequested: true,
+		DisclosureClass: types.DisclosureDestinationSafe, Reaction: "speech_balloon", AgentModelStrength: "none",
+	}
+	target := Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{
+		Text: "Done Today: [TOSF PWA] Report cache usage ENG-3175 — the browser player now reports its cache stats, so the Cache Information card shows hit rate, cache size, and image/video counts instead of blanks; background images are cached and counted as images. Also make sure the remote cache-clear command actually removed the stored media.",
+	}}
+	result := EnforceParticipation(Result{Predicted: redirect, Effective: redirect}, target, types.ContextPackRevision{})
+	if result.Predicted.Outcome != types.OutcomeReplyInChannel || result.Effective.Outcome != types.OutcomeSilent || !result.Shadowed || !slices.Contains(result.Effective.ReasonCodes, "policy.unsolicited_assist_work") {
+		t.Fatalf("unsolicited source-write redirect was admitted: %#v", result)
+	}
+}
+
 func TestAssistInitiativeRequiresARealInvocationSignal(t *testing.T) {
 	decision := types.ClassificationDecision{
 		Outcome: types.OutcomeStartBackgroundJob, Confidence: .99,

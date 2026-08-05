@@ -287,6 +287,14 @@ func TestAmbientPolicyCorrectionsSurfaceAlignmentAndEnforceAdmittedPlacement(t *
 	if reportUpdate.Outcome != types.OutcomeSilent || reportUpdate.SourceWriteRequested || reportUpdate.DirectReply != "" || !slices.Contains(reportUpdate.ReasonCodes, "policy.unconfirmed_source_write_ignored") {
 		t.Fatalf("unconfirmed provider source-write flag changed an ambient report update: %#v", reportUpdate)
 	}
+	doneTodayText := "Done Today: [TOSF PWA] Report cache usage ENG-3175 — the browser player now reports its cache stats, so the Cache Information card shows hit rate, cache size, and image/video counts instead of blanks; background images are cached and counted as images. Also make sure the remote cache-clear command actually removed the stored media."
+	if isObviousSourceWriteRequest(doneTodayText) {
+		t.Fatal("declarative Done Today update was mistaken for a source mutation request")
+	}
+	doneToday := withSourceWritePolicyCorrections(types.ClassificationDecision{Outcome: types.OutcomeSilent, Confidence: .99, ReasonCodes: []string{"ambient_declarative_update", "no_action_requested"}, SourceWriteRequested: true, DirectReply: sourceWriteRedirectReply}, Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Text: doneTodayText}})
+	if doneToday.Outcome != types.OutcomeSilent || doneToday.SourceWriteRequested || doneToday.DirectReply != "" || !slices.Contains(doneToday.ReasonCodes, "policy.unconfirmed_source_write_ignored") {
+		t.Fatalf("provider source-write overreach changed a Done Today update: %#v", doneToday)
+	}
 	if !isObviousSourceWriteRequest("Please commit the dependency fix") || !isObviousSourceWriteRequest("Please push the repaired branch") || !isObviousSourceWriteRequest("Please deploy the change") {
 		t.Fatal("explicit repository operations were not recognized as source writes")
 	}

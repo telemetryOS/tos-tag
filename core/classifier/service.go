@@ -111,7 +111,7 @@ func (s *Service) RequiresProviderCall(target Target) bool {
 // admission so a future classifier implementation cannot bypass the rule.
 func EnforceParticipation(result Result, target Target, pack types.ContextPackRevision) Result {
 	effective := result.Effective
-	if target.Mode != types.ModeAssist || effective.DirectReply != "" || !outcomeNeedsAgent(effective.Outcome) {
+	if target.Mode != types.ModeAssist || !outcomeNeedsAgent(effective.Outcome) {
 		return result
 	}
 	if assistInitiativeAuthorized(target, pack, effective) {

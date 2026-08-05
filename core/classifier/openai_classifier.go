@@ -838,9 +838,10 @@ func isObviousSourceWriteRequest(text string) bool {
 		"deploy the ", "deploy this", "please deploy ", "ship the ", "ship this",
 	)
 	engineeringAction := containsAny(lower, "implement ", "refactor ", "patch ", "fix the bug", "fix this bug", "fix that bug", "fix the regression", "build the feature", "add support for ", "remove support for ")
-	// Do not use the loose prefix " pr" here: it also matches product words
-	// such as "Premium" and turns ordinary plan questions into write requests.
-	sourceSurface := containsAny(lower, " code", "codebase", " source", " repo", "repository", " pull request", " branch", " commit")
+	// Match source nouns as whole words. Loose prefixes such as " repo" and
+	// " pr" also match ordinary status-report words such as "reports" and
+	// product names such as "Premium".
+	sourceSurface := containsAnyWholeWord(lower, "code", "codebase", "source", "repo", "repository", "branch", "commit") || strings.Contains(lower, "pull request")
 	// tos-tag is itself a repository/source surface. Match the mutation verb and
 	// name together so a normal <@tos-tag> mention is not mistaken for a write.
 	namedRepoMutation := containsAny(lower,
@@ -851,6 +852,18 @@ func isObviousSourceWriteRequest(text string) bool {
 	// are handled only by the explicit request phrases above; do not let one noun
 	// satisfy both the source-surface and mutation-action sides of this check.
 	return explicit || engineeringAction || namedRepoMutation || (sourceSurface && containsAny(lower, "edit", "change", "modify", "update", "write", "fix", "add", "remove", "rename", "delete"))
+}
+
+func containsAnyWholeWord(text string, words ...string) bool {
+	tokens := strings.FieldsFunc(text, func(character rune) bool {
+		return !unicode.IsLetter(character) && !unicode.IsNumber(character)
+	})
+	for _, word := range words {
+		if slices.Contains(tokens, word) {
+			return true
+		}
+	}
+	return false
 }
 
 func withReadOnlyCodeAnalysisPolicyCorrections(decision types.ClassificationDecision, target Target, profiles []advertisedAgentProfile) types.ClassificationDecision {

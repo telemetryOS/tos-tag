@@ -46,8 +46,9 @@ influence an answer sent elsewhere.
   requires streamed agent responses to reply to a thread.
 - Supports Slack-native exact-action approvals, channel directive modals,
   `/tag-proactive`, `/tag-assist`, and `/tag-off` level commands plus the
-  compatible `/tag-mode` status/change command, cron-scheduled routines, and
-  classifier-gated cron trigger subscriptions with explicit IANA timezones.
+  compatible `/tag-mode` change command and ephemeral `/tag-status` Block Kit
+  table, cron-scheduled routines, and classifier-gated cron trigger
+  subscriptions with explicit IANA timezones.
 - Records correlated redacted logs, usage, and append-only audit receipts.
 
 ### Verified development posture
@@ -415,6 +416,12 @@ to leave, which keeps the channel silent even when Slack refuses the leave (for
 example, in the workspace's general channel). `/tag-mode` remains available
 for status and compatibility: `/tag-mode observe | assist | proactive`.
 
+`/tag-status` returns an ephemeral native Block Kit table for the current
+channel. It shows the durable participation mode and behavior, active directive
+revision and a bounded prompt preview, workspace/channel availability, Tag's
+reconciled Slack membership, and whether the channel is public or restricted.
+The command is read-only and includes shortcuts for the four channel controls.
+
 With `TAG__SLACK__AUTO_ASSIST_JOINED_CHANNELS=true`, Slack membership owns the
 `observe`/`assist` transition for public and private channels. Startup
 reconciles the human-authorized context inventory against a separate bot-token
@@ -659,6 +666,8 @@ remains bound to an enrolled, non-disabled channel in that Slack installation;
 it does not reuse the reviewed-action approver list. Directives are revisioned
 in MongoDB, audited, and supplied to both classifier and full agent. Operators
 can also create a directive for any available channel from the management UI.
+`/tag-status` is available in the same workspace and reports only the invoking
+channel's policy and directive in an ephemeral response.
 
 ### Logging and audit
 

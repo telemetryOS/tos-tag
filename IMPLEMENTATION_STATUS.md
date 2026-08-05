@@ -104,6 +104,8 @@ commands, tests, and active documentation have been removed.
 - `/tag-directive` Slack modal available to every authenticated workspace user
   for an enrolled, enabled channel, plus management-UI creation, revisioned
   Mongo persistence, and audit.
+- Read-only `/tag-status` command with an ephemeral native Block Kit table for
+  mode, active directive, availability, bot membership, and channel scope.
 - Standard five-field cron routines and classifier-gated heartbeat trigger
   subscriptions with explicit IANA timezones, legacy interval compatibility,
   and a combined management Automation view/editor.

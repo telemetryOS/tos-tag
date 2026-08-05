@@ -56,8 +56,8 @@ Never encode live IDs/secrets in tracked files.
 - `core/jobs`, `core/sessions`, `core/deliveries`: leased execution,
   generations, typed output, and durable Slack delivery.
 - `core/slack`: Socket Mode ingress, Block Kit rendering, interactions, the
-  `/tag-directive` modal, and the `/tag-mode` participation-mode command, plus
-  Slack-native Thinking Steps streaming for
+  `/tag-directive` modal, the `/tag-mode` participation-mode command, and the
+  read-only `/tag-status` native table, plus Slack-native Thinking Steps streaming for
   admitted full-agent work; durable one-time context bootstrap and proactively
   paced post-watermark catch-up for direct messages missed while offline.
 - `core/approvals`: exact-action Slack approval/resume.

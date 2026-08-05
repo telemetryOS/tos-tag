@@ -521,6 +521,13 @@ membership-managed participation so reconciliation cannot revert it. The
 management Channel coverage page offers the same control as an inline
 dropdown.
 
+`/tag-status` is a read-only, workspace- and channel-bound inspection command.
+It acknowledges with an ephemeral native Block Kit table containing the
+resolved participation behavior, bounded active-directive preview and revision,
+availability/kill-switch state, reconciled bot membership, and public versus
+restricted scope. A directive lookup failure degrades only that row; policy
+lookup fails closed for the entire response.
+
 Routines enqueue ordinary reauthorized jobs on a standard five-field cron
 schedule with an explicit IANA timezone. Trigger subscriptions wake on the
 same cron model, rebuild the full destination-safe context, run the direct

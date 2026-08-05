@@ -803,6 +803,114 @@ func TestModeCommandRemainsWorkspaceBoundAndPassesRequestedMode(t *testing.T) {
 	}
 }
 
+func TestStatusCommandRemainsReadOnlyAndChannelBound(t *testing.T) {
+	options := LiveOptions{OrganizationID: "org", AppID: "A123", TeamID: "T123"}
+	request, eligible, err := NormalizeStatusCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: statusSlashCommand})
+	if err != nil || !eligible || request.OrganizationID != "org" || request.WorkspaceID != "T123" || request.ChannelID != "C_ALERTS" || request.UserID != "U_ADMIN" || request.Command != statusSlashCommand || request.Mode != "" {
+		t.Fatalf("request=%#v eligible=%v err=%v", request, eligible, err)
+	}
+	if _, eligible, err := NormalizeStatusCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: modeSlashCommand}); err != nil || eligible {
+		t.Fatalf("mode command leaked into status normalization: eligible=%v err=%v", eligible, err)
+	}
+	for name, command := range map[string]slackapi.SlashCommand{
+		"cross-workspace": {APIAppID: "A123", TeamID: "T999", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: statusSlashCommand},
+		"arguments":       {APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: statusSlashCommand, Text: "verbose"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := NormalizeStatusCommand(options, command); err == nil {
+				t.Fatal("invalid status command was accepted")
+			}
+		})
+	}
+}
+
+func TestStatusCommandReturnsEphemeralNativeTableWithoutChangingMode(t *testing.T) {
+	transport := newFakeSocketModeTransport()
+	ingress := &LiveIngress{
+		options: LiveOptions{OrganizationID: "org", TeamID: "team", BotUserID: "U_TAG"},
+		client:  transport,
+	}
+	modeCalls := 0
+	ingress.SetModeChangeHandler(func(_ context.Context, request ModeChangeRequest) (ModeChangeResult, error) {
+		modeCalls++
+		if request.Mode != "" {
+			t.Fatalf("status attempted to change mode to %q", request.Mode)
+		}
+		return ModeChangeResult{Mode: "assist", Previous: "assist", Enrolled: true, Restricted: true, WorkspaceEnabled: true, BotMembershipKnown: true}, nil
+	})
+	directiveCalls := 0
+	ingress.SetDirectiveConfigurationHandlers(func(_ context.Context, request DirectiveConfigurationRequest) (DirectiveConfiguration, error) {
+		directiveCalls++
+		if request.OrganizationID != "org" || request.WorkspaceID != "team" || request.ChannelID != "C_PRIVATE" || request.UserID != "U_ADMIN" {
+			t.Fatalf("directive request=%#v", request)
+		}
+		return DirectiveConfiguration{Prompt: "Investigate alerts and report evidence.", Revision: 3}, nil
+	}, nil)
+
+	ingress.handleStatusCommand(context.Background(), blackbox.New(), "E_STATUS", ModeChangeRequest{OrganizationID: "org", WorkspaceID: "team", ChannelID: "C_PRIVATE", UserID: "U_ADMIN", Command: statusSlashCommand})
+	var payload map[string]any
+	select {
+	case raw := <-transport.payload:
+		var ok bool
+		payload, ok = raw.(map[string]any)
+		if !ok {
+			t.Fatalf("ack payload type = %T", raw)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("status command was not acknowledged")
+	}
+	if modeCalls != 1 || directiveCalls != 1 || payload["response_type"] != "ephemeral" || !strings.Contains(fmt.Sprint(payload["text"]), "assist") {
+		t.Fatalf("mode_calls=%d directive_calls=%d payload=%#v", modeCalls, directiveCalls, payload)
+	}
+	blocks, ok := payload["blocks"].([]slackapi.Block)
+	if !ok || len(blocks) != 3 {
+		t.Fatalf("status blocks=%#v", payload["blocks"])
+	}
+	table, ok := blocks[1].(*slackapi.TableBlock)
+	if !ok || len(table.Rows) != 5 || len(table.ColumnSettings) != 2 || !table.ColumnSettings[1].IsWrapped {
+		t.Fatalf("status table=%#v", blocks[1])
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"type":"table"`, `"Participation"`, `"assist —`, `"Revision 3`, `"Availability"`, `"Enabled"`, `"Tag presence"`, `"Not joined —`, `"Channel scope"`, `"Private or restricted —`, `/tag-directive`} {
+		if !strings.Contains(string(encoded), expected) {
+			t.Fatalf("status response missing %q: %s", expected, encoded)
+		}
+	}
+}
+
+func TestStatusResponseBoundsDirectiveAndDegradesItsLookupIndependently(t *testing.T) {
+	longDirective := strings.Repeat("evidence ", 400)
+	response := ephemeralStatusResponse(
+		ModeChangeResult{Mode: "proactive", Enrolled: true, WorkspaceEnabled: true, BotMembershipKnown: true, BotIsMember: true},
+		DirectiveConfiguration{Prompt: longDirective, Revision: 9},
+		true,
+	)
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) >= 10000 || !strings.Contains(string(encoded), `Revision 9`) || !strings.Contains(string(encoded), `…`) || !strings.Contains(string(encoded), `proactive`) || !strings.Contains(string(encoded), `Joined`) {
+		t.Fatalf("bounded status response=%s", encoded)
+	}
+
+	unavailable, err := json.Marshal(ephemeralStatusResponse(
+		ModeChangeResult{Mode: "observe", KillSwitched: true, BotMembershipKnown: false},
+		DirectiveConfiguration{},
+		false,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`Unavailable`, `workspace disabled`, `channel not enrolled`, `kill switch active`, `membership has not been reconciled`} {
+		if !strings.Contains(string(unavailable), expected) {
+			t.Fatalf("degraded status response missing %q: %s", expected, unavailable)
+		}
+	}
+}
+
 func TestFixedModeCommandsMapToExistingParticipationModes(t *testing.T) {
 	options := LiveOptions{OrganizationID: "org", AppID: "A123", TeamID: "T123"}
 	tests := map[string]string{

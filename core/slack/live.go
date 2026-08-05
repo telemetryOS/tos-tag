@@ -29,6 +29,7 @@ const (
 	proactiveSlashCommand   = "/tag-proactive"
 	assistSlashCommand      = "/tag-assist"
 	offSlashCommand         = "/tag-off"
+	statusSlashCommand      = "/tag-status"
 )
 
 type LiveOptions struct {
@@ -374,6 +375,16 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 					s.handleModeCommand(ctx, eventLogger, event.Request.EnvelopeID, modeRequest)
 					continue
 				}
+				statusRequest, statusEligible, statusErr := NormalizeStatusCommand(s.options, event.Data)
+				if statusErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", statusErr)}).Error("Slack status command rejected")
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralCommandResponse("Usage: `/tag-status` — run it without arguments in the channel you want to inspect."))
+					continue
+				}
+				if statusEligible {
+					s.handleStatusCommand(ctx, eventLogger, event.Request.EnvelopeID, statusRequest)
+					continue
+				}
 				command, eligible, normalizeErr := NormalizeDirectiveCommand(s.options, event.Data)
 				if normalizeErr != nil {
 					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", normalizeErr)}).Error("Slack directive command rejected")
@@ -683,6 +694,46 @@ func (s *LiveIngress) handleModeCommand(ctx context.Context, eventLogger *blackb
 	commandLogger.WithCtx(blackbox.Ctx{"effective_mode": result.Mode, "changed": result.Changed}).Info("Slack mode command handled")
 }
 
+func (s *LiveIngress) handleStatusCommand(ctx context.Context, eventLogger *blackbox.Logger, envelopeID string, request ModeChangeRequest) {
+	commandLogger := eventLogger.WithCtx(blackbox.Ctx{"channel_id": request.ChannelID, "actor_id": request.UserID, "command": request.Command})
+	s.mu.Lock()
+	loadMode := s.modeChange
+	loadDirective := s.directiveLoad
+	s.mu.Unlock()
+	if loadMode == nil {
+		commandLogger.Error("Slack status command has no configuration handler")
+		_ = s.client.AckCtx(ctx, envelopeID, ephemeralCommandResponse("Tag's channel status is not available right now."))
+		return
+	}
+	policy, policyErr := loadMode(ctx, request)
+	if policyErr != nil {
+		commandLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", policyErr)}).Warn("Slack status command policy lookup failed")
+		_ = s.client.AckCtx(ctx, envelopeID, ephemeralCommandResponse("Tag's channel status is not available in this channel right now."))
+		return
+	}
+
+	directive := DirectiveConfiguration{}
+	directiveAvailable := loadDirective != nil
+	if loadDirective != nil {
+		var directiveErr error
+		directive, directiveErr = loadDirective(ctx, DirectiveConfigurationRequest{
+			OrganizationID: request.OrganizationID,
+			WorkspaceID:    request.WorkspaceID,
+			ChannelID:      request.ChannelID,
+			UserID:         request.UserID,
+		})
+		if directiveErr != nil {
+			directiveAvailable = false
+			commandLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", directiveErr)}).Warn("Slack status command directive lookup failed")
+		}
+	}
+	if ackErr := s.client.AckCtx(ctx, envelopeID, ephemeralStatusResponse(policy, directive, directiveAvailable)); ackErr != nil {
+		commandLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", ackErr)}).Error("Slack status command acknowledgement failed")
+		return
+	}
+	commandLogger.WithCtx(blackbox.Ctx{"effective_mode": policy.Mode, "directive_revision": directive.Revision, "directive_available": directiveAvailable}).Info("Slack status command handled")
+}
+
 type modeMembershipResult struct {
 	changed bool
 	joined  bool
@@ -820,6 +871,29 @@ func NormalizeModeCommand(options LiveOptions, data any) (ModeChangeRequest, boo
 	}, true, nil
 }
 
+// NormalizeStatusCommand validates the read-only, channel-scoped /tag-status
+// command. It returns the same scope shape used by a mode inspection, always
+// with an empty Mode so the durable participation policy cannot be changed.
+func NormalizeStatusCommand(options LiveOptions, data any) (ModeChangeRequest, bool, error) {
+	command, ok, err := normalizeSlashCommand(data)
+	if err != nil || !ok {
+		return ModeChangeRequest{}, false, err
+	}
+	if command.Command != statusSlashCommand {
+		return ModeChangeRequest{}, false, nil
+	}
+	if command.TeamID != options.TeamID || (command.APIAppID != "" && command.APIAppID != options.AppID) || command.ChannelID == "" || command.UserID == "" || strings.TrimSpace(command.Text) != "" {
+		return ModeChangeRequest{}, false, errors.New("Slack status command scope is invalid")
+	}
+	return ModeChangeRequest{
+		OrganizationID: options.OrganizationID,
+		WorkspaceID:    command.TeamID,
+		ChannelID:      command.ChannelID,
+		UserID:         command.UserID,
+		Command:        command.Command,
+	}, true, nil
+}
+
 func NormalizeDirectiveCommand(options LiveOptions, data any) (directiveCommand, bool, error) {
 	command, ok, err := normalizeSlashCommand(data)
 	if err != nil || !ok {
@@ -902,6 +976,106 @@ func directiveModal(request DirectiveConfigurationRequest, current DirectiveConf
 
 func ephemeralCommandResponse(message string) map[string]any {
 	return map[string]any{"response_type": "ephemeral", "text": message}
+}
+
+func ephemeralStatusResponse(policy ModeChangeResult, directive DirectiveConfiguration, directiveAvailable bool) map[string]any {
+	table := slackapi.NewTableBlock("tos_tag_channel_status").WithColumnSettings(
+		slackapi.ColumnSetting{Align: slackapi.ColumnAlignmentLeft, IsWrapped: true},
+		slackapi.ColumnSetting{Align: slackapi.ColumnAlignmentLeft, IsWrapped: true},
+	)
+	addStatusRow := func(label, value string) {
+		table.AddRow(slackapi.NewTableRawTextCell(label), slackapi.NewTableRawTextCell(value))
+	}
+	addStatusRow("Participation", statusModeDescription(policy.Mode))
+	addStatusRow("Directive", statusDirectiveDescription(directive, directiveAvailable))
+	addStatusRow("Availability", statusAvailabilityDescription(policy))
+	addStatusRow("Tag presence", statusPresenceDescription(policy))
+	addStatusRow("Channel scope", statusScopeDescription(policy))
+
+	header := slackapi.NewSectionBlock(
+		slackapi.NewTextBlockObject("mrkdwn", "*Tag channel status*", false, false),
+		nil,
+		nil,
+	)
+	footer := slackapi.NewContextBlock(
+		"tos_tag_channel_status_controls",
+		slackapi.NewTextBlockObject("mrkdwn", "Controls: `/tag-assist` · `/tag-proactive` · `/tag-off` · `/tag-directive`", false, false),
+	)
+	return map[string]any{
+		"response_type": "ephemeral",
+		"text":          "Tag channel status: " + policy.Mode,
+		"blocks":        []slackapi.Block{header, table, footer},
+	}
+}
+
+func statusModeDescription(mode string) string {
+	switch mode {
+	case "observe":
+		return "off (observe) — retains authorized context but does not react or answer"
+	case "mention":
+		return "mention — responds to direct mentions and active Tag threads"
+	case "assist":
+		return "assist — answers useful ambient questions and authorized interventions"
+	case "proactive":
+		return "proactive — may start classifier-approved background work"
+	case "":
+		return "Unknown"
+	default:
+		return mode
+	}
+}
+
+func statusDirectiveDescription(directive DirectiveConfiguration, available bool) string {
+	if !available {
+		return "Unavailable"
+	}
+	if strings.TrimSpace(directive.Prompt) == "" || directive.Revision <= 0 {
+		return "No channel directive is configured"
+	}
+	prompt := strings.Join(strings.Fields(directive.Prompt), " ")
+	const maximumRunes = 1200
+	runes := []rune(prompt)
+	if len(runes) > maximumRunes {
+		prompt = string(runes[:maximumRunes-1]) + "…"
+	}
+	return fmt.Sprintf("Revision %d — %s", directive.Revision, prompt)
+}
+
+func statusAvailabilityDescription(policy ModeChangeResult) string {
+	issues := make([]string, 0, 3)
+	if !policy.WorkspaceEnabled {
+		issues = append(issues, "workspace disabled")
+	}
+	if !policy.Enrolled {
+		issues = append(issues, "channel not enrolled")
+	}
+	if policy.KillSwitched {
+		issues = append(issues, "channel kill switch active")
+	}
+	if len(issues) == 0 {
+		return "Enabled"
+	}
+	return "Unavailable — " + strings.Join(issues, "; ")
+}
+
+func statusPresenceDescription(policy ModeChangeResult) string {
+	if !policy.BotMembershipKnown {
+		return "Unknown — Slack membership has not been reconciled"
+	}
+	if policy.BotIsMember {
+		return "Joined"
+	}
+	if policy.Restricted {
+		return "Not joined — invite Tag to this private channel if active participation is wanted"
+	}
+	return "Not joined"
+}
+
+func statusScopeDescription(policy ModeChangeResult) string {
+	if policy.Restricted {
+		return "Private or restricted — context and output stay channel-local"
+	}
+	return "Public channel"
 }
 
 func NormalizeApprovalInteraction(options LiveOptions, data any) (ApprovalInteraction, bool, error) {
