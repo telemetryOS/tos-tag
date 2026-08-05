@@ -294,7 +294,7 @@ func (w *WorkerCodex) Prompt(ctx context.Context, sessionID string, prompt Promp
 		"ephemeral":             true,
 		"serviceName":           "tos-tag",
 		"config": map[string]any{
-			"features":                 map[string]any{"shell_tool": false, "plugins": false},
+			"features":                 map[string]any{"shell_tool": false, "plugins": false, "image_generation": false},
 			"agents":                   map[string]any{"enabled": false},
 			"tools":                    map[string]any{"web_search": w.webSearchMode != "disabled"},
 			"web_search":               w.webSearchMode,

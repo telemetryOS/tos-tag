@@ -147,6 +147,39 @@ func (*imageHarness) Permission(context.Context, string, harness.PermissionDecis
 }
 func (*imageHarness) Abort(context.Context, string) error { return nil }
 
+type imageGenerationHarness struct {
+	native bool
+	curds  bool
+	file   bool
+}
+
+func (*imageGenerationHarness) Health(context.Context) error { return nil }
+func (*imageGenerationHarness) CreateSession(context.Context, string) (harness.Session, error) {
+	return harness.Session{ID: "image-generation-session", CreatedAt: time.Now().UTC()}, nil
+}
+func (*imageGenerationHarness) Prompt(context.Context, string, harness.Prompt) error { return nil }
+func (h *imageGenerationHarness) Events(context.Context, string) (<-chan harness.Event, <-chan error) {
+	events := make(chan harness.Event, 4)
+	errs := make(chan error)
+	if h.native {
+		events <- harness.Event{Type: "tool.execution.started", Data: map[string]any{"tool_id": "openai.image-generation", "operation_id": "generate"}}
+	}
+	if h.curds {
+		events <- harness.Event{Type: "tool.execution.completed", Data: map[string]any{"tool_id": "media.curds", "operation_id": "generate"}}
+	}
+	if h.file {
+		events <- harness.Event{Type: "file.produced", Data: map[string]any{"file": types.SlackFileUpload{Name: "generated.webp", MediaType: "image/webp", Data: []byte("RIFF\x00\x00\x00\x00WEBPVP8 ")}}}
+	}
+	events <- harness.Event{Type: "message.delta", Data: map[string]any{"text": `{"segments":[{"kind":"mrkdwn_text","text":"generated"}]}`}}
+	close(events)
+	close(errs)
+	return events, errs
+}
+func (*imageGenerationHarness) Permission(context.Context, string, harness.PermissionDecision) error {
+	return nil
+}
+func (*imageGenerationHarness) Abort(context.Context, string) error { return nil }
+
 type staticImageMedia struct{ data []byte }
 
 func (m staticImageMedia) DownloadImages(context.Context, string, []types.SlackImageRef) ([]types.SlackImageData, error) {
@@ -925,6 +958,38 @@ func TestExplicitImageGenerationIntentIsBounded(t *testing.T) {
 		if explicitImageGenerationRequested(value) {
 			t.Fatalf("non-generation request accepted: %q", value)
 		}
+	}
+}
+
+func TestExplicitImageGenerationRequiresReviewedCurdsArtifact(t *testing.T) {
+	cfg := config.DefaultConfiguration
+	cfg.Jobs.Lease = time.Minute
+	job := jobs.Job{
+		ID: "job-generate-image", OrganizationID: "org-test", WorkspaceID: "team-test", ChannelID: "tos-tag",
+		Input:         `{"request":"make me a photo of a puppy","image_generation_requested":true}`,
+		ResolvedModel: types.ResolvedModel{ProviderID: "openai", ModelID: "gpt-5.6-luna", Variant: "medium"},
+	}
+
+	for name, h := range map[string]*imageGenerationHarness{
+		"claim_without_tool": {},
+		"native_tool":        {native: true},
+		"curds_without_file": {curds: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := &Pipeline{deps: Dependencies{Config: &cfg, Harness: h}}
+			if _, err := p.runHarness(context.Background(), job); err == nil {
+				t.Fatal("image generation succeeded without a reviewed Curds artifact")
+			}
+		})
+	}
+
+	p := &Pipeline{deps: Dependencies{Config: &cfg, Harness: &imageGenerationHarness{curds: true, file: true}}}
+	result, err := p.runHarness(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Files) != 1 || result.AgentFooter == nil || len(result.AgentFooter.Activities) != 1 || result.AgentFooter.Activities[0] != "Curds image generation" {
+		t.Fatalf("result=%#v", result)
 	}
 }
 

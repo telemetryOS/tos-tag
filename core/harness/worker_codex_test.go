@@ -258,6 +258,10 @@ func TestWorkerCodexUsesEphemeralReadOnlyAppServerTurnWithLiveWebSearch(t *testi
 	if !ok || threadTools["web_search"] != true {
 		t.Fatalf("thread tools = %#v", threadConfig["tools"])
 	}
+	threadFeatures, ok := threadConfig["features"].(map[string]any)
+	if !ok || threadFeatures["image_generation"] != false {
+		t.Fatalf("thread features = %#v", threadConfig["features"])
+	}
 	if manager.turn["effort"] != "max" || manager.turn["approvalPolicy"] != "never" {
 		t.Fatalf("turn params = %#v", manager.turn)
 	}

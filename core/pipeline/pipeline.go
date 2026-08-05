@@ -115,7 +115,7 @@ const currentAgentRuntimeContract = `Current tos-tag runtime facts are authorita
 - Customer setup, operation, Studio workflow, device/Edge, SDK/API, authentication, compatibility, and troubleshooting questions use the injected telemetryos-documentation skill: read telemetryos.product-docs/read docs-index, then fetch the exact indexed page with telemetryos.product-docs/read docs-page before answering.
 - Every TelemetryOS marketing-copy request uses the injected marketing-messaging skill and must read the full corporate source with telemetryos.product-docs/read corporate-full in the same attempt before drafting.
 - Every product answer includes concise clickable links to the authoritative sources materially used. This is automatic; never wait for the requester to ask for citations or links.
-- Slack image attachments are trusted visual inputs only after the control plane supplies them as local images. Never claim to see an attachment that is unavailable. Explicit image-generation requests use the injected curds skill and reviewed media.curds/generate operation; the control plane owns the API key, artifact bytes, and Slack destination.
+- Slack image attachments are trusted visual inputs only after the control plane supplies them as local images. Never claim to see an attachment that is unavailable. Explicit image-generation requests must use the injected curds skill and reviewed media.curds/generate operation; native OpenAI image generation is disabled and is not a valid completion path. Do not claim success unless Curds produced a file for the control plane to publish. The control plane owns the API key, artifact bytes, and Slack destination.
 - A Wiki namespace/slug is an internal lookup identifier, not a usable citation. If referencing an existing Wiki page, use only the exact human HTTPS URL returned by telemetryos.wiki/read get or url as a descriptive Slack link; never reconstruct an opaque page URL. Every reviewed get returns the full page envelope, including that URL.
 Historical conversation may describe earlier implementations. Treat any source that conflicts with these current facts as stale context: do not repeat it as the present architecture and do not use it to qualify an otherwise answerable current-system question.`
 
@@ -2114,6 +2114,7 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 	producedFileBytes := 0
 	resolvedWikiReferenceURLs := make(map[string]string)
 	completedToolOperations := make(map[string]struct{})
+	curdsGenerationCompleted := false
 	reportedToolStatuses := make(map[string]string)
 	usedSkills := make(map[string]struct{})
 	usedActivities := make(map[string]struct{})
@@ -2153,6 +2154,9 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 			} else if event.Type == "tool.validation.failed" || event.Type == "tool.execution.started" || event.Type == "tool.execution.completed" || event.Type == "tool.execution.failed" {
 				toolID, _ := event.Data["tool_id"].(string)
 				operationID, _ := event.Data["operation_id"].(string)
+				if toolID == "openai.image-generation" {
+					return types.SlackResult{}, errors.New("native image generation is not an admitted artifact path; reviewed Curds is required")
+				}
 				validationCode, _ := event.Data["validation_code"].(string)
 				if !safeToolValidationCode(validationCode) {
 					validationCode = ""
@@ -2177,6 +2181,9 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 					if event.Type == "tool.execution.completed" {
 						phase = agentStatusComplete
 						completedToolOperations[toolID+"/"+operationID+"/"+resourceAction] = struct{}{}
+						if toolID == "media.curds" && operationID == "generate" {
+							curdsGenerationCompleted = true
+						}
 					} else if event.Type == "tool.execution.failed" && validationCode == "" {
 						phase = agentStatusError
 					}
@@ -2286,6 +2293,9 @@ func (p *Pipeline) runHarness(ctx context.Context, job jobs.Job) (types.SlackRes
 	if policyFlags.ProductRetrievalRequired && !authoritativeProductRetrievalCompleted(completedToolOperations) {
 		return types.SlackResult{}, errors.New("authoritative product retrieval was required but not completed")
 	}
+	if policyFlags.ImageGenerationRequested && (!curdsGenerationCompleted || len(producedFiles) == 0) {
+		return types.SlackResult{}, errors.New("explicit image generation was requested but Curds produced no publishable file")
+	}
 	durationMS := time.Since(started).Milliseconds()
 	if p.deps.Usage != nil {
 		inputTokens, outputTokens := reportedUsage.InputTokens, reportedUsage.OutputTokens
@@ -2366,6 +2376,8 @@ func safeToolAgentStatus(toolID, operationID, resourceAction string, phase agent
 	}
 	title := statusVerb(phase, "Using a reviewed tool…", "Reviewing tool results…", "Recovering from a tool error…")
 	switch toolID {
+	case "media.curds":
+		title = statusVerb(phase, "Generating an image with Curds…", "Reviewing the Curds image…", "Recovering from a Curds generation error…")
 	case "telemetryos.wiki":
 		if operationID == "read" {
 			title = statusVerb(phase, "Consulting Agent Wiki…", "Reviewing Agent Wiki results…", "Recovering from an Agent Wiki error…")
@@ -2427,6 +2439,8 @@ func safeToolAgentStatus(toolID, operationID, resourceAction string, phase agent
 
 func safeFooterActivity(toolID, _ string, resourceAction string) string {
 	switch toolID {
+	case "media.curds":
+		return "Curds image generation"
 	case "telemetryos.wiki":
 		return "wiki"
 	case "telemetryos.product-docs":
@@ -2567,6 +2581,7 @@ func agentConversationFocus(envelope types.SlackEnvelope, sources []types.Contex
 type agentPolicyFlags struct {
 	SourceWriteRequested     bool `json:"source_write_requested"`
 	ProductRetrievalRequired bool `json:"authoritative_product_retrieval_required"`
+	ImageGenerationRequested bool `json:"image_generation_requested"`
 }
 
 func agentInputPolicyFlags(input string) agentPolicyFlags {
