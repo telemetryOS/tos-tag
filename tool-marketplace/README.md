@@ -29,6 +29,7 @@ worker admission and cannot be converted into a response or approval.
 | `telemetryos.wiki` | `read`, `write`, `delete` | Never for read/write; always for recoverable page soft-delete | `WIKI_URL`, `WIKI_TOKEN` |
 | `telemetryos.otel` | `read` | Risk-based | `SIGNOZ_URL`, `SIGNOZ_API_KEY` |
 | `telemetryos.analytics` | `read` | Never | `TELEMETRYOS_ANALYTICS_URL` (validated public origin), `SITE_ANALYTICS_TOKEN` |
+| `attio.crm` | `read`, `write`, `delete` | Risk-based | `ATTIO_ACCESS_TOKEN` |
 | `telemetryos.device-logs` | `read`, `write` | Risk-based | `DLA_API_BASE_URL`, `DLA_API_KEY`, `DLA_ENV` |
 | `telemetryos.mongo` | `read` | Risk-based | `MONGO_QA_URI` |
 
@@ -76,6 +77,13 @@ credentials, internal-event inclusion, visitor/session lookup, or exports. The
 Site Analytics Token is supplied to curl through a mode-0600 temporary config,
 never argv, and returned JSON is filtered to remove direct identifiers,
 free-form event properties, and self-reported customer text.
+`tools/attio/run.sh` is copied from
+`tag-agent-skills/src/skills/attio/scripts/attio.sh`. It fixes the origin to
+`https://api.attio.com`, maps reviewed `get` and semantic `query` commands to
+read authority, maps JSON `post`/`put`/`patch` to write authority, and isolates
+deletes as destructive. Only documented v2 JSON path shapes are available;
+arbitrary URLs, headers, OAuth exchanges, and binary upload/download are
+rejected. Bearer authentication is passed through a mode-0600 curl config.
 Classifier-marked product answers require a successful same-attempt
 `docs-page`, `corporate-full`, or Agent Wiki full-page read before delivery;
 an index, search result, arbitrary web result, Slack context, or memory is not

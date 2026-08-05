@@ -155,6 +155,9 @@ Only mark an item complete when source and verification evidence exist.
 - [x] Provide a read-only `telemetryos.analytics` operation with fixed Gateway
   funnel endpoints, a server-side Site Analytics Token, bounded pagination,
   and direct-identifier/free-form-content filtering.
+- [x] Provide `attio.crm` read/write/delete operations over fixed Attio v2 JSON
+  routes, with server-side bearer auth, risk-separated mutation approval, and
+  no arbitrary URL, OAuth, or binary-transfer surface.
 - [x] Inject the `marketing-funnel-chain`, `marketing-funnel-review`,
   `marketing-account-journey`, and draft-only `marketing-unstall-draft`
   behavioral skills.

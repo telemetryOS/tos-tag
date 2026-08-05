@@ -122,10 +122,10 @@ commands, tests, and active documentation have been removed.
   subscriptions with explicit IANA timezones, legacy interval compatibility,
   and a combined management Automation view/editor.
 - Complete behavioral `base` plugin from `tag-agent-skills`, including
-  read-only code, Linear, Wiki, OTel, the marketing funnel chain and leaf
+  Attio CRM, read-only code, Linear, Wiki, OTel, the marketing funnel chain and leaf
   skills, and `team-alignment` worker behavior.
-- Reviewed Linear, Wiki, OTel, privacy-filtered Analytics, DLA, optional Mongo,
-  and bounded source-code helper bundles with encrypted environment bindings
+- Reviewed Linear, Wiki, OTel, privacy-filtered Analytics, Attio CRM, DLA,
+  optional Mongo, and bounded source-code helper bundles with encrypted environment bindings
   where required.
 - Reviewed `telemetryos.linear/intake` authority for explicitly requested
   bug/feature workflows: creation, evidence comments, feature normalization,

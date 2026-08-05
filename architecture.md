@@ -366,6 +366,7 @@ The current reviewed catalog is:
 | `telemetryos.wiki` | `read`, `write`, `delete` | Never for page read/write; always for recoverable page soft-delete | Page-only CRUD; namespace, asset, publish-file, cascading move, activity, undo, and admin operations are unavailable |
 | `telemetryos.otel` | `read` | Risk-based | Bounded SigNoz/OpenTelemetry queries |
 | `telemetryos.analytics` | `read` | Never | Fixed production/QA funnel, website, account, and event GETs; internal records, direct identifiers, free-form properties, arbitrary paths, and exports are unavailable |
+| `attio.crm` | `read`, `write`, `delete` | Risk-based | Fixed `api.attio.com` v2 JSON routes with server-side bearer auth; explicit mutation approval, no arbitrary URLs/headers, OAuth exchange, or binary transfer |
 | `telemetryos.device-logs` | `read`, `write` | Risk-based | Device-log queries and reviewed log-level changes |
 | `telemetryos.mongo` | `read` | Risk-based | Bounded Mongo fetch operations |
 

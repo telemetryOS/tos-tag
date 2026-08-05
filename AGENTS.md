@@ -242,6 +242,9 @@ The reviewed catalog currently contains:
   account, normalized-event, and bounded raw site-event GETs through the Site
   Analytics Token boundary with direct-identifier and free-form-property
   filtering and no visitor/session lookup;
+- `attio.crm` (`read`, `write`, `delete`): fixed-host Attio v2 JSON access with
+  a server-side bearer token, risk-based approval for writes and deletes, and
+  no arbitrary URL, OAuth, header, or binary-transfer surface;
 - `telemetryos.device-logs` (`read`, `write`); and
 - `telemetryos.mongo` (`read`, disabled by default pending the human-opened
   security-key session).
@@ -251,7 +254,7 @@ Wiki content obtained through `telemetryos.code` must use the typed Wiki
 workers have no shared source filename; never invent `/workspace/...` paths.
 The exact action is committed by the Wiki execution audit receipt.
 
-Behavioral skill presence is not tool authority. The current inventory is 18
+Behavioral skill presence is not tool authority. The current inventory is 29
 skills in `base`; use the checked-in plugin manifest as the source of truth and
 keep the exact list in `README.md`.
 
@@ -292,10 +295,11 @@ after explicit Linear issue-creation intent; use the bounded reviewed Linear
 second approval. Generic Linear mutations remain approval-gated.
 
 For local setup, run `make sync-tool-env`. The script copies only the known
-Linear, Wiki, SigNoz, DLA, and optional Site Analytics variables from the current shell or
+Linear, Wiki, SigNoz, DLA, and optional Site Analytics and Attio variables from the current shell or
 `~/.config/telemetryos`, writes them to ignored mode-0600 `runtime.env`, and
 enables the corresponding reviewed tools. Analytics remains disabled when no
-Site Analytics Token is available. It reports variable names only.
+Site Analytics Token is available; Attio remains disabled when no Attio access
+token is available. It reports variable names only.
 It also binds the Aion inventory, owner-only snapshot/index roots, pinned model,
 and GitHub CLI credential-store location for `telemetryos.code`. Run
 `make install-semantic-search` first. Workers may request freshness, list

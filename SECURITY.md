@@ -99,6 +99,11 @@ the minimum live operational records needed for delivery safety and audit.
   helper rejects arbitrary paths, headers, exports, internal-event inclusion,
   and visitor/session lookup, then removes direct identifiers and free-form
   customer/event content from returned JSON.
+- `attio.crm` is fixed to `https://api.attio.com` and a reviewed catalog of v2
+  JSON path shapes. Its bearer token is supplied through a mode-0600 curl
+  config, never argv or worker context. Semantic read POSTs are isolated from
+  approval-gated writes and destructive deletes; arbitrary URLs, headers,
+  OAuth exchanges, and binary file transfer are unavailable.
 - Classifier-marked product answers cannot be delivered unless the same attempt
   successfully reads a full Primer Wiki page, public docs page, or corporate
   full-content source. Search results and model memory are not proof.

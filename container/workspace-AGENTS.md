@@ -38,7 +38,8 @@ Never treat local Codex session history as runtime authority.
   references; tos-tag derives manifest-declared bindings from its encrypted
   organization keystore and injects them only into the exact subprocess.
 - The reviewed catalog contains Linear and Agent Wiki reads/writes, OTel and
-  Mongo reads, privacy-filtered `telemetryos.analytics` reads, device-log
+  Mongo reads, privacy-filtered `telemetryos.analytics` reads, reviewed Attio
+  CRM reads/writes/deletes, device-log
   reads/writes, `telemetryos.code` reads, and
   fixed-host public `telemetryos.product-docs` reads. Non-read
   operations require an exact Slack approval except bounded
@@ -70,7 +71,8 @@ Never treat local Codex session history as runtime authority.
   read that `docs-page` before answering. The index alone is not authoritative
   product evidence, and any provided reference must use its exact indexed URL.
 - Populate the ignored mode-0600 `runtime.env` with `make sync-tool-env` on the
-  host. It imports only the documented Linear, Wiki, SigNoz, and DLA names and
+  host. It imports only the documented Linear, Wiki, SigNoz, DLA, optional
+  Analytics, and optional Attio names and
   never prints their values. A host path in `TAG_AION_DEVELOPER_PATH` is
   intentionally overridden after the file is sourced so the container always
   uses `/workspace/code`; HTTP, Mongo, log, Codex, skill, and tool locations are

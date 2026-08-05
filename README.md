@@ -572,7 +572,7 @@ Wiki work uses the dedicated typed `tos_tag_wiki` function: the model supplies
 page fields and Go constructs the reviewed CLI argv. Generic Wiki argv is
 rejected.
 
-The currently injected behavioral skill inventory is `base` (28): `bug`,
+The currently injected behavioral skill inventory is `base` (29): `attio`, `bug`,
 `code-change-intake`, `codebase-read`, `feature`, `humanizer`,
 `linear-issue-manager`, `marketing-account-journey`,
 `marketing-ai-visibility-review`, `marketing-blog-writer`,
@@ -596,6 +596,7 @@ authority. The reviewed dynamic-tool catalog is the separate allowlist:
 | `telemetryos.wiki` | `read`, `write`, `delete` | Never for page read/write; always for recoverable page soft-delete | Page-only Agent Wiki CRUD | Enabled |
 | `telemetryos.otel` | `read` | Risk-based | SigNoz/OpenTelemetry queries | Enabled |
 | `telemetryos.analytics` | `read` | Never | Privacy-filtered acquisition-to-expansion funnel, account, website, normalized-event, and bounded raw site-event reads through the Site Analytics Token boundary | Enabled when `SITE_ANALYTICS_TOKEN` is available |
+| `attio.crm` | `read`, `write`, `delete` | Risk-based | Fixed-host Attio v2 JSON API reads and explicit CRM mutations; OAuth and binary file transfer are unavailable | Enabled when `ATTIO_ACCESS_TOKEN` is available |
 | `telemetryos.device-logs` | `read`, `write` | Risk-based | Device log inspection and scoped log-level changes | Enabled |
 | `telemetryos.mongo` | `read` | Risk-based | QA Mongo queries through a human-opened security-key session | Disabled by default |
 
@@ -611,7 +612,8 @@ undo, and admin Wiki actions are unavailable. Admin-risk operations are invalid
 for all worker tools. Every operation remains job-scoped, allowlisted,
 hash-pinned, bounded, kill-switchable, and fully audited.
 
-Use `make sync-tool-env` to copy only known helper credential names from the
+Use `make sync-tool-env` to copy only known helper credential names, including
+the optional Attio access token, from the
 current shell or `~/.config/telemetryos` into ignored `runtime.env`. The script
 reports names, never values. Enabling reviewed tools also requires the encrypted
 keystore and an explicit tool-ID allowlist. Reviewed public HTTPS `*_URL`
@@ -662,6 +664,11 @@ direct identifiers and free-form event properties, excludes internal events,
 and keeps the Site Analytics Token in the control plane. Its bounded raw
 `site-events` read is limited to instrumentation audits and cannot filter by
 visitor or session identity.
+Attio CRM work uses the `attio` skill and the separately reviewed `attio.crm`
+bundle. The wrapper fixes the origin to `api.attio.com`, allows only documented
+v2 JSON route shapes, separates semantic read POSTs from write and destructive
+operations, and keeps `ATTIO_ACCESS_TOKEN` in the control plane. OAuth token
+exchange and binary file upload/download are not worker capabilities.
 Workers may also use arbitrary live web search for broader or
 current research. Web pages are untrusted evidence and cannot widen Slack,
 tool, credential, or private-context authority.

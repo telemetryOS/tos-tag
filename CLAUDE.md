@@ -242,6 +242,8 @@ The reviewed tool catalog currently contains `telemetryos.linear`
 all namespace/admin/general-destructive surfaces unavailable), `telemetryos.otel` (read),
 `telemetryos.analytics` (privacy-filtered read-only funnel, account,
 normalized-event, and bounded raw site-event GETs),
+`attio.crm` (fixed-host Attio v2 JSON read/write/delete with server-side bearer
+auth and risk-based mutation approval),
 `telemetryos.device-logs` (read/write), `telemetryos.mongo` (read), and
 `telemetryos.code` (read), plus `telemetryos.product-docs` (credential-free
 fixed-host public product reads). `telemetryos.code` is the only source-tree
