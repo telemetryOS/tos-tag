@@ -25,6 +25,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/deliveries"
 	"github.com/telemetryos/tos-tag/core/flood"
 	"github.com/telemetryos/tos-tag/core/harness"
+	"github.com/telemetryos/tos-tag/core/intelligence"
 	"github.com/telemetryos/tos-tag/core/jobs"
 	agentmemory "github.com/telemetryos/tos-tag/core/memory"
 	"github.com/telemetryos/tos-tag/core/observer"
@@ -595,6 +596,92 @@ func TestClassifierFloodProtectionDropsBeforeProviderOrAgent(t *testing.T) {
 	}
 	if len(system.transport.Requests()) != 0 || len(system.transport.ReactionRequests()) != 0 {
 		t.Fatalf("flooded messages produced Slack output: requests=%#v reactions=%#v", system.transport.Requests(), system.transport.ReactionRequests())
+	}
+}
+
+type countingIntelligenceProjector struct{ calls atomic.Int64 }
+
+func (p *countingIntelligenceProjector) Project(context.Context, models.Observation) (intelligence.Result, error) {
+	p.calls.Add(1)
+	return intelligence.Result{}, nil
+}
+
+func TestAmbientLinkOnlyAndDeletedTurnsStopBeforeContextOrProvider(t *testing.T) {
+	system := newTestSystem(t)
+	var providerCalls atomic.Int64
+	service, err := classifier.New(classifierFunc(func(context.Context, classifier.Target, types.ContextPackRevision) (types.ClassificationDecision, error) {
+		providerCalls.Add(1)
+		return types.ClassificationDecision{Outcome: types.OutcomeSilent, Confidence: 1, ReasonCodes: []string{"test.silent"}, DisclosureClass: types.DisclosureDestinationSafe}, nil
+	}), true, .9, .98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projector := &countingIntelligenceProjector{}
+	system.pipeline.deps.Classifier = service
+	system.pipeline.deps.Intelligence = projector
+
+	tests := []struct {
+		name   string
+		event  types.SlackEnvelope
+		reason string
+	}{
+		{name: "raw link", event: envelope("link-raw", "tos-tag", "210.001", "https://example.com/path?q=1"), reason: "suppress.ambient_link_only"},
+		{name: "Slack links", event: envelope("link-slack", "tos-tag", "210.002", "<https://example.com/a|Example A>\n<https://example.com/b>"), reason: "suppress.ambient_link_only"},
+		{name: "delete", event: envelope("delete", "tos-tag", "210.003", ""), reason: "suppress.deleted"},
+		{name: "empty edit", event: envelope("empty-edit", "tos-tag", "210.004", ""), reason: "suppress.deleted"},
+		{name: "Slack deletion tombstone", event: envelope("tombstone-edit", "tos-tag", "210.005", "This message was deleted."), reason: "suppress.deleted"},
+	}
+	tests[2].event.Kind = types.SlackEventDelete
+	tests[2].event.Subtype = "message_deleted"
+	tests[3].event.Kind = types.SlackEventEdit
+	tests[3].event.Subtype = "message_changed"
+	tests[4].event.Kind = types.SlackEventEdit
+	tests[4].event.Subtype = "message_changed"
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := system.ingress.Inject(context.Background(), test.event); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	waitFor(t, func() bool {
+		decisions, listErr := system.decisions.List(context.Background())
+		return listErr == nil && len(decisions) == len(tests)
+	})
+	if got := providerCalls.Load(); got != 0 {
+		t.Fatalf("provider calls = %d, want 0", got)
+	}
+	if got := projector.calls.Load(); got != 0 {
+		t.Fatalf("intelligence projections = %d, want 0", got)
+	}
+	decisions, err := system.decisions.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, decision := range decisions {
+		if decision.ContextPackRevisionID != "" {
+			t.Fatalf("decision %d built context pack %q", index, decision.ContextPackRevisionID)
+		}
+		if decision.Result.Effective.Outcome != types.OutcomeSilent || decision.Result.Effective.ReasonCodes[0] != tests[index].reason {
+			t.Fatalf("decision %d = %#v", index, decision.Result.Effective)
+		}
+	}
+}
+
+func TestLinkOnlySuppressionPreservesAddressedTurns(t *testing.T) {
+	for name, test := range map[string]struct {
+		envelope     types.SlackEnvelope
+		activeThread bool
+	}{
+		"mention":        {envelope: types.SlackEnvelope{Text: "<https://example.com>", IsMention: true}},
+		"direct message": {envelope: types.SlackEnvelope{Text: "https://example.com", ChannelID: "D123"}},
+		"active thread":  {envelope: types.SlackEnvelope{Text: "https://example.com"}, activeThread: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if isAmbientLinkOnlySlackTurn(test.envelope, test.activeThread) {
+				t.Fatal("addressed link-only turn was suppressed")
+			}
+		})
 	}
 }
 

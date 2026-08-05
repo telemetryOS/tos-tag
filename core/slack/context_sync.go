@@ -168,6 +168,18 @@ func (s *ContextSyncer) Sync(parent context.Context, register ContextChannelHand
 // history import is a separate phase so Slack rate limits cannot create an
 // event-capture gap during startup.
 func (s *ContextSyncer) Discover(parent context.Context, register ContextChannelHandler) (*ContextSyncRun, error) {
+	return s.discover(parent, register, true)
+}
+
+// RefreshMembership reconciles the current channel inventory without arming a
+// history catch-up for every joined channel. Backfill may still be run on the
+// result to bootstrap newly discovered conversations. Delivery-gap recovery is
+// intentionally reserved for startup and actual Socket Mode reconnects.
+func (s *ContextSyncer) RefreshMembership(parent context.Context, register ContextChannelHandler) (*ContextSyncRun, error) {
+	return s.discover(parent, register, false)
+}
+
+func (s *ContextSyncer) discover(parent context.Context, register ContextChannelHandler, prepareCatchUp bool) (*ContextSyncRun, error) {
 	stats := ContextSyncStats{StartedAt: time.Now().UTC()}
 	run := &ContextSyncRun{stats: stats, cutoff: stats.StartedAt.Add(-s.options.Lookback), syncThrough: stats.StartedAt}
 	if register == nil {
@@ -214,9 +226,9 @@ func (s *ContextSyncer) Discover(parent context.Context, register ContextChannel
 		}
 		if authorized {
 			registeredChannels = append(registeredChannels, channel)
-			// Only bot-joined channels can produce Slack output. Restrict the
-			// frequent missed-event repair pass to those channels so hundreds of
-			// observe-only conversations do not create a polling workload.
+			// Only bot-joined channels can produce Slack output. Restrict startup
+			// and reconnect missed-event repair to those channels; periodic
+			// membership refresh never arms this list.
 			if botMembership[channel.ID] && (channel.IsIM || channel.IsChannel || channel.IsGroup) {
 				catchUpChannels = append(catchUpChannels, channel)
 			}
@@ -224,7 +236,9 @@ func (s *ContextSyncer) Discover(parent context.Context, register ContextChannel
 		}
 	}
 	run.channels = registeredChannels
-	run.catchUpChannels = catchUpChannels
+	if prepareCatchUp {
+		run.catchUpChannels = catchUpChannels
+	}
 	run.botMembership = botMembership
 	states, err := s.options.StateStore.List(ctx, s.options.OrganizationID, s.options.TeamID)
 	if err != nil {
@@ -244,7 +258,7 @@ func (s *ContextSyncer) Discover(parent context.Context, register ContextChannel
 			}
 			continue
 		}
-		if !state.BootstrapCompleted || !state.SyncedThrough.Before(run.syncThrough) {
+		if !prepareCatchUp || !state.BootstrapCompleted || !state.SyncedThrough.Before(run.syncThrough) {
 			continue
 		}
 		if err := s.options.StateStore.BeginCatchUp(ctx, s.options.OrganizationID, s.options.TeamID, channel.ID, run.syncThrough); err != nil {

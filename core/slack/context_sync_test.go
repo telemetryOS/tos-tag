@@ -155,6 +155,51 @@ func TestContextSyncCatchUpRepairsOnlyCompletedBotJoinedChannels(t *testing.T) {
 	}
 }
 
+func TestContextSyncMembershipRefreshDoesNotPollCurrentChannels(t *testing.T) {
+	previous := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Microsecond)
+	state := NewMemoryContextSyncStateStore()
+	if err := state.CompleteBootstrap(context.Background(), "org", "team", "C-joined", previous); err != nil {
+		t.Fatal(err)
+	}
+	joined := testSlackChannel("C-joined", "joined", false)
+	botJoined := joined
+	botJoined.IsMember = true
+	api := &fakeContextSyncAPI{
+		channels:    []slackapi.Channel{joined},
+		botChannels: []slackapi.Channel{botJoined},
+		history: map[string][]slackapi.Message{
+			"C-joined": {{Msg: slackapi.Msg{Timestamp: fmt.Sprintf("%d.000001", time.Now().UTC().Unix()), User: "U-human", Text: "must not be polled"}}},
+		},
+	}
+	syncer, err := newContextSyncerWithAPIs(ContextSyncOptions{
+		OrganizationID: "org", TeamID: "team", BotUserID: "U-tag", Lookback: 24 * time.Hour, Timeout: time.Second,
+		MaxChannels: 10, MaxMessages: 10, MessagesPerChannel: 10, StateStore: state,
+	}, api, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := syncer.RefreshMembership(context.Background(), func(context.Context, types.SlackContextChannel) (bool, error) { return true, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncer.CatchUp(context.Background(), run, func(context.Context, types.SlackEnvelope) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncer.Backfill(context.Background(), run, func(context.Context, types.SlackEnvelope) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.historyCalls) != 0 || len(api.replyCalls) != 0 {
+		t.Fatalf("membership refresh polled current history: history=%v replies=%v", api.historyCalls, api.replyCalls)
+	}
+	states, err := state.List(context.Background(), "org", "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !states["C-joined"].SyncedThrough.Equal(previous) || !states["C-joined"].CatchUpThrough.IsZero() {
+		t.Fatalf("membership refresh changed current watermarks: %#v", states["C-joined"])
+	}
+}
+
 func TestContextSyncCatchUpNeverReplaysInitialHistory(t *testing.T) {
 	nowTS := fmt.Sprintf("%d.000001", time.Now().UTC().Unix())
 	joined := testSlackChannel("C-new", "new", false)

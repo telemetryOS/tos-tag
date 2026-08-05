@@ -36,7 +36,11 @@ type Target struct {
 	WorkflowLoop      bool
 	Unsupported       bool
 	Deleted           bool
-	SelfAuthored      bool
+	// AmbientLinkOnly identifies an unaddressed top-level channel message made
+	// entirely of one or more links. These messages are useful as context, but
+	// are not requests for Tag to classify or answer.
+	AmbientLinkOnly bool
+	SelfAuthored    bool
 }
 
 type Result struct {
@@ -685,6 +689,8 @@ func hardSuppression(target Target) string {
 		return "suppress.workflow_loop"
 	case target.Deleted || target.Envelope.Kind == types.SlackEventDelete:
 		return "suppress.deleted"
+	case target.AmbientLinkOnly:
+		return "suppress.ambient_link_only"
 	case target.Unsupported:
 		return "suppress.unsupported_subtype"
 	case target.Envelope.IntegrationAuthored():

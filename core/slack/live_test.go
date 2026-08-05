@@ -214,6 +214,39 @@ func TestLiveIngressAcknowledgesDurableRetryDuplicateAfterReconnect(t *testing.T
 	}
 }
 
+func TestLiveIngressRecoversOnlyAfterAnActualReconnect(t *testing.T) {
+	transport := newFakeSocketModeTransport()
+	ingress := &LiveIngress{
+		options: LiveOptions{OrganizationID: "org", AppID: "app", TeamID: "team", BotUserID: "bot", Logger: blackbox.New()},
+		client:  transport,
+	}
+	recovered := make(chan struct{}, 2)
+	ingress.SetReconnectHandler(func(context.Context) error {
+		recovered <- struct{}{}
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := ingress.Start(ctx, func(context.Context, types.SlackEnvelope) (AcceptResult, error) { return AcceptResult{}, nil }); err != nil {
+		t.Fatal(err)
+	}
+	transport.events <- socketmode.Event{Type: socketmode.EventTypeConnected, Data: &socketmode.ConnectedEvent{ConnectionCount: 1}}
+	select {
+	case <-recovered:
+		t.Fatal("initial Socket Mode connection triggered gap recovery")
+	case <-time.After(20 * time.Millisecond):
+	}
+	transport.events <- socketmode.Event{Type: socketmode.EventTypeConnected, Data: &socketmode.ConnectedEvent{ConnectionCount: 2}}
+	select {
+	case <-recovered:
+	case <-time.After(time.Second):
+		t.Fatal("Socket Mode reconnect did not trigger gap recovery")
+	}
+	if err := ingress.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLiveIngressAcknowledgesPolicyExcludedEnvelope(t *testing.T) {
 	transport := newFakeSocketModeTransport()
 	ingress := &LiveIngress{

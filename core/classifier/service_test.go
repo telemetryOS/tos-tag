@@ -806,6 +806,9 @@ func TestServiceRequiresProviderCall(t *testing.T) {
 	if live.RequiresProviderCall(Target{Mode: types.ModeAssist, Envelope: types.SlackEnvelope{Subtype: types.SlackMessageSubtypeAssistantAppThread}}) {
 		t.Fatal("assistant app target should not call provider")
 	}
+	if live.RequiresProviderCall(Target{Mode: types.ModeAssist, AmbientLinkOnly: true}) {
+		t.Fatal("ambient link-only target should not call provider")
+	}
 	shadow := newService(t, true)
 	if !shadow.RequiresProviderCall(Target{Mode: types.ModeObserve}) {
 		t.Fatal("shadow observe target should call provider for measurement")

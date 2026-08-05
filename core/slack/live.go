@@ -52,7 +52,10 @@ type LiveIngress struct {
 	directiveLoad      DirectiveLoadHandler
 	directiveSave      DirectiveSaveHandler
 	modeChange         ModeChangeHandler
+	reconnectHandler   ReconnectHandler
 }
+
+type ReconnectHandler func(context.Context) error
 
 func (s *LiveIngress) SetApprovalInteractionHandler(handler ApprovalInteractionHandler) {
 	s.mu.Lock()
@@ -76,6 +79,12 @@ func (s *LiveIngress) SetDirectiveConfigurationHandlers(load DirectiveLoadHandle
 func (s *LiveIngress) SetModeChangeHandler(handler ModeChangeHandler) {
 	s.mu.Lock()
 	s.modeChange = handler
+	s.mu.Unlock()
+}
+
+func (s *LiveIngress) SetReconnectHandler(handler ReconnectHandler) {
+	s.mu.Lock()
+	s.reconnectHandler = handler
 	s.mu.Unlock()
 }
 
@@ -270,6 +279,7 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 	defer s.options.Logger.Info("Slack Socket Mode loop stopped")
 	runDone := make(chan error, 1)
 	go func() { runDone <- s.client.RunContext(ctx) }()
+	connectedOnce := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -301,7 +311,25 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 				if connected, ok := event.Data.(*socketmode.ConnectedEvent); ok {
 					connectionCount = connected.ConnectionCount
 				}
-				eventLogger.WithCtx(blackbox.Ctx{"connection_count": connectionCount, "reconnected": connectionCount > 0}).Info("Slack Socket Mode transport connected")
+				reconnected := connectedOnce
+				connectedOnce = true
+				eventLogger.WithCtx(blackbox.Ctx{"connection_count": connectionCount, "reconnected": reconnected}).Info("Slack Socket Mode transport connected")
+				if reconnected {
+					s.mu.Lock()
+					reconnectHandler := s.reconnectHandler
+					s.mu.Unlock()
+					if reconnectHandler != nil {
+						go func() {
+							if err := reconnectHandler(ctx); err != nil && ctx.Err() == nil {
+								s.options.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Warn("Slack reconnect context recovery failed")
+								return
+							}
+							if ctx.Err() == nil {
+								s.options.Logger.Info("Slack reconnect context recovery completed")
+							}
+						}()
+					}
+				}
 				continue
 			case socketmode.EventTypeHello:
 				if event.Request == nil {

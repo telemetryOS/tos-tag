@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/RobertWHurst/blackbox"
@@ -65,6 +66,7 @@ type Core struct {
 	contextDone        chan struct{}
 	contextRefreshStop context.CancelFunc
 	contextRefreshDone chan struct{}
+	contextCycleMu     sync.Mutex
 	activity           *activity.Hub
 	memoryCurator      *agentmemory.Curator
 }
@@ -370,7 +372,11 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Core{Config: cfg, Logger: logger, database: db, pipeline: pipe, server: srv, retention: retentionJanitor, router: responseRouter, toolBridge: toolBridge, toolIDs: allowedToolIDs, routines: routineService, triggers: triggerService, contextSync: slackContextSync, activity: activityFeed, memoryCurator: memoryCurator}, nil
+	app := &Core{Config: cfg, Logger: logger, database: db, pipeline: pipe, server: srv, retention: retentionJanitor, router: responseRouter, toolBridge: toolBridge, toolIDs: allowedToolIDs, routines: routineService, triggers: triggerService, contextSync: slackContextSync, activity: activityFeed, memoryCurator: memoryCurator}
+	if liveIngress != nil && slackContextSync != nil {
+		liveIngress.SetReconnectHandler(app.recoverSlackContext)
+	}
+	return app, nil
 }
 
 func appendModeChangeAudit(ctx context.Context, appender audit.Appender, request slack.ModeChangeRequest, saved orgconfig.ChannelPolicy, previous string) error {
@@ -660,8 +666,10 @@ func (c *Core) startContextRefresh(parent context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				run, err := c.contextSync.Discover(ctx, c.pipeline.RegisterContextChannel)
+				c.contextCycleMu.Lock()
+				run, err := c.contextSync.RefreshMembership(ctx, c.pipeline.RegisterContextChannel)
 				if err != nil {
+					c.contextCycleMu.Unlock()
 					if ctx.Err() == nil {
 						c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err)}).Warn("Slack membership reconciliation failed; prior policy retained")
 					}
@@ -669,12 +677,10 @@ func (c *Core) startContextRefresh(parent context.Context) {
 				}
 				stats := run.Stats()
 				c.Logger.WithCtx(blackbox.Ctx{"channels_discovered": stats.ChannelsDiscovered, "channels_registered": stats.ChannelsRegistered}).Info("Slack membership reconciliation completed")
-				if _, err := c.contextSync.CatchUp(ctx, run, c.pipeline.RecoverContextEnvelope); err != nil && ctx.Err() == nil {
-					c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Warn("Slack joined-channel missed-event catch-up stopped before completion")
-				}
 				if _, err := c.contextSync.Backfill(ctx, run, c.pipeline.ImportContextEnvelope); err != nil && ctx.Err() == nil {
 					c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Warn("Slack incremental context bootstrap stopped before completion")
 				}
+				c.contextCycleMu.Unlock()
 			}
 		}
 	}()
@@ -705,6 +711,8 @@ func (c *Core) startContextBackfill(parent context.Context) {
 	run := c.contextRun
 	go func() {
 		defer close(c.contextDone)
+		c.contextCycleMu.Lock()
+		defer c.contextCycleMu.Unlock()
 		if _, err := c.contextSync.CatchUp(ctx, run, c.pipeline.RecoverContextEnvelope); err != nil && ctx.Err() == nil {
 			c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Error("Slack startup joined-channel missed-event catch-up stopped before completion")
 		}
@@ -712,6 +720,25 @@ func (c *Core) startContextBackfill(parent context.Context) {
 			c.Logger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", err), "error": err.Error()}).Error("Slack user context backfill stopped before completion")
 		}
 	}()
+}
+
+func (c *Core) recoverSlackContext(ctx context.Context) error {
+	if c.contextSync == nil {
+		return nil
+	}
+	c.contextCycleMu.Lock()
+	defer c.contextCycleMu.Unlock()
+	run, err := c.contextSync.Discover(ctx, c.pipeline.RegisterContextChannel)
+	if err != nil {
+		return fmt.Errorf("discover Slack context after reconnect: %w", err)
+	}
+	if _, err := c.contextSync.CatchUp(ctx, run, c.pipeline.RecoverContextEnvelope); err != nil {
+		return fmt.Errorf("catch up Slack context after reconnect: %w", err)
+	}
+	if _, err := c.contextSync.Backfill(ctx, run, c.pipeline.ImportContextEnvelope); err != nil {
+		return fmt.Errorf("bootstrap Slack context after reconnect: %w", err)
+	}
+	return nil
 }
 
 func (c *Core) stopContextBackfill(ctx context.Context) error {

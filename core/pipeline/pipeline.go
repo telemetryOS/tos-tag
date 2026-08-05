@@ -636,15 +636,20 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 		activeThread = activeErr == nil
 	}
 	target := classifier.Target{
-		ObservationID: observation.PublicID,
-		Envelope:      envelope,
-		Mode:          mode,
-		ActiveThread:  activeThread,
-		WorkflowLoop:  isWorkflowLoopOrigin(envelope.OriginTag),
-		Deleted:       envelope.Kind == types.SlackEventDelete,
-		SelfAuthored:  envelope.BotID == "tos-tag-stub" || p.selfAuthoredEnvelope(envelope),
+		ObservationID:   observation.PublicID,
+		Envelope:        envelope,
+		Mode:            mode,
+		ActiveThread:    activeThread,
+		WorkflowLoop:    isWorkflowLoopOrigin(envelope.OriginTag),
+		Deleted:         isDeletedSlackTurn(envelope, activeThread),
+		AmbientLinkOnly: isAmbientLinkOnlySlackTurn(envelope, activeThread),
+		SelfAuthored:    envelope.BotID == "tos-tag-stub" || p.selfAuthoredEnvelope(envelope),
 	}
-	if p.deps.Config.Classifier.FloodProtectionEnabled && p.deps.Classifier.RequiresProviderCall(target) {
+	requiresProvider := p.deps.Classifier.RequiresProviderCall(target)
+	if target.Deleted || target.AmbientLinkOnly {
+		return p.recordPreclassificationSuppression(ctx, observation, target, revision)
+	}
+	if p.deps.Config.Classifier.FloodProtectionEnabled && requiresProvider {
 		budget, budgetErr := p.deps.FloodProtection.Admit(ctx, flood.Scope{OrganizationID: envelope.OrganizationID, TeamID: envelope.TeamID})
 		if budgetErr != nil {
 			return p.recordFloodDrop(ctx, observation, envelope, revision, flood.Result{}, "safety.classifier_flood_gate_unavailable", budgetErr)
@@ -843,6 +848,75 @@ func (p *Pipeline) decideObservation(ctx context.Context, observation models.Obs
 	if err := p.deps.Observations.FinalizeOutput(ctx, observation.PublicID, outputReservationID, string(job.ID), ""); err != nil {
 		return fmt.Errorf("finalize job output: %w", err)
 	}
+	return nil
+}
+
+var slackLinkOnlyPattern = regexp.MustCompile(`^(?:\s*(?:<https?://[^>\s]+(?:\|[^>]*)?>|https?://\S+)\s*)+$`)
+
+func isDeletedSlackTurn(envelope types.SlackEnvelope, activeThread bool) bool {
+	if envelope.Kind == types.SlackEventDelete || envelope.Subtype == "message_deleted" {
+		return true
+	}
+	// Slack may deliver a deletion as a message_changed wrapper containing its
+	// fixed tombstone text (or no text). An addressed or active-thread edit is
+	// retained because it can carry richer block/file content that is absent
+	// from the plain-text field.
+	text := strings.TrimSpace(envelope.Text)
+	deletedPlaceholder := text == "" || strings.EqualFold(text, "This message was deleted.")
+	return envelope.Kind == types.SlackEventEdit && deletedPlaceholder && !envelope.IsMention && !activeThread
+}
+
+func isAmbientLinkOnlySlackTurn(envelope types.SlackEnvelope, activeThread bool) bool {
+	// Persisted observations currently retain the channel ID but not Slack's
+	// channel_type field, so also honor Slack's stable D-prefix for one-to-one
+	// direct-message conversations.
+	if envelope.IsMention || activeThread || envelope.ChannelKind == types.SlackChannelKindDirectMessage || strings.HasPrefix(envelope.ChannelID, "D") {
+		return false
+	}
+	return slackLinkOnlyPattern.MatchString(envelope.Text)
+}
+
+func (p *Pipeline) recordPreclassificationSuppression(ctx context.Context, observation models.Observation, target classifier.Target, revision int64) error {
+	// An ID-less pack carries only lifecycle metadata. No context source is
+	// queried, tokenized, persisted, or sent to a provider for this decision.
+	pack := types.ContextPackRevision{
+		OrganizationID:        target.Envelope.OrganizationID,
+		TargetObservationID:   observation.PublicID,
+		OrganizationWatermark: observation.OrganizationReceivedSeq,
+		CreatedAt:             time.Now().UTC(),
+		ExpiresAt:             observation.ExpiresAt,
+	}
+	decision := p.deps.Classifier.Decide(ctx, target, pack)
+	recorded, _, err := p.deps.Decisions.Record(ctx, classifier.DecisionRecord{
+		OrganizationID:        target.Envelope.OrganizationID,
+		ObservationID:         observation.PublicID,
+		DecisionRevision:      int64(revision),
+		OrganizationWatermark: observation.OrganizationReceivedSeq,
+		Result:                decision,
+	})
+	if err != nil {
+		return fmt.Errorf("record preclassification suppression: %w", err)
+	}
+	p.deps.Logger.WithCtx(blackbox.Ctx{
+		"organization_id": target.Envelope.OrganizationID,
+		"team_id":         target.Envelope.TeamID,
+		"channel_id":      target.Envelope.ChannelID,
+		"observation_id":  observation.PublicID,
+		"decision_id":     recorded.ID,
+		"reason_codes":    recorded.Result.Effective.ReasonCodes,
+	}).Info("observation deterministically suppressed before context retrieval")
+	p.publishClassificationActivity(target.Envelope, recorded)
+	p.appendReceipt(ctx, audit.AppendRequest{
+		OrganizationID: target.Envelope.OrganizationID,
+		Type:           "decision.recorded",
+		ResourceID:     recorded.ID,
+		RetentionEpoch: retentionEpoch(observation.ExpiresAt),
+		IdempotencyKey: fmt.Sprintf("decision/%s/%d", observation.PublicID, revision),
+		Metadata: map[string]any{
+			"outcome":  string(types.OutcomeSilent),
+			"revision": revision,
+		},
+	})
 	return nil
 }
 
