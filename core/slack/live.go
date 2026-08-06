@@ -1289,18 +1289,7 @@ func automationModal(scope automations.Scope, task automations.Task) slackapi.Mo
 		element.MaxLength = maxLength
 		return element
 	}
-	versionLabel := "new"
-	if task.Version > 0 {
-		versionLabel = "version " + strconv.FormatInt(task.Version, 10)
-	}
-	name := task.ID
-	if name == "" {
-		name = "New automation"
-	}
-	blocks := []slackapi.Block{
-		slackapi.NewAlertBlock(slackapi.NewTextBlockObject("plain_text", "This task is locked to the channel where you opened it. Saving cannot move it to another channel.", false, false), slackapi.AlertBlockOptionLevel(slackapi.AlertLevelInfo), slackapi.AlertBlockOptionBlockID("tos_tag_automation_scope")),
-		slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", "*"+escapeSlackText(name)+"*\n"+automationKindLabel(task.Kind)+" · "+versionLabel, false, false), nil, nil),
-	}
+	blocks := make([]slackapi.Block, 0, 5)
 	if task.Version == 0 {
 		blocks = append(blocks, slackapi.NewInputBlock(automationNameID, slackapi.NewTextBlockObject("plain_text", "Stable name", false, false), slackapi.NewTextBlockObject("plain_text", "Lowercase letters, numbers, and hyphens; this cannot be changed later.", false, false), plainInput("weekday-management-summary", "", automationValueActionID, false, 80)))
 	}

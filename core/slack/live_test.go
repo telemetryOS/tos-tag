@@ -913,8 +913,11 @@ func TestAutomationCommandPickerAndSubmissionRemainChannelBound(t *testing.T) {
 		t.Fatalf("choice=%#v eligible=%v err=%v", choice, eligible, err)
 	}
 	modal := automationModal(choice.Scope, task)
-	if modal.CallbackID != automationCallbackID || modal.PrivateMetadata == "" || len(modal.Blocks.BlockSet) != 6 {
+	if modal.CallbackID != automationCallbackID || modal.PrivateMetadata == "" || len(modal.Blocks.BlockSet) != 4 {
 		t.Fatalf("modal=%#v", modal)
+	}
+	if first, ok := modal.Blocks.BlockSet[0].(*slackapi.InputBlock); !ok || first.BlockID != automationInstructionID {
+		t.Fatalf("automation editor still has an introductory block: %#v", modal.Blocks.BlockSet[0])
 	}
 	submit := slackapi.InteractionCallback{
 		Type: slackapi.InteractionTypeViewSubmission, APIAppID: "A123", Team: slackapi.Team{ID: "T123"}, User: slackapi.User{ID: "U_ADMIN"},
@@ -953,8 +956,11 @@ func TestAutomationPickerCanOpenANewAutomationWithoutTimezoneInput(t *testing.T)
 	}
 	task := automations.Task{Kind: automations.KindHeartbeat, Timezone: choice.Timezone, MinConfidence: .8, Enabled: true}
 	modal := automationModal(choice.Scope, task)
-	if len(modal.Blocks.BlockSet) != 7 {
+	if len(modal.Blocks.BlockSet) != 5 {
 		t.Fatalf("new automation blocks=%#v", modal.Blocks.BlockSet)
+	}
+	if first, ok := modal.Blocks.BlockSet[0].(*slackapi.InputBlock); !ok || first.BlockID != automationNameID {
+		t.Fatalf("new automation editor still has an introductory block: %#v", modal.Blocks.BlockSet[0])
 	}
 	for _, block := range modal.Blocks.BlockSet {
 		if inputBlock, ok := block.(*slackapi.InputBlock); ok && inputBlock.BlockID == "automation_timezone" {
