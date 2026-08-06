@@ -205,9 +205,11 @@ Only mark an item complete when source and verification evidence exist.
   creation, revision history, activation, and audit.
 - [x] Implement channel-bound `/tag-status` with an ephemeral native Block Kit
   table for participation, directive, availability, membership, and scope.
-- [x] Implement `/tag-automations` as a channel-only ephemeral list with an
-  audited, stale-write-aware Slack modal editor; migrate automation indexes and
-  backfill legacy channel scope from durable sessions before scheduling.
+- [x] Implement `/tag-automations` as a direct single-task modal or channel-only
+  ephemeral multi-task list with an audited, stale-write-aware Slack modal
+  editor; allow exact configured global automation operators alongside channel
+  approvers, and backfill legacy channel scope from durable sessions before
+  scheduling.
 - [x] Persist and reauthorize standard five-field cron routines with explicit
   IANA timezones while advancing legacy interval records safely.
 - [x] Persist classifier-gated cron heartbeat subscriptions and manage them in

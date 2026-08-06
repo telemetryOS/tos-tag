@@ -404,7 +404,7 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 					s.handleStatusCommand(ctx, eventLogger, event.Request.EnvelopeID, statusRequest)
 					continue
 				}
-				automationScope, automationEligible, automationErr := NormalizeAutomationCommand(s.options, event.Data)
+				automationCommand, automationEligible, automationErr := NormalizeAutomationCommand(s.options, event.Data)
 				if automationErr != nil {
 					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", automationErr)}).Error("Slack automations command rejected")
 					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralCommandResponse("Usage: `/tag-automations` — run it without arguments in the channel you want to manage."))
@@ -418,10 +418,19 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralCommandResponse("Channel automations are not available right now."))
 						continue
 					}
-					tasks, listErr := listAutomations(ctx, automationScope)
+					tasks, listErr := listAutomations(ctx, automationCommand.Scope)
 					if listErr != nil {
-						eventLogger.WithCtx(blackbox.Ctx{"channel_id": automationScope.ChannelID, "actor_id": automationScope.ActorID, "error_type": fmt.Sprintf("%T", listErr)}).Warn("Slack channel automations list failed")
+						eventLogger.WithCtx(blackbox.Ctx{"channel_id": automationCommand.ChannelID, "actor_id": automationCommand.ActorID, "error_type": fmt.Sprintf("%T", listErr)}).Warn("Slack channel automations list failed")
 						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralCommandResponse("Channel automations are not available in this channel right now."))
+						continue
+					}
+					if task, ok := singleEditableAutomation(tasks); ok && s.views != nil {
+						if ackErr := s.client.AckCtx(ctx, event.Request.EnvelopeID, nil); ackErr != nil {
+							continue
+						}
+						if _, openErr := s.views.OpenViewContext(ctx, automationCommand.TriggerID, automationModal(automationCommand.Scope, task)); openErr != nil {
+							eventLogger.WithCtx(blackbox.Ctx{"channel_id": automationCommand.ChannelID, "automation_id": task.ID, "error_type": fmt.Sprintf("%T", openErr)}).Error("Slack automation modal open failed")
+						}
 						continue
 					}
 					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralAutomationResponse(tasks))
@@ -988,18 +997,23 @@ func NormalizeStatusCommand(options LiveOptions, data any) (ModeChangeRequest, b
 	}, true, nil
 }
 
-func NormalizeAutomationCommand(options LiveOptions, data any) (automations.Scope, bool, error) {
+type AutomationCommand struct {
+	automations.Scope
+	TriggerID string
+}
+
+func NormalizeAutomationCommand(options LiveOptions, data any) (AutomationCommand, bool, error) {
 	command, ok, err := normalizeSlashCommand(data)
 	if err != nil || !ok {
-		return automations.Scope{}, false, err
+		return AutomationCommand{}, false, err
 	}
 	if command.Command != automationsSlashCommand {
-		return automations.Scope{}, false, nil
+		return AutomationCommand{}, false, nil
 	}
-	if command.TeamID != options.TeamID || (command.APIAppID != "" && command.APIAppID != options.AppID) || command.ChannelID == "" || command.UserID == "" || strings.TrimSpace(command.Text) != "" {
-		return automations.Scope{}, false, errors.New("Slack automations command scope is invalid")
+	if command.TeamID != options.TeamID || (command.APIAppID != "" && command.APIAppID != options.AppID) || command.ChannelID == "" || command.UserID == "" || command.TriggerID == "" || strings.TrimSpace(command.Text) != "" {
+		return AutomationCommand{}, false, errors.New("Slack automations command scope is invalid")
 	}
-	return automations.Scope{OrganizationID: options.OrganizationID, WorkspaceID: command.TeamID, ChannelID: command.ChannelID, ActorID: command.UserID}, true, nil
+	return AutomationCommand{Scope: automations.Scope{OrganizationID: options.OrganizationID, WorkspaceID: command.TeamID, ChannelID: command.ChannelID, ActorID: command.UserID}, TriggerID: command.TriggerID}, true, nil
 }
 
 func NormalizeDirectiveCommand(options LiveOptions, data any) (directiveCommand, bool, error) {
@@ -1185,7 +1199,18 @@ func automationModal(scope automations.Scope, task automations.Task) slackapi.Mo
 }
 
 func ephemeralAutomationResponse(tasks []automations.Task) map[string]any {
-	header := slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", "*Channel automations*\nThese tasks are locked to this channel. Choose one to review or edit.", false, false), nil, nil)
+	editable := false
+	for _, task := range tasks {
+		if task.Editable {
+			editable = true
+			break
+		}
+	}
+	help := "These tasks are locked to this channel. You have read-only access; a channel approver or global automation operator can edit them."
+	if editable {
+		help = "These tasks are locked to this channel. Use Edit to open a task form."
+	}
+	header := slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", "*Channel automations*\n"+help, false, false), nil, nil)
 	blocks := []slackapi.Block{header}
 	const maxVisible = 20
 	for index, task := range tasks {
@@ -1215,6 +1240,13 @@ func ephemeralAutomationResponse(tasks []automations.Task) map[string]any {
 		blocks = append(blocks, slackapi.NewContextBlock("tos_tag_automation_limit", slackapi.NewTextBlockObject("mrkdwn", fmt.Sprintf("Showing the first %d of %d tasks.", maxVisible, len(tasks)), false, false)))
 	}
 	return map[string]any{"response_type": "ephemeral", "text": fmt.Sprintf("%d channel automations", len(tasks)), "blocks": blocks}
+}
+
+func singleEditableAutomation(tasks []automations.Task) (automations.Task, bool) {
+	if len(tasks) != 1 || !tasks[0].Editable {
+		return automations.Task{}, false
+	}
+	return tasks[0], true
 }
 
 func automationKindLabel(kind automations.Kind) string {

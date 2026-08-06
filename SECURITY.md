@@ -218,10 +218,12 @@ continue to honor their own TTL or source-validity boundaries.
 
 Automation identity includes organization, workspace, channel, and stable
 name. `/tag-automations` list/load/save paths reauthorize that exact channel,
-and edits cannot move an existing task. Only configured channel approvers can
-open or save the edit modal. Startup recovers missing legacy scope only from
-the task's durable session; an unresolved task is disabled before the scheduler
-starts.
+and edits cannot move an existing task. Only configured channel approvers or
+exact users in the global Slack automation-operator allowlist can open or save
+the edit modal. Global operator status never bypasses enrollment, workspace,
+kill-switch, version, or audit checks. Startup recovers missing legacy scope
+only from the task's durable session; an unresolved task is disabled before the
+scheduler starts.
 
 Generated memory expires no later than its sources' context-validity boundary. Operator
 correction pins a reviewed record; forgetting erases its summary, facts, model

@@ -114,10 +114,13 @@ commands, tests, and active documentation have been removed.
   Mongo persistence, and audit.
 - Read-only `/tag-status` command with an ephemeral native Block Kit table for
   mode, active directive, availability, bot membership, and channel scope.
-- `/tag-automations` ephemeral channel list and audited Slack modal editor for
-  direct routines and classifier-gated schedules. Repository identity,
-  scheduler advancement, and job idempotency are channel-scoped; startup
-  backfills legacy scope from sessions and disables unresolved rows.
+- `/tag-automations` direct single-task modal plus ephemeral multi-task channel
+  list and audited Slack modal editor for direct routines and classifier-gated
+  schedules. Exact configured global automation operators and channel
+  approvers may edit; other members receive an explicit read-only list.
+  Repository identity, scheduler advancement, and job idempotency are
+  channel-scoped; startup backfills legacy scope from sessions and disables
+  unresolved rows.
 - Standard five-field cron routines and classifier-gated heartbeat trigger
   subscriptions with explicit IANA timezones, legacy interval compatibility,
   and a combined management Automation view/editor.

@@ -35,7 +35,7 @@ func TestEditorListsAndUpdatesOnlyTheRequestedChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	appender, _ := audit.NewMemoryAppender([]byte("01234567890123456789012345678901"))
-	editor, err := NewEditor(routineStore, triggerStore, scopes, appender)
+	editor, err := NewEditor(routineStore, triggerStore, scopes, appender, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,5 +54,65 @@ func TestEditorListsAndUpdatesOnlyTheRequestedChannel(t *testing.T) {
 	}
 	if _, err := editor.Save(context.Background(), SaveRequest{Scope: scope, Kind: KindHeartbeat, ID: "daily", Instruction: "stale", Cron: "0 1 * * *", Timezone: "UTC", MinConfidence: .8, Enabled: true, Version: saved.Version, SourceID: "view-2"}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale edit error=%v", err)
+	}
+}
+
+func TestGlobalOperatorCanEditEveryEnrolledChannel(t *testing.T) {
+	now := time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC)
+	routineStore := routines.NewStore()
+	triggerStore := triggers.NewStore(func() time.Time { return now })
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org", Name: "Org"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org", TeamID: "team", Name: "Team", Enabled: true})
+	for _, channelID := range []string{"alerts", "operations"} {
+		_, _ = scopes.PutChannel(context.Background(), orgconfig.ChannelPolicy{OrganizationID: "org", TeamID: "team", ChannelID: channelID, Name: channelID, Enrolled: true, ParticipationMode: types.ModeAssist, Cooldown: time.Second, MaxResponsesPerHour: 10, MaxConcurrentJobs: 2, ApproverUserIDs: []string{"channel-approver"}, MembershipRevision: "m1", MembershipRefreshedAt: now})
+		if _, err := routineStore.PutContext(context.Background(), routines.Routine{ID: "daily", OrganizationID: "org", WorkspaceID: "team", ChannelID: channelID, SessionID: types.SessionID(channelID), Generation: 1, OwnerID: "owner", Input: "Review the channel.", Cron: "0 9 * * *", Timezone: "UTC", Enabled: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appender, _ := audit.NewMemoryAppender([]byte("01234567890123456789012345678901"))
+	editor, err := NewEditor(routineStore, triggerStore, scopes, appender, []string{"global-operator"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, channelID := range []string{"alerts", "operations"} {
+		scope := Scope{OrganizationID: "org", WorkspaceID: "team", ChannelID: channelID, ActorID: "global-operator"}
+		listed, err := editor.List(context.Background(), scope)
+		if err != nil || len(listed) != 1 || !listed[0].Editable {
+			t.Fatalf("channel=%s listed=%#v err=%v", channelID, listed, err)
+		}
+		loaded, err := editor.Load(context.Background(), scope, KindRoutine, "daily")
+		if err != nil || !loaded.Editable {
+			t.Fatalf("channel=%s loaded=%#v err=%v", channelID, loaded, err)
+		}
+		if _, err := editor.Save(context.Background(), SaveRequest{Scope: scope, Kind: KindRoutine, ID: "daily", Instruction: "Review this channel and summarize material changes.", Cron: "30 9 * * *", Timezone: "UTC", Enabled: true, Version: loaded.Version, SourceID: "view-" + channelID}); err != nil {
+			t.Fatalf("channel=%s save error=%v", channelID, err)
+		}
+	}
+}
+
+func TestUnconfiguredUserGetsReadOnlyAutomationList(t *testing.T) {
+	now := time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC)
+	routineStore := routines.NewStore()
+	triggerStore := triggers.NewStore(func() time.Time { return now })
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org", Name: "Org"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org", TeamID: "team", Name: "Team", Enabled: true})
+	_, _ = scopes.PutChannel(context.Background(), orgconfig.ChannelPolicy{OrganizationID: "org", TeamID: "team", ChannelID: "alerts", Name: "alerts", Enrolled: true, ParticipationMode: types.ModeAssist, Cooldown: time.Second, MaxResponsesPerHour: 10, MaxConcurrentJobs: 2, MembershipRevision: "m1", MembershipRefreshedAt: now})
+	if _, err := routineStore.PutContext(context.Background(), routines.Routine{ID: "daily", OrganizationID: "org", WorkspaceID: "team", ChannelID: "alerts", SessionID: "alerts", Generation: 1, OwnerID: "owner", Input: "Review the channel.", Cron: "0 9 * * *", Timezone: "UTC", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	appender, _ := audit.NewMemoryAppender([]byte("01234567890123456789012345678901"))
+	editor, err := NewEditor(routineStore, triggerStore, scopes, appender, []string{"global-operator"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := Scope{OrganizationID: "org", WorkspaceID: "team", ChannelID: "alerts", ActorID: "viewer"}
+	listed, err := editor.List(context.Background(), scope)
+	if err != nil || len(listed) != 1 || listed[0].Editable {
+		t.Fatalf("listed=%#v err=%v", listed, err)
+	}
+	if _, err := editor.Load(context.Background(), scope, KindRoutine, "daily"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("read-only user load error=%v", err)
 	}
 }

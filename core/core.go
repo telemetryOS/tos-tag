@@ -161,7 +161,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	if err != nil {
 		return nil, fmt.Errorf("construct channel directive editor: %w", err)
 	}
-	automationEditor, err := automations.NewEditor(routineStore, triggerStore, organizationStore, auditChain)
+	automationEditor, err := automations.NewEditor(routineStore, triggerStore, organizationStore, auditChain, cfg.Slack.AutomationOperatorUserIDs)
 	if err != nil {
 		return nil, fmt.Errorf("construct channel automation editor: %w", err)
 	}

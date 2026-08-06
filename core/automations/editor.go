@@ -65,18 +65,26 @@ type SaveRequest struct {
 }
 
 type Editor struct {
-	routines routines.Repository
-	triggers triggers.Repository
-	scopes   orgconfig.Resolver
-	audit    audit.Appender
-	now      func() time.Time
+	routines        routines.Repository
+	triggers        triggers.Repository
+	scopes          orgconfig.Resolver
+	audit           audit.Appender
+	globalOperators map[string]struct{}
+	now             func() time.Time
 }
 
-func NewEditor(routineStore routines.Repository, triggerStore triggers.Repository, scopes orgconfig.Resolver, appender audit.Appender) (*Editor, error) {
+func NewEditor(routineStore routines.Repository, triggerStore triggers.Repository, scopes orgconfig.Resolver, appender audit.Appender, globalOperatorUserIDs []string) (*Editor, error) {
 	if routineStore == nil || triggerStore == nil || scopes == nil || appender == nil {
 		return nil, errors.New("automation editor requires routine, trigger, scope, and audit stores")
 	}
-	return &Editor{routines: routineStore, triggers: triggerStore, scopes: scopes, audit: appender, now: time.Now}, nil
+	globalOperators := make(map[string]struct{}, len(globalOperatorUserIDs))
+	for _, userID := range globalOperatorUserIDs {
+		if userID == "" {
+			return nil, errors.New("automation editor global operator user IDs must not be empty")
+		}
+		globalOperators[userID] = struct{}{}
+	}
+	return &Editor{routines: routineStore, triggers: triggerStore, scopes: scopes, audit: appender, globalOperators: globalOperators, now: time.Now}, nil
 }
 
 func (e *Editor) List(ctx context.Context, scope Scope) ([]Task, error) {
@@ -95,12 +103,12 @@ func (e *Editor) List(ctx context.Context, scope Scope) ([]Task, error) {
 	result := make([]Task, 0, len(routineValues)+len(triggerValues))
 	for _, value := range routineValues {
 		task := routineTask(value)
-		task.Editable = channelApprover(policy, scope.ActorID)
+		task.Editable = e.canEdit(policy, scope.ActorID)
 		result = append(result, task)
 	}
 	for _, value := range triggerValues {
 		task := triggerTask(value)
-		task.Editable = channelApprover(policy, scope.ActorID)
+		task.Editable = e.canEdit(policy, scope.ActorID)
 		result = append(result, task)
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -120,7 +128,7 @@ func (e *Editor) Load(ctx context.Context, scope Scope, kind Kind, id string) (T
 	if err != nil {
 		return Task{}, err
 	}
-	if !channelApprover(policy, scope.ActorID) {
+	if !e.canEdit(policy, scope.ActorID) {
 		return Task{}, ErrForbidden
 	}
 	if id == "" {
@@ -153,7 +161,7 @@ func (e *Editor) Save(ctx context.Context, request SaveRequest) (Task, error) {
 	if err != nil {
 		return Task{}, err
 	}
-	if !channelApprover(policy, request.ActorID) {
+	if !e.canEdit(policy, request.ActorID) {
 		return Task{}, ErrForbidden
 	}
 	if request.SourceID == "" || request.ID == "" || request.Version <= 0 || request.Instruction == "" || request.Cron == "" || request.Timezone == "" {
@@ -242,6 +250,13 @@ func channelApprover(policy orgconfig.ChannelPolicy, actorID string) bool {
 		}
 	}
 	return false
+}
+
+func (e *Editor) canEdit(policy orgconfig.ChannelPolicy, actorID string) bool {
+	if _, ok := e.globalOperators[actorID]; ok {
+		return true
+	}
+	return channelApprover(policy, actorID)
 }
 
 func routineTask(value routines.Routine) Task {

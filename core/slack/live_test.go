@@ -884,9 +884,9 @@ func TestDirectiveCommandAndModalSubmissionRemainChannelBound(t *testing.T) {
 
 func TestAutomationCommandListEditAndSubmissionRemainChannelBound(t *testing.T) {
 	options := LiveOptions{OrganizationID: "org", AppID: "A123", TeamID: "T123"}
-	scope, eligible, err := NormalizeAutomationCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: automationsSlashCommand})
-	if err != nil || !eligible || scope.ChannelID != "C_ALERTS" || scope.ActorID != "U_ADMIN" {
-		t.Fatalf("scope=%#v eligible=%v err=%v", scope, eligible, err)
+	command, eligible, err := NormalizeAutomationCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: automationsSlashCommand, TriggerID: "trigger-command"})
+	if err != nil || !eligible || command.ChannelID != "C_ALERTS" || command.ActorID != "U_ADMIN" || command.TriggerID != "trigger-command" {
+		t.Fatalf("command=%#v eligible=%v err=%v", command, eligible, err)
 	}
 	task := automations.Task{Kind: automations.KindHeartbeat, ID: "weekday-check", Instruction: "Check unresolved alerts.", Cron: "0 9 * * 1-5", Timezone: "America/Vancouver", MinConfidence: .8, Enabled: true, Version: 3, Editable: true}
 	response := ephemeralAutomationResponse([]automations.Task{task})
@@ -897,6 +897,9 @@ func TestAutomationCommandListEditAndSubmissionRemainChannelBound(t *testing.T) 
 	section, ok := blocks[1].(*slackapi.SectionBlock)
 	if !ok || section.Accessory == nil || section.Accessory.ButtonElement == nil {
 		t.Fatalf("automation list section=%#v", blocks[1])
+	}
+	if selected, ok := singleEditableAutomation([]automations.Task{task}); !ok || selected.ID != task.ID {
+		t.Fatalf("single editable automation not selected: selected=%#v ok=%v", selected, ok)
 	}
 	callback := slackapi.InteractionCallback{
 		Type: slackapi.InteractionTypeBlockActions, APIAppID: "A123", TriggerID: "trigger-1", Team: slackapi.Team{ID: "T123"}, Channel: slackapi.Channel{GroupConversation: slackapi.GroupConversation{Conversation: slackapi.Conversation{ID: "C_ALERTS"}}}, User: slackapi.User{ID: "U_ADMIN"},
@@ -927,6 +930,23 @@ func TestAutomationCommandListEditAndSubmissionRemainChannelBound(t *testing.T) 
 	submit.Team.ID = "T999"
 	if _, _, err := NormalizeAutomationSubmission(options, submit); err == nil {
 		t.Fatal("cross-workspace automation submission was accepted")
+	}
+}
+
+func TestAutomationReadOnlyListExplainsMissingEditControls(t *testing.T) {
+	task := automations.Task{Kind: automations.KindRoutine, ID: "daily", Instruction: "Review the channel.", Cron: "0 9 * * *", Timezone: "UTC", Enabled: true, Version: 1}
+	response := ephemeralAutomationResponse([]automations.Task{task})
+	blocks := response["blocks"].([]slackapi.Block)
+	header := blocks[0].(*slackapi.SectionBlock)
+	section := blocks[1].(*slackapi.SectionBlock)
+	if !strings.Contains(header.Text.Text, "read-only access") || section.Accessory != nil {
+		t.Fatalf("read-only response=%#v", response)
+	}
+	if _, ok := singleEditableAutomation([]automations.Task{task}); ok {
+		t.Fatal("read-only automation selected for direct modal")
+	}
+	if _, ok := singleEditableAutomation([]automations.Task{task, task}); ok {
+		t.Fatal("multiple automations selected for direct modal")
 	}
 }
 

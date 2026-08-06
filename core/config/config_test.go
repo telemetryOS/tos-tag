@@ -283,6 +283,7 @@ func TestLoadSlackContextSyncEnvironment(t *testing.T) {
 	t.Setenv("TAG__SLACK__CONTEXT_SYNC_MAX_MESSAGES", "300")
 	t.Setenv("TAG__SLACK__CONTEXT_SYNC_MESSAGES_PER_CHANNEL", "20")
 	t.Setenv("TAG__SLACK__AUTO_ASSIST_JOINED_CHANNELS", "true")
+	t.Setenv("TAG__SLACK__AUTOMATION_OPERATOR_USER_IDS", "U-admin,W-owner")
 	t.Setenv("TAG__SLACK__OUTPUT_CHANNEL_IDS", "C-test,G-test")
 	t.Setenv("TAG__SLACK__MODE", "socket_mode")
 	t.Setenv("TAG__SLACK__LIVE_ENABLED", "true")
@@ -303,6 +304,24 @@ func TestLoadSlackContextSyncEnvironment(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfg.Slack.OutputChannelIDs, []string{"C-test", "G-test"}) {
 		t.Fatalf("Slack output channel allowlist did not map: %#v", cfg.Slack.OutputChannelIDs)
+	}
+	if !reflect.DeepEqual(cfg.Slack.AutomationOperatorUserIDs, []string{"U-admin", "W-owner"}) {
+		t.Fatalf("Slack automation operators did not map: %#v", cfg.Slack.AutomationOperatorUserIDs)
+	}
+	if cfg.RedactedStatus()["slack_automation_operator_count"] != 2 {
+		t.Fatalf("redacted status omitted Slack automation operator count: %#v", cfg.RedactedStatus())
+	}
+}
+
+func TestValidateSlackAutomationOperators(t *testing.T) {
+	cfg := DefaultConfiguration
+	cfg.Slack.AutomationOperatorUserIDs = []string{"U-admin", "U-admin"}
+	if err := Validate(&cfg); err == nil || !strings.Contains(err.Error(), "must be unique") {
+		t.Fatalf("duplicate automation operators error = %v", err)
+	}
+	cfg.Slack.AutomationOperatorUserIDs = []string{"gersham"}
+	if err := Validate(&cfg); err == nil || !strings.Contains(err.Error(), "U or W prefix") {
+		t.Fatalf("invalid automation operator error = %v", err)
 	}
 }
 

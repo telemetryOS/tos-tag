@@ -316,6 +316,11 @@ Also configure the organization, team, app, bot user, Socket Mode/live flags,
 context sync, and explicit output channel allowlist shown in
 [runtime.env.example](runtime.env.example).
 
+`TAG__SLACK__AUTOMATION_OPERATOR_USER_IDS` is an optional comma-separated list
+of exact Slack user IDs. Those users may edit automations in every enrolled,
+enabled channel in the configured workspace; channel identity, workspace
+identity, kill switches, version checks, and audit requirements still apply.
+
 Normalized Slack messages are retained indefinitely in MongoDB and have no
 TTL index. Context assembly remains bounded independently: only messages from
 `TAG__CONTEXT_PACKS__LOOKBACK` are eligible for a new prompt, with a default of
@@ -446,13 +451,16 @@ revision and a bounded prompt preview, workspace/channel availability, Tag's
 reconciled Slack membership, and whether the channel is public or restricted.
 The command is read-only and includes shortcuts for the four channel controls.
 
-`/tag-automations` returns an ephemeral list of the current channel's direct
-routines and classifier-gated schedules. Each Edit button opens a Slack modal
-for the task instruction, cron, timezone, enabled state, and—when applicable—
-classifier confidence. An existing task's workspace/channel identity is
-immutable; the modal uses its persisted version to reject stale edits. Channel
-members may inspect the list, while only configured channel approvers receive
-Edit controls and may save changes.
+`/tag-automations` manages the current channel's direct routines and
+classifier-gated schedules. When exactly one editable task exists, the command
+opens its Slack modal directly. Otherwise it returns an ephemeral list whose
+Edit buttons open the task modal for instruction, cron, timezone, enabled
+state, and—when applicable—classifier confidence. An existing task's
+workspace/channel identity is immutable; the modal uses its persisted version
+to reject stale edits. Channel members may inspect the list. Configured channel
+approvers and the Slack users named in
+`TAG__SLACK__AUTOMATION_OPERATOR_USER_IDS` receive Edit controls and may save
+changes; other users get an explicit read-only explanation.
 
 With `TAG__SLACK__AUTO_ASSIST_JOINED_CHANNELS=true`, Slack membership owns the
 `observe`/`assist` transition for public and private channels. Startup
@@ -762,6 +770,9 @@ channel's policy and directive in an ephemeral response.
 `/tag-automations` is subject to the same enrolled-channel boundary. It lists
 and edits only automations whose durable workspace and channel match the
 invocation; saves are audit-committed and cannot move a task between channels.
+Channel approvers and configured global automation operators may edit. A
+single editable task opens directly in its modal; multiple tasks use the
+ephemeral selection list.
 
 ### Logging and audit
 

@@ -64,6 +64,7 @@ type SlackConfig struct {
 	ContextSyncMaxMessages        int           `config:"contextSyncMaxMessages"`
 	ContextSyncMessagesPerChannel int           `config:"contextSyncMessagesPerChannel"`
 	AutoAssistJoinedChannels      bool          `config:"autoAssistJoinedChannels"`
+	AutomationOperatorUserIDs     []string      `config:"automationOperatorUserIds"`
 	OutputChannelIDs              []string      `config:"outputChannelIds"`
 	StubQueueSize                 int           `config:"stubQueueSize"`
 }
@@ -339,6 +340,9 @@ func applySlackEnvironment(cfg *SlackConfig) error {
 	if raw, ok := os.LookupEnv("TAG__SLACK__OUTPUT_CHANNEL_IDS"); ok {
 		cfg.OutputChannelIDs = splitNonEmpty(raw)
 	}
+	if raw, ok := os.LookupEnv("TAG__SLACK__AUTOMATION_OPERATOR_USER_IDS"); ok {
+		cfg.AutomationOperatorUserIDs = splitNonEmpty(raw)
+	}
 	return nil
 }
 
@@ -516,6 +520,16 @@ func Validate(cfg *Config) error {
 		}
 		seenOutputChannels[channelID] = struct{}{}
 	}
+	seenAutomationOperators := make(map[string]struct{}, len(cfg.Slack.AutomationOperatorUserIDs))
+	for _, userID := range cfg.Slack.AutomationOperatorUserIDs {
+		if !strings.HasPrefix(userID, "U") && !strings.HasPrefix(userID, "W") {
+			return fmt.Errorf("Slack automation operator user IDs must use the U or W prefix")
+		}
+		if _, duplicate := seenAutomationOperators[userID]; duplicate {
+			return fmt.Errorf("Slack automation operator user IDs must be unique")
+		}
+		seenAutomationOperators[userID] = struct{}{}
+	}
 	if cfg.Retention.RawEnvelope <= 0 || cfg.Retention.Prompt <= 0 || cfg.Retention.Sweep <= 0 {
 		return fmt.Errorf("retention durations must be positive")
 	}
@@ -664,6 +678,7 @@ func (c *Config) RedactedStatus() map[string]any {
 		"slack_context_sync_max_channels":     c.Slack.ContextSyncMaxChannels,
 		"slack_context_sync_max_messages":     c.Slack.ContextSyncMaxMessages,
 		"slack_auto_assist_joined_channels":   c.Slack.AutoAssistJoinedChannels,
+		"slack_automation_operator_count":     len(c.Slack.AutomationOperatorUserIDs),
 		"slack_output_channel_count":          len(c.Slack.OutputChannelIDs),
 		"classifier_mode":                     c.Classifier.Mode,
 		"classifier_provider":                 c.Classifier.Provider,
