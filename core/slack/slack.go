@@ -91,6 +91,7 @@ type ModeChangeHandler func(context.Context, ModeChangeRequest) (ModeChangeResul
 type AutomationListHandler func(context.Context, automations.Scope) (automations.ListResult, error)
 type AutomationLoadHandler func(context.Context, automations.Scope, automations.Kind, string) (automations.Task, error)
 type AutomationSaveHandler func(context.Context, automations.SaveRequest) (automations.Task, error)
+type AutomationDeleteHandler func(context.Context, automations.DeleteRequest) (automations.Task, error)
 
 type Ingress interface {
 	Start(context.Context, Handler) error

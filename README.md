@@ -456,14 +456,15 @@ The command is read-only and includes shortcuts for the four channel controls.
 classifier-gated schedules. Authorized editors first get a Slack chooser with
 every existing automation plus Add automation; continuing opens the task
 editor for instruction, cron, enabled state, and—when applicable—classifier
-confidence. The timezone is intentionally hidden: existing tasks keep their
-stored timezone and new schedules use
+confidence. Existing tasks also show a danger-styled Delete automation action
+with Slack's native confirmation prompt. The timezone is intentionally hidden:
+existing tasks keep their stored timezone and new schedules use
 `TAG__SLACK__AUTOMATION_DEFAULT_TIMEZONE`. An existing task's workspace/channel
 identity is immutable; the modal uses its persisted version to reject stale
 edits. Channel members may inspect the read-only list. Configured channel
 approvers and the Slack users named in
-`TAG__SLACK__AUTOMATION_OPERATOR_USER_IDS` receive Edit controls and may save
-changes; other users get an explicit read-only explanation.
+`TAG__SLACK__AUTOMATION_OPERATOR_USER_IDS` may edit or delete; other users get
+an explicit read-only explanation.
 
 With `TAG__SLACK__AUTO_ASSIST_JOINED_CHANNELS=true`, Slack membership owns the
 `observe`/`assist` transition for public and private channels. Startup

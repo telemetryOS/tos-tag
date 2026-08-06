@@ -217,12 +217,14 @@ Raw observations, context packs, prompts, delivery state, and derived records
 continue to honor their own TTL or source-validity boundaries.
 
 Automation identity includes organization, workspace, channel, and stable
-name. `/tag-automations` list/load/create/save paths reauthorize that exact
-channel, and edits cannot move an existing task. Only configured channel
+name. `/tag-automations` list/load/create/save/delete paths reauthorize that
+exact channel, and edits cannot move an existing task. Only configured channel
 approvers or exact users in the global Slack automation-operator allowlist can
-open the chooser or save the edit modal. New Slack-created tasks receive a
-channel-bound session and classifier gate; their default timezone is carried in
-private modal metadata rather than trusted from a visible field. Global
+open the chooser, save the edit modal, or confirm deletion. Deletes include the
+persisted version in the exact channel-scoped repository filter. New
+Slack-created tasks receive a channel-bound session and classifier gate; their
+default timezone is carried in private modal metadata rather than trusted from
+a visible field. Global
 operator status never bypasses enrollment, workspace, kill-switch, version,
 duplicate-name, or audit checks. Startup recovers missing legacy scope only
 from the task's durable session; an unresolved task is disabled before the

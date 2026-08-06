@@ -86,8 +86,19 @@ func TestGlobalOperatorCanEditEveryEnrolledChannel(t *testing.T) {
 		if err != nil || !loaded.Editable {
 			t.Fatalf("channel=%s loaded=%#v err=%v", channelID, loaded, err)
 		}
-		if _, err := editor.Save(context.Background(), SaveRequest{Scope: scope, Kind: KindRoutine, ID: "daily", Instruction: "Review this channel and summarize material changes.", Cron: "30 9 * * *", Timezone: "UTC", Enabled: true, Version: loaded.Version, SourceID: "view-" + channelID}); err != nil {
+		saved, err := editor.Save(context.Background(), SaveRequest{Scope: scope, Kind: KindRoutine, ID: "daily", Instruction: "Review this channel and summarize material changes.", Cron: "30 9 * * *", Timezone: "UTC", Enabled: true, Version: loaded.Version, SourceID: "view-" + channelID})
+		if err != nil {
 			t.Fatalf("channel=%s save error=%v", channelID, err)
+		}
+		if _, err := editor.Delete(context.Background(), DeleteRequest{Scope: scope, Kind: KindRoutine, ID: "daily", Version: loaded.Version, SourceID: "stale-delete-" + channelID}); !errors.Is(err, ErrConflict) {
+			t.Fatalf("channel=%s stale delete error=%v", channelID, err)
+		}
+		deleted, err := editor.Delete(context.Background(), DeleteRequest{Scope: scope, Kind: KindRoutine, ID: "daily", Version: saved.Version, SourceID: "delete-" + channelID})
+		if err != nil || deleted.ID != "daily" {
+			t.Fatalf("channel=%s deleted=%#v err=%v", channelID, deleted, err)
+		}
+		if _, err := editor.Load(context.Background(), scope, KindRoutine, "daily"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("channel=%s deleted routine load error=%v", channelID, err)
 		}
 	}
 }
@@ -115,6 +126,9 @@ func TestUnconfiguredUserGetsReadOnlyAutomationList(t *testing.T) {
 	}
 	if _, err := editor.Load(context.Background(), scope, KindRoutine, "daily"); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("read-only user load error=%v", err)
+	}
+	if _, err := editor.Delete(context.Background(), DeleteRequest{Scope: scope, Kind: KindRoutine, ID: "daily", Version: 1, SourceID: "view-delete"}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("read-only user delete error=%v", err)
 	}
 }
 
@@ -147,5 +161,12 @@ func TestEditorCreatesAChannelBoundClassifierGatedAutomation(t *testing.T) {
 	}
 	if _, err := editor.Save(context.Background(), SaveRequest{Scope: scope, Kind: KindHeartbeat, ID: "weekday-summary", Instruction: "Duplicate.", Cron: "0 18 * * 1-5", Timezone: listed.DefaultTimezone, MinConfidence: .8, Enabled: true, SourceID: "view-duplicate"}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("duplicate create error=%v", err)
+	}
+	deleted, err := editor.Delete(context.Background(), DeleteRequest{Scope: scope, Kind: KindHeartbeat, ID: created.ID, Version: created.Version, SourceID: "view-delete"})
+	if err != nil || deleted.ID != created.ID {
+		t.Fatalf("deleted=%#v err=%v", deleted, err)
+	}
+	if _, err := triggerStore.GetContext(context.Background(), "org", "team", "management", created.ID); err == nil {
+		t.Fatal("deleted classifier-gated automation still exists")
 	}
 }

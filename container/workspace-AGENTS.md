@@ -83,9 +83,9 @@ Never treat local Codex session history as runtime authority.
   sandbox, and capability gateway enforce the boundary together. Workers do
   not receive `/workspace/code`, the operator home, connector secrets, or the
   capability token.
-- Automation records and `/tag-automations` creates/edits remain locked to
-  their organization/workspace/channel identity; never migrate them by copying
-  a stable name into a different channel.
+- Automation records and `/tag-automations` creates/edits/deletes remain locked
+  to their organization/workspace/channel identity; never migrate them by
+  copying a stable name into a different channel.
 - This environment intentionally has no host Docker socket. `aion sync`,
   `aion list`, and repository operations work here; Docker-backed `aion start`
   components require a separately reviewed container-runtime design.

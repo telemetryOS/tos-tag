@@ -66,6 +66,14 @@ type SaveRequest struct {
 	SourceID      string
 }
 
+type DeleteRequest struct {
+	Scope
+	Kind     Kind
+	ID       string
+	Version  int64
+	SourceID string
+}
+
 type ListResult struct {
 	Tasks           []Task
 	Editable        bool
@@ -279,6 +287,68 @@ func (e *Editor) Save(ctx context.Context, request SaveRequest) (Task, error) {
 		return Task{}, fmt.Errorf("record automation audit receipt: %w", err)
 	}
 	return saved, nil
+}
+
+func (e *Editor) Delete(ctx context.Context, request DeleteRequest) (Task, error) {
+	policy, err := e.authorize(ctx, request.Scope)
+	if err != nil {
+		return Task{}, err
+	}
+	if !e.canEdit(policy, request.ActorID) {
+		return Task{}, ErrForbidden
+	}
+	if request.SourceID == "" || request.ID == "" || request.Version <= 0 {
+		return Task{}, ErrInvalid
+	}
+	var deleted Task
+	switch request.Kind {
+	case KindRoutine:
+		current, err := e.routines.GetContext(ctx, request.OrganizationID, request.WorkspaceID, request.ChannelID, request.ID)
+		if err != nil {
+			return Task{}, ErrNotFound
+		}
+		if current.Version != request.Version {
+			return Task{}, ErrConflict
+		}
+		if err := e.routines.DeleteContext(ctx, request.OrganizationID, request.WorkspaceID, request.ChannelID, request.ID, request.Version); err != nil {
+			if errors.Is(err, routines.ErrUpdateConflict) {
+				return Task{}, ErrConflict
+			}
+			return Task{}, fmt.Errorf("delete routine: %w", err)
+		}
+		deleted = routineTask(current)
+	case KindHeartbeat:
+		current, err := e.triggers.GetContext(ctx, request.OrganizationID, request.WorkspaceID, request.ChannelID, request.ID)
+		if err != nil {
+			return Task{}, ErrNotFound
+		}
+		if current.Version != request.Version {
+			return Task{}, ErrConflict
+		}
+		if err := e.triggers.DeleteContext(ctx, request.OrganizationID, request.WorkspaceID, request.ChannelID, request.ID, request.Version); err != nil {
+			if errors.Is(err, triggers.ErrUpdateConflict) {
+				return Task{}, ErrConflict
+			}
+			return Task{}, fmt.Errorf("delete trigger subscription: %w", err)
+		}
+		deleted = triggerTask(current)
+	default:
+		return Task{}, ErrInvalid
+	}
+	_, err = e.audit.Append(ctx, audit.AppendRequest{
+		OrganizationID: request.OrganizationID,
+		Type:           "automation.deleted",
+		ActorID:        request.ActorID,
+		ResourceID:     string(request.Kind) + "/" + request.ChannelID + "/" + request.ID,
+		Metadata:       map[string]any{"channel_id": request.ChannelID, "automation_kind": string(request.Kind), "version": deleted.Version, "source": "slack_modal"},
+		RetentionEpoch: e.now().UTC().Format("2006-01"),
+		IdempotencyKey: fmt.Sprintf("automation-delete/%s/%s/%s/%d", request.Kind, request.ChannelID, request.ID, deleted.Version),
+		Content:        []byte(deleted.Instruction),
+	})
+	if err != nil {
+		return Task{}, fmt.Errorf("record automation deletion audit receipt: %w", err)
+	}
+	return deleted, nil
 }
 
 func validStableID(value string) bool {

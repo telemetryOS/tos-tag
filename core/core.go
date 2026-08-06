@@ -368,6 +368,9 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 			func(ctx context.Context, request automations.SaveRequest) (automations.Task, error) {
 				return automationEditor.Save(ctx, request)
 			},
+			func(ctx context.Context, request automations.DeleteRequest) (automations.Task, error) {
+				return automationEditor.Delete(ctx, request)
+			},
 		)
 	}
 	pipe, err := pipeline.New(pipeline.Dependencies{

@@ -575,16 +575,18 @@ lookup fails closed for the entire response.
 for the invoking workspace/channel. Authorized editors always enter through a
 Block Kit chooser that offers every existing task plus Add automation; the
 second modal edits instruction, cron, enabled state, and trigger confidence.
+Persisted tasks include a confirmed danger action that deletes the exact
+channel-scoped version and replaces the modal with the deletion result.
 Timezone is carried in private modal metadata rather than exposed as an input:
 existing tasks retain their stored timezone and new tasks receive the configured
 Slack automation default. New Slack-created tasks are classifier-gated
 schedules with channel-bound sessions and stable names. Modal metadata carries
-the immutable workspace/channel/kind/name identity and current version; load
-and save reauthorize that exact scope and reject stale versions. Listing is
-available to members of the enrolled channel; chooser/load/save additionally
-requires the actor to be a configured channel approver or an exact user in the
-global Slack automation-operator allowlist. Creates and updates are committed
-to the audit chain.
+the immutable workspace/channel/kind/name identity and current version; load,
+save, and delete reauthorize that exact scope and reject stale versions. Listing
+is available to members of the enrolled channel; chooser/load/save/delete
+additionally requires the actor to be a configured channel approver or an exact
+user in the global Slack automation-operator allowlist. Creates, updates, and
+deletes are committed to the audit chain.
 
 Routines enqueue ordinary reauthorized jobs on a standard five-field cron
 schedule with an explicit IANA timezone. Trigger subscriptions wake on the

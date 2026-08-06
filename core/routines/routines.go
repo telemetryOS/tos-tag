@@ -64,6 +64,7 @@ type Store struct {
 type Repository interface {
 	PutContext(context.Context, Routine) (Routine, error)
 	UpdateContext(context.Context, Routine, int64) (Routine, error)
+	DeleteContext(context.Context, string, string, string, string, int64) error
 	GetContext(context.Context, string, string, string, string) (Routine, error)
 	DueContext(context.Context, time.Time, int) ([]Routine, error)
 	AdvanceContext(context.Context, string, string, string, string, time.Time) error
@@ -115,6 +116,18 @@ func (s *Store) UpdateContext(_ context.Context, r Routine, expectedVersion int6
 	r.UpdatedAt = time.Now().UTC()
 	s.routines[key] = r
 	return r, nil
+}
+
+func (s *Store) DeleteContext(_ context.Context, organizationID, workspaceID, channelID, id string, expectedVersion int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := routineKey(organizationID, workspaceID, channelID, id)
+	current, ok := s.routines[key]
+	if !ok || current.Version != expectedVersion {
+		return ErrUpdateConflict
+	}
+	delete(s.routines, key)
+	return nil
 }
 func (s *Store) GetContext(_ context.Context, organizationID, workspaceID, channelID, id string) (Routine, error) {
 	s.mu.Lock()

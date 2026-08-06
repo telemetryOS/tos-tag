@@ -354,6 +354,19 @@ type fakeSocketModeTransport struct {
 	handled chan struct{}
 }
 
+type fakeViewAPI struct {
+	updated chan slackapi.ModalViewRequest
+}
+
+func (f *fakeViewAPI) OpenViewContext(context.Context, string, slackapi.ModalViewRequest) (*slackapi.ViewResponse, error) {
+	return &slackapi.ViewResponse{}, nil
+}
+
+func (f *fakeViewAPI) UpdateViewContext(_ context.Context, view slackapi.ModalViewRequest, _, _, _ string) (*slackapi.ViewResponse, error) {
+	f.updated <- view
+	return &slackapi.ViewResponse{}, nil
+}
+
 func newFakeSocketModeTransport() *fakeSocketModeTransport {
 	return &fakeSocketModeTransport{events: make(chan socketmode.Event, 8), acked: make(chan string, 8), payload: make(chan any, 8), handled: make(chan struct{}, 8)}
 }
@@ -913,11 +926,32 @@ func TestAutomationCommandPickerAndSubmissionRemainChannelBound(t *testing.T) {
 		t.Fatalf("choice=%#v eligible=%v err=%v", choice, eligible, err)
 	}
 	modal := automationModal(choice.Scope, task)
-	if modal.CallbackID != automationCallbackID || modal.PrivateMetadata == "" || len(modal.Blocks.BlockSet) != 4 {
+	if modal.CallbackID != automationCallbackID || modal.PrivateMetadata == "" || len(modal.Blocks.BlockSet) != 5 {
 		t.Fatalf("modal=%#v", modal)
 	}
 	if first, ok := modal.Blocks.BlockSet[0].(*slackapi.InputBlock); !ok || first.BlockID != automationInstructionID {
 		t.Fatalf("automation editor still has an introductory block: %#v", modal.Blocks.BlockSet[0])
+	}
+	actions, ok := modal.Blocks.BlockSet[4].(*slackapi.ActionBlock)
+	if !ok || actions.Elements == nil || len(actions.Elements.ElementSet) != 1 {
+		t.Fatalf("automation delete actions=%#v", modal.Blocks.BlockSet[4])
+	}
+	deleteButton, ok := actions.Elements.ElementSet[0].(*slackapi.ButtonBlockElement)
+	if !ok || deleteButton.ActionID != automationDeleteActionID || deleteButton.Style != slackapi.StyleDanger || deleteButton.Confirm == nil || deleteButton.Confirm.Style != slackapi.StyleDanger {
+		t.Fatalf("automation delete button=%#v", actions.Elements.ElementSet[0])
+	}
+	deleteCallback := slackapi.InteractionCallback{
+		Type: slackapi.InteractionTypeBlockActions, APIAppID: "A123", Team: slackapi.Team{ID: "T123"}, User: slackapi.User{ID: "U_ADMIN"},
+		View:           slackapi.View{ID: "V_DELETE", Hash: "hash-1", CallbackID: automationCallbackID, PrivateMetadata: modal.PrivateMetadata},
+		ActionCallback: slackapi.ActionCallbacks{BlockActions: []*slackapi.BlockAction{{ActionID: automationDeleteActionID, Value: deleteButton.Value}}},
+	}
+	deletion, eligible, err := NormalizeAutomationDeleteInteraction(options, deleteCallback)
+	if err != nil || !eligible || deletion.ID != task.ID || deletion.ChannelID != "C_ALERTS" || deletion.Version != task.Version || deletion.ViewID != "V_DELETE" || deletion.ViewHash != "hash-1" {
+		t.Fatalf("deletion=%#v eligible=%v err=%v", deletion, eligible, err)
+	}
+	deleteCallback.Team.ID = "T999"
+	if _, _, err := NormalizeAutomationDeleteInteraction(options, deleteCallback); err == nil {
+		t.Fatal("cross-workspace automation deletion was accepted")
 	}
 	submit := slackapi.InteractionCallback{
 		Type: slackapi.InteractionTypeViewSubmission, APIAppID: "A123", Team: slackapi.Team{ID: "T123"}, User: slackapi.User{ID: "U_ADMIN"},
@@ -963,6 +997,9 @@ func TestAutomationPickerCanOpenANewAutomationWithoutTimezoneInput(t *testing.T)
 		t.Fatalf("new automation editor still has an introductory block: %#v", modal.Blocks.BlockSet[0])
 	}
 	for _, block := range modal.Blocks.BlockSet {
+		if _, ok := block.(*slackapi.ActionBlock); ok {
+			t.Fatal("unsaved automation exposes a delete action")
+		}
 		if inputBlock, ok := block.(*slackapi.InputBlock); ok && inputBlock.BlockID == "automation_timezone" {
 			t.Fatal("timezone input is still visible")
 		}
@@ -978,6 +1015,56 @@ func TestAutomationPickerCanOpenANewAutomationWithoutTimezoneInput(t *testing.T)
 	request, eligible, err := NormalizeAutomationSubmission(options, submit)
 	if err != nil || !eligible || request.ID != "weekday-management-summary" || request.Version != 0 || request.Timezone != "America/Vancouver" {
 		t.Fatalf("request=%#v eligible=%v err=%v", request, eligible, err)
+	}
+}
+
+func TestLiveIngressDeletesAutomationAndReplacesTheModal(t *testing.T) {
+	transport := newFakeSocketModeTransport()
+	views := &fakeViewAPI{updated: make(chan slackapi.ModalViewRequest, 1)}
+	ingress := &LiveIngress{
+		options: LiveOptions{OrganizationID: "org", AppID: "A123", TeamID: "T123", BotUserID: "U_TAG", Logger: blackbox.New()},
+		client:  transport,
+		views:   views,
+	}
+	deleted := make(chan automations.DeleteRequest, 1)
+	ingress.SetAutomationHandlers(nil, nil, nil, func(_ context.Context, request automations.DeleteRequest) (automations.Task, error) {
+		deleted <- request
+		return automations.Task{Kind: request.Kind, ID: request.ID, Version: request.Version}, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := ingress.Start(ctx, func(context.Context, types.SlackEnvelope) (AcceptResult, error) { return AcceptResult{}, nil }); err != nil {
+		t.Fatal(err)
+	}
+	task := automations.Task{Kind: automations.KindRoutine, ID: "weekday-summary", Instruction: "Summarize.", Cron: "0 17 * * 1-5", Timezone: "America/Vancouver", Enabled: true, Version: 2}
+	modal := automationModal(automations.Scope{OrganizationID: "org", WorkspaceID: "T123", ChannelID: "C_MANAGEMENT", ActorID: "U_ADMIN"}, task)
+	transport.events <- socketmode.Event{
+		Type:    socketmode.EventTypeInteractive,
+		Request: &socketmode.Request{EnvelopeID: "delete-envelope"},
+		Data: slackapi.InteractionCallback{
+			Type: slackapi.InteractionTypeBlockActions, APIAppID: "A123", Team: slackapi.Team{ID: "T123"}, User: slackapi.User{ID: "U_ADMIN"},
+			View:           slackapi.View{ID: "V_DELETE", Hash: "hash-1", CallbackID: automationCallbackID, PrivateMetadata: modal.PrivateMetadata},
+			ActionCallback: slackapi.ActionCallbacks{BlockActions: []*slackapi.BlockAction{{ActionID: automationDeleteActionID, Value: "delete"}}},
+		},
+	}
+	select {
+	case request := <-deleted:
+		if request.ChannelID != "C_MANAGEMENT" || request.ID != task.ID || request.Version != task.Version {
+			t.Fatalf("delete request=%#v", request)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("automation delete handler was not called")
+	}
+	select {
+	case updated := <-views.updated:
+		if updated.Title == nil || updated.Title.Text != "Automation deleted" || updated.Submit != nil || updated.Close == nil || updated.Close.Text != "Close" {
+			t.Fatalf("deletion result modal=%#v", updated)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("automation deletion result did not replace the editor")
+	}
+	if err := ingress.Stop(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 

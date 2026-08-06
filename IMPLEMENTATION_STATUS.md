@@ -119,7 +119,8 @@ commands, tests, and active documentation have been removed.
   for direct routines and classifier-gated schedules. Timezone stays hidden;
   existing tasks retain it and new tasks use the configured default. Exact
   configured global automation operators and channel approvers may edit; other
-  members receive an explicit read-only list.
+  members receive an explicit read-only list. Persisted tasks have an audited,
+  version-checked Delete automation button with native Slack confirmation.
   Repository identity, scheduler advancement, and job idempotency are
   channel-scoped; startup backfills legacy scope from sessions and disables
   unresolved rows.

@@ -210,7 +210,8 @@ Only mark an item complete when source and verification evidence exist.
   stale-write-aware Slack modal editor; hide timezone while retaining an
   existing task's value or using the configured creation default, allow exact
   configured global automation operators alongside channel approvers, and
-  backfill legacy channel scope from durable sessions before scheduling.
+  provide confirmed, audited, version-checked deletion before backfilling
+  legacy channel scope from durable sessions prior to scheduling.
 - [x] Persist and reauthorize standard five-field cron routines with explicit
   IANA timezones while advancing legacy interval records safely.
 - [x] Persist classifier-gated cron heartbeat subscriptions and manage them in

@@ -90,6 +90,16 @@ func (s *MongoStore) UpdateContext(ctx context.Context, subscription Subscriptio
 	return saved, err
 }
 
+func (s *MongoStore) DeleteContext(ctx context.Context, organizationID, workspaceID, channelID, id string, expectedVersion int64) error {
+	filter := subscriptionScope(organizationID, workspaceID, channelID, id)
+	filter["version"] = expectedVersion
+	result, err := s.db.Collection(models.CollectionEventSubscriptions).DeleteOne(ctx, filter)
+	if err == nil && result.DeletedCount != 1 {
+		return ErrUpdateConflict
+	}
+	return err
+}
+
 func (s *MongoStore) GetContext(ctx context.Context, organizationID, workspaceID, channelID, id string) (Subscription, error) {
 	var value Subscription
 	err := s.db.Collection(models.CollectionEventSubscriptions).FindOne(ctx, subscriptionScope(organizationID, workspaceID, channelID, id)).Decode(&value)

@@ -77,6 +77,7 @@ type Repository interface {
 	PutContext(context.Context, Subscription) (Subscription, error)
 	CreateContext(context.Context, Subscription) (Subscription, error)
 	UpdateContext(context.Context, Subscription, int64) (Subscription, error)
+	DeleteContext(context.Context, string, string, string, string, int64) error
 	GetContext(context.Context, string, string, string, string) (Subscription, error)
 	List(context.Context, string) ([]Subscription, error)
 	ListChannel(context.Context, string, string, string) ([]Subscription, error)
@@ -160,6 +161,18 @@ func (s *Store) UpdateContext(_ context.Context, subscription Subscription, expe
 	subscription.UpdatedAt = s.now().UTC()
 	s.subscriptions[key] = subscription
 	return subscription, nil
+}
+
+func (s *Store) DeleteContext(_ context.Context, organizationID, workspaceID, channelID, id string, expectedVersion int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := subscriptionKey(organizationID, workspaceID, channelID, id)
+	current, ok := s.subscriptions[key]
+	if !ok || current.Version != expectedVersion {
+		return ErrUpdateConflict
+	}
+	delete(s.subscriptions, key)
+	return nil
 }
 
 func (s *Store) GetContext(_ context.Context, organizationID, workspaceID, channelID, id string) (Subscription, error) {

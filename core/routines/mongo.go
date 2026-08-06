@@ -48,6 +48,15 @@ func (s *MongoStore) UpdateContext(ctx context.Context, routine Routine, expecte
 	}
 	return saved, err
 }
+func (s *MongoStore) DeleteContext(ctx context.Context, organizationID, workspaceID, channelID, id string, expectedVersion int64) error {
+	filter := routineScope(organizationID, workspaceID, channelID, id)
+	filter["version"] = expectedVersion
+	result, err := s.db.Collection(models.CollectionRoutines).DeleteOne(ctx, filter)
+	if err == nil && result.DeletedCount != 1 {
+		return ErrUpdateConflict
+	}
+	return err
+}
 func (s *MongoStore) GetContext(ctx context.Context, organizationID, workspaceID, channelID, id string) (Routine, error) {
 	var routine Routine
 	err := s.db.Collection(models.CollectionRoutines).FindOne(ctx, routineScope(organizationID, workspaceID, channelID, id)).Decode(&routine)

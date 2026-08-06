@@ -47,6 +47,8 @@ const (
 	automationConfidenceID     = "automation_confidence"
 	automationEnabledID        = "automation_enabled"
 	automationValueActionID    = "value"
+	automationDeleteBlockID    = "automation_delete"
+	automationDeleteActionID   = "delete_automation"
 	maxSlackInputImages        = 4
 	maxSlackInputImageBytes    = 15 << 20
 	maxSlackOutputBytes        = 12 << 20
@@ -80,6 +82,7 @@ type LiveIngress struct {
 	automationList     AutomationListHandler
 	automationLoad     AutomationLoadHandler
 	automationSave     AutomationSaveHandler
+	automationDelete   AutomationDeleteHandler
 	reconnectHandler   ReconnectHandler
 	recoveryWG         sync.WaitGroup
 	stopping           bool
@@ -112,11 +115,12 @@ func (s *LiveIngress) SetModeChangeHandler(handler ModeChangeHandler) {
 	s.mu.Unlock()
 }
 
-func (s *LiveIngress) SetAutomationHandlers(list AutomationListHandler, load AutomationLoadHandler, save AutomationSaveHandler) {
+func (s *LiveIngress) SetAutomationHandlers(list AutomationListHandler, load AutomationLoadHandler, save AutomationSaveHandler, deleteAutomation AutomationDeleteHandler) {
 	s.mu.Lock()
 	s.automationList = list
 	s.automationLoad = load
 	s.automationSave = save
+	s.automationDelete = deleteAutomation
 	s.mu.Unlock()
 }
 
@@ -138,6 +142,7 @@ type managedSocketModeTransport struct {
 
 type viewAPI interface {
 	OpenViewContext(context.Context, string, slackapi.ModalViewRequest) (*slackapi.ViewResponse, error)
+	UpdateViewContext(context.Context, slackapi.ModalViewRequest, string, string, string) (*slackapi.ViewResponse, error)
 }
 
 type membershipAPI interface {
@@ -510,6 +515,35 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 					}
 					modal := automationModal(automationChoice.Scope, task)
 					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, slackapi.NewUpdateViewSubmissionResponse(&modal))
+					continue
+				}
+				automationDeletion, automationDeletionEligible, automationDeletionErr := NormalizeAutomationDeleteInteraction(s.options, event.Data)
+				if automationDeletionErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", automationDeletionErr)}).Error("Slack automation delete interaction rejected")
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, nil)
+					continue
+				}
+				if automationDeletionEligible {
+					s.mu.Lock()
+					deleteAutomation := s.automationDelete
+					s.mu.Unlock()
+					if deleteAutomation == nil || s.views == nil {
+						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, nil)
+						continue
+					}
+					if ackErr := s.client.AckCtx(ctx, event.Request.EnvelopeID, nil); ackErr != nil {
+						continue
+					}
+					deleted, deleteErr := deleteAutomation(ctx, automationDeletion.DeleteRequest)
+					resultModal := automationDeleteResultModal(automationDeletion.ID, deleteErr == nil)
+					if _, updateErr := s.views.UpdateViewContext(ctx, resultModal, "", automationDeletion.ViewHash, automationDeletion.ViewID); updateErr != nil {
+						eventLogger.WithCtx(blackbox.Ctx{"channel_id": automationDeletion.ChannelID, "automation_id": automationDeletion.ID, "error_type": fmt.Sprintf("%T", updateErr)}).Error("Slack automation deletion result modal update failed")
+					}
+					if deleteErr != nil {
+						eventLogger.WithCtx(blackbox.Ctx{"channel_id": automationDeletion.ChannelID, "automation_id": automationDeletion.ID, "actor_id": automationDeletion.ActorID, "error_type": fmt.Sprintf("%T", deleteErr)}).Error("Slack automation deletion failed")
+					} else {
+						eventLogger.WithCtx(blackbox.Ctx{"channel_id": automationDeletion.ChannelID, "automation_id": deleted.ID, "automation_kind": string(deleted.Kind), "version": deleted.Version}).Info("Slack channel automation deleted")
+					}
 					continue
 				}
 				automationEdit, automationEditEligible, automationEditErr := NormalizeAutomationEditInteraction(s.options, event.Data)
@@ -1140,6 +1174,12 @@ type automationPickerSelection struct {
 	Timezone string
 }
 
+type automationDeleteInteraction struct {
+	automations.DeleteRequest
+	ViewID   string
+	ViewHash string
+}
+
 func NormalizeAutomationPickerSubmission(options LiveOptions, data any) (automationPickerSelection, bool, error) {
 	callback, ok, err := normalizeInteractionCallback(data)
 	if err != nil || !ok || callback.Type != slackapi.InteractionTypeViewSubmission || callback.View.CallbackID != automationPickerCallbackID {
@@ -1160,6 +1200,31 @@ func NormalizeAutomationPickerSubmission(options LiveOptions, data any) (automat
 	return automationPickerSelection{
 		Scope: automations.Scope{OrganizationID: options.OrganizationID, WorkspaceID: metadata.WorkspaceID, ChannelID: metadata.ChannelID, ActorID: callback.User.ID},
 		Kind:  value.Kind, ID: value.ID, Add: value.Add, Timezone: metadata.Timezone,
+	}, true, nil
+}
+
+func NormalizeAutomationDeleteInteraction(options LiveOptions, data any) (automationDeleteInteraction, bool, error) {
+	callback, ok, err := normalizeInteractionCallback(data)
+	if err != nil || !ok || callback.Type != slackapi.InteractionTypeBlockActions {
+		return automationDeleteInteraction{}, false, err
+	}
+	if len(callback.ActionCallback.BlockActions) != 1 || callback.ActionCallback.BlockActions[0] == nil || callback.ActionCallback.BlockActions[0].ActionID != automationDeleteActionID {
+		return automationDeleteInteraction{}, false, nil
+	}
+	action := callback.ActionCallback.BlockActions[0]
+	if action.Value != "delete" || (callback.APIAppID != "" && callback.APIAppID != options.AppID) || callback.Team.ID != options.TeamID || callback.User.ID == "" || callback.View.ID == "" || callback.View.CallbackID != automationCallbackID {
+		return automationDeleteInteraction{}, false, errors.New("Slack automation delete interaction scope is invalid")
+	}
+	var metadata automationModalMetadata
+	if err := json.Unmarshal([]byte(callback.View.PrivateMetadata), &metadata); err != nil || metadata.WorkspaceID != options.TeamID || metadata.ChannelID == "" || metadata.ID == "" || metadata.Version <= 0 || !validAutomationKind(metadata.Kind) {
+		return automationDeleteInteraction{}, false, errors.New("Slack automation delete metadata is invalid")
+	}
+	return automationDeleteInteraction{
+		DeleteRequest: automations.DeleteRequest{
+			Scope: automations.Scope{OrganizationID: options.OrganizationID, WorkspaceID: metadata.WorkspaceID, ChannelID: metadata.ChannelID, ActorID: callback.User.ID},
+			Kind:  metadata.Kind, ID: metadata.ID, Version: metadata.Version, SourceID: callback.View.ID,
+		},
+		ViewID: callback.View.ID, ViewHash: callback.View.Hash,
 	}, true, nil
 }
 
@@ -1309,11 +1374,36 @@ func automationModal(scope automations.Scope, task automations.Task) slackapi.Mo
 		state.InitialOption = pausedOption
 	}
 	blocks = append(blocks, slackapi.NewInputBlock(automationEnabledID, slackapi.NewTextBlockObject("plain_text", "State", false, false), nil, state))
+	if task.Version > 0 {
+		confirmation := slackapi.NewConfirmationBlockObject(
+			slackapi.NewTextBlockObject("plain_text", "Delete automation?", false, false),
+			slackapi.NewTextBlockObject("mrkdwn", "This permanently deletes the automation from this channel.", false, false),
+			slackapi.NewTextBlockObject("plain_text", "Delete", false, false),
+			slackapi.NewTextBlockObject("plain_text", "Keep it", false, false),
+		).WithStyle(slackapi.StyleDanger)
+		deleteButton := slackapi.NewButtonBlockElement(automationDeleteActionID, "delete", slackapi.NewTextBlockObject("plain_text", "Delete automation", false, false)).WithStyle(slackapi.StyleDanger).WithConfirm(confirmation)
+		blocks = append(blocks, slackapi.NewActionBlock(automationDeleteBlockID, deleteButton))
+	}
 	submitLabel := "Save changes"
 	if task.Version == 0 {
 		submitLabel = "Add automation"
 	}
 	return slackapi.ModalViewRequest{Type: slackapi.VTModal, Title: slackapi.NewTextBlockObject("plain_text", "Channel automation", false, false), Submit: slackapi.NewTextBlockObject("plain_text", submitLabel, false, false), Close: slackapi.NewTextBlockObject("plain_text", "Cancel", false, false), Blocks: slackapi.Blocks{BlockSet: blocks}, PrivateMetadata: string(metadata), CallbackID: automationCallbackID}
+}
+
+func automationDeleteResultModal(id string, deleted bool) slackapi.ModalViewRequest {
+	title := "Automation deleted"
+	message := "*" + escapeSlackText(id) + "* was deleted from this channel."
+	if !deleted {
+		title = "Delete failed"
+		message = "*" + escapeSlackText(id) + "* was not deleted. It may have changed; close this dialog and reopen `/tag-automations` to refresh it."
+	}
+	return slackapi.ModalViewRequest{
+		Type:   slackapi.VTModal,
+		Title:  slackapi.NewTextBlockObject("plain_text", title, false, false),
+		Close:  slackapi.NewTextBlockObject("plain_text", "Close", false, false),
+		Blocks: slackapi.Blocks{BlockSet: []slackapi.Block{slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", message, false, false), nil, nil)}},
+	}
 }
 
 func ephemeralAutomationResponse(tasks []automations.Task) map[string]any {
