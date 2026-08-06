@@ -157,8 +157,8 @@ Current initiative constraints:
   operator-facing Automation page rather than raw routine/trigger tables.
 - Keep automation identity channel-scoped across indexes, repositories,
   scheduler advancement, idempotency keys, tools, management APIs, and Slack.
-  `/tag-automations` may list and edit only the invoking channel; existing
-  records may never be moved to another channel by an edit.
+  `/tag-automations` may list, create, and edit only in the invoking channel;
+  existing records may never be moved to another channel by an edit.
 - Keep `README.md`, `architecture.md`, `IMPLEMENTATION_STATUS.md`,
   `IMPLEMENTATION_CHECKLIST.md`, `SECURITY.md`, `runtime.env.example`, and the
   container guide synchronized with current code. Verify names and defaults

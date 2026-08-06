@@ -161,7 +161,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	if err != nil {
 		return nil, fmt.Errorf("construct channel directive editor: %w", err)
 	}
-	automationEditor, err := automations.NewEditor(routineStore, triggerStore, organizationStore, auditChain, cfg.Slack.AutomationOperatorUserIDs)
+	automationEditor, err := automations.NewEditor(routineStore, triggerStore, sessionStore, organizationStore, auditChain, cfg.Slack.AutomationOperatorUserIDs, cfg.Slack.AutomationDefaultTimezone)
 	if err != nil {
 		return nil, fmt.Errorf("construct channel automation editor: %w", err)
 	}
@@ -359,7 +359,7 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 			return result, nil
 		})
 		liveIngress.SetAutomationHandlers(
-			func(ctx context.Context, scope automations.Scope) ([]automations.Task, error) {
+			func(ctx context.Context, scope automations.Scope) (automations.ListResult, error) {
 				return automationEditor.List(ctx, scope)
 			},
 			func(ctx context.Context, scope automations.Scope, kind automations.Kind, id string) (automations.Task, error) {

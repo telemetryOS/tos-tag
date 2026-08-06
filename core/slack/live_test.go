@@ -882,35 +882,38 @@ func TestDirectiveCommandAndModalSubmissionRemainChannelBound(t *testing.T) {
 	}
 }
 
-func TestAutomationCommandListEditAndSubmissionRemainChannelBound(t *testing.T) {
+func TestAutomationCommandPickerAndSubmissionRemainChannelBound(t *testing.T) {
 	options := LiveOptions{OrganizationID: "org", AppID: "A123", TeamID: "T123"}
 	command, eligible, err := NormalizeAutomationCommand(options, slackapi.SlashCommand{APIAppID: "A123", TeamID: "T123", ChannelID: "C_ALERTS", UserID: "U_ADMIN", Command: automationsSlashCommand, TriggerID: "trigger-command"})
 	if err != nil || !eligible || command.ChannelID != "C_ALERTS" || command.ActorID != "U_ADMIN" || command.TriggerID != "trigger-command" {
 		t.Fatalf("command=%#v eligible=%v err=%v", command, eligible, err)
 	}
 	task := automations.Task{Kind: automations.KindHeartbeat, ID: "weekday-check", Instruction: "Check unresolved alerts.", Cron: "0 9 * * 1-5", Timezone: "America/Vancouver", MinConfidence: .8, Enabled: true, Version: 3, Editable: true}
-	response := ephemeralAutomationResponse([]automations.Task{task})
-	blocks, ok := response["blocks"].([]slackapi.Block)
-	if !ok || len(blocks) != 2 {
-		t.Fatalf("list blocks=%#v", response["blocks"])
+	result := automations.ListResult{Tasks: []automations.Task{task}, Editable: true, DefaultTimezone: "America/Vancouver"}
+	picker := automationPickerModal(command.Scope, result)
+	if picker.CallbackID != automationPickerCallbackID || picker.PrivateMetadata == "" || len(picker.Blocks.BlockSet) != 2 {
+		t.Fatalf("picker=%#v", picker)
 	}
-	section, ok := blocks[1].(*slackapi.SectionBlock)
-	if !ok || section.Accessory == nil || section.Accessory.ButtonElement == nil {
-		t.Fatalf("automation list section=%#v", blocks[1])
+	input, ok := picker.Blocks.BlockSet[1].(*slackapi.InputBlock)
+	if !ok || input.Element == nil {
+		t.Fatalf("automation picker input=%#v", picker.Blocks.BlockSet[1])
 	}
-	if selected, ok := singleEditableAutomation([]automations.Task{task}); !ok || selected.ID != task.ID {
-		t.Fatalf("single editable automation not selected: selected=%#v ok=%v", selected, ok)
+	selectElement, ok := input.Element.(*slackapi.SelectBlockElement)
+	if !ok || len(selectElement.Options) != 2 || selectElement.Options[0].Text.Text != "Add automation" {
+		t.Fatalf("automation picker select=%#v", input.Element)
 	}
-	callback := slackapi.InteractionCallback{
-		Type: slackapi.InteractionTypeBlockActions, APIAppID: "A123", TriggerID: "trigger-1", Team: slackapi.Team{ID: "T123"}, Channel: slackapi.Channel{GroupConversation: slackapi.GroupConversation{Conversation: slackapi.Conversation{ID: "C_ALERTS"}}}, User: slackapi.User{ID: "U_ADMIN"},
-		ActionCallback: slackapi.ActionCallbacks{BlockActions: []*slackapi.BlockAction{{ActionID: automationEditActionID, Value: section.Accessory.ButtonElement.Value}}},
+	pickerSubmit := slackapi.InteractionCallback{
+		Type: slackapi.InteractionTypeViewSubmission, APIAppID: "A123", Team: slackapi.Team{ID: "T123"}, User: slackapi.User{ID: "U_ADMIN"},
+		View: slackapi.View{ID: "V_PICKER", CallbackID: automationPickerCallbackID, PrivateMetadata: picker.PrivateMetadata, State: &slackapi.ViewState{Values: map[string]map[string]slackapi.BlockAction{
+			automationPickerBlockID: {automationPickerActionID: {SelectedOption: *selectElement.Options[1]}},
+		}}},
 	}
-	edit, eligible, err := NormalizeAutomationEditInteraction(options, callback)
-	if err != nil || !eligible || edit.ChannelID != "C_ALERTS" || edit.ID != task.ID || edit.Kind != task.Kind {
-		t.Fatalf("edit=%#v eligible=%v err=%v", edit, eligible, err)
+	choice, eligible, err := NormalizeAutomationPickerSubmission(options, pickerSubmit)
+	if err != nil || !eligible || choice.ChannelID != "C_ALERTS" || choice.ID != task.ID || choice.Kind != task.Kind || choice.Add || choice.Timezone != "America/Vancouver" {
+		t.Fatalf("choice=%#v eligible=%v err=%v", choice, eligible, err)
 	}
-	modal := automationModal(edit.Scope, task)
-	if modal.CallbackID != automationCallbackID || modal.PrivateMetadata == "" || len(modal.Blocks.BlockSet) != 7 {
+	modal := automationModal(choice.Scope, task)
+	if modal.CallbackID != automationCallbackID || modal.PrivateMetadata == "" || len(modal.Blocks.BlockSet) != 6 {
 		t.Fatalf("modal=%#v", modal)
 	}
 	submit := slackapi.InteractionCallback{
@@ -918,18 +921,57 @@ func TestAutomationCommandListEditAndSubmissionRemainChannelBound(t *testing.T) 
 		View: slackapi.View{ID: "V123", CallbackID: automationCallbackID, PrivateMetadata: modal.PrivateMetadata, State: &slackapi.ViewState{Values: map[string]map[string]slackapi.BlockAction{
 			automationInstructionID: {automationValueActionID: {Value: "Check alerts and page only for unresolved incidents."}},
 			automationCronID:        {automationValueActionID: {Value: "30 9 * * 1-5"}},
-			automationTimezoneID:    {automationValueActionID: {Value: "America/Vancouver"}},
 			automationConfidenceID:  {automationValueActionID: {Value: "0.9"}},
 			automationEnabledID:     {automationValueActionID: {SelectedOption: slackapi.OptionBlockObject{Value: "paused"}}},
 		}}},
 	}
 	request, eligible, err := NormalizeAutomationSubmission(options, submit)
-	if err != nil || !eligible || request.ChannelID != "C_ALERTS" || request.ID != task.ID || request.Enabled || request.MinConfidence != .9 || request.Version != 3 {
+	if err != nil || !eligible || request.ChannelID != "C_ALERTS" || request.ID != task.ID || request.Enabled || request.MinConfidence != .9 || request.Version != 3 || request.Timezone != "America/Vancouver" {
 		t.Fatalf("request=%#v eligible=%v err=%v", request, eligible, err)
 	}
 	submit.Team.ID = "T999"
 	if _, _, err := NormalizeAutomationSubmission(options, submit); err == nil {
 		t.Fatal("cross-workspace automation submission was accepted")
+	}
+}
+
+func TestAutomationPickerCanOpenANewAutomationWithoutTimezoneInput(t *testing.T) {
+	options := LiveOptions{OrganizationID: "org", AppID: "A123", TeamID: "T123"}
+	scope := automations.Scope{OrganizationID: "org", WorkspaceID: "T123", ChannelID: "C_MANAGEMENT", ActorID: "U_ADMIN"}
+	picker := automationPickerModal(scope, automations.ListResult{Editable: true, DefaultTimezone: "America/Vancouver"})
+	input := picker.Blocks.BlockSet[1].(*slackapi.InputBlock)
+	selectElement := input.Element.(*slackapi.SelectBlockElement)
+	callback := slackapi.InteractionCallback{
+		Type: slackapi.InteractionTypeViewSubmission, APIAppID: "A123", Team: slackapi.Team{ID: "T123"}, User: slackapi.User{ID: "U_ADMIN"},
+		View: slackapi.View{ID: "V_PICKER", CallbackID: automationPickerCallbackID, PrivateMetadata: picker.PrivateMetadata, State: &slackapi.ViewState{Values: map[string]map[string]slackapi.BlockAction{
+			automationPickerBlockID: {automationPickerActionID: {SelectedOption: *selectElement.Options[0]}},
+		}}},
+	}
+	choice, eligible, err := NormalizeAutomationPickerSubmission(options, callback)
+	if err != nil || !eligible || !choice.Add || choice.Timezone != "America/Vancouver" {
+		t.Fatalf("choice=%#v eligible=%v err=%v", choice, eligible, err)
+	}
+	task := automations.Task{Kind: automations.KindHeartbeat, Timezone: choice.Timezone, MinConfidence: .8, Enabled: true}
+	modal := automationModal(choice.Scope, task)
+	if len(modal.Blocks.BlockSet) != 7 {
+		t.Fatalf("new automation blocks=%#v", modal.Blocks.BlockSet)
+	}
+	for _, block := range modal.Blocks.BlockSet {
+		if inputBlock, ok := block.(*slackapi.InputBlock); ok && inputBlock.BlockID == "automation_timezone" {
+			t.Fatal("timezone input is still visible")
+		}
+	}
+	submit := callback
+	submit.View = slackapi.View{ID: "V_NEW", CallbackID: automationCallbackID, PrivateMetadata: modal.PrivateMetadata, State: &slackapi.ViewState{Values: map[string]map[string]slackapi.BlockAction{
+		automationNameID:        {automationValueActionID: {Value: "weekday-management-summary"}},
+		automationInstructionID: {automationValueActionID: {Value: "Summarize material management updates."}},
+		automationCronID:        {automationValueActionID: {Value: "0 17 * * 1-5"}},
+		automationConfidenceID:  {automationValueActionID: {Value: "0.8"}},
+		automationEnabledID:     {automationValueActionID: {SelectedOption: slackapi.OptionBlockObject{Value: "enabled"}}},
+	}}}
+	request, eligible, err := NormalizeAutomationSubmission(options, submit)
+	if err != nil || !eligible || request.ID != "weekday-management-summary" || request.Version != 0 || request.Timezone != "America/Vancouver" {
+		t.Fatalf("request=%#v eligible=%v err=%v", request, eligible, err)
 	}
 }
 
@@ -941,12 +983,6 @@ func TestAutomationReadOnlyListExplainsMissingEditControls(t *testing.T) {
 	section := blocks[1].(*slackapi.SectionBlock)
 	if !strings.Contains(header.Text.Text, "read-only access") || section.Accessory != nil {
 		t.Fatalf("read-only response=%#v", response)
-	}
-	if _, ok := singleEditableAutomation([]automations.Task{task}); ok {
-		t.Fatal("read-only automation selected for direct modal")
-	}
-	if _, ok := singleEditableAutomation([]automations.Task{task, task}); ok {
-		t.Fatal("multiple automations selected for direct modal")
 	}
 }
 

@@ -64,6 +64,7 @@ type SlackConfig struct {
 	ContextSyncMaxMessages        int           `config:"contextSyncMaxMessages"`
 	ContextSyncMessagesPerChannel int           `config:"contextSyncMessagesPerChannel"`
 	AutoAssistJoinedChannels      bool          `config:"autoAssistJoinedChannels"`
+	AutomationDefaultTimezone     string        `config:"automationDefaultTimezone"`
 	AutomationOperatorUserIDs     []string      `config:"automationOperatorUserIds"`
 	OutputChannelIDs              []string      `config:"outputChannelIds"`
 	StubQueueSize                 int           `config:"stubQueueSize"`
@@ -214,6 +215,7 @@ var DefaultConfiguration = Config{
 	Audit:     AuditConfig{CommitmentKey: developmentAuditCommitmentKey},
 	Slack: SlackConfig{
 		Mode:                          "stub",
+		AutomationDefaultTimezone:     "UTC",
 		ContextSyncLookback:           7 * 24 * time.Hour,
 		ContextSyncTimeout:            2 * time.Hour,
 		ContextSyncRefresh:            5 * time.Minute,
@@ -342,6 +344,9 @@ func applySlackEnvironment(cfg *SlackConfig) error {
 	}
 	if raw, ok := os.LookupEnv("TAG__SLACK__AUTOMATION_OPERATOR_USER_IDS"); ok {
 		cfg.AutomationOperatorUserIDs = splitNonEmpty(raw)
+	}
+	if raw, ok := os.LookupEnv("TAG__SLACK__AUTOMATION_DEFAULT_TIMEZONE"); ok {
+		cfg.AutomationDefaultTimezone = strings.TrimSpace(raw)
 	}
 	return nil
 }
@@ -530,6 +535,9 @@ func Validate(cfg *Config) error {
 		}
 		seenAutomationOperators[userID] = struct{}{}
 	}
+	if _, err := time.LoadLocation(cfg.Slack.AutomationDefaultTimezone); err != nil {
+		return fmt.Errorf("Slack automation default timezone must be a valid IANA timezone: %w", err)
+	}
 	if cfg.Retention.RawEnvelope <= 0 || cfg.Retention.Prompt <= 0 || cfg.Retention.Sweep <= 0 {
 		return fmt.Errorf("retention durations must be positive")
 	}
@@ -679,6 +687,7 @@ func (c *Config) RedactedStatus() map[string]any {
 		"slack_context_sync_max_messages":     c.Slack.ContextSyncMaxMessages,
 		"slack_auto_assist_joined_channels":   c.Slack.AutoAssistJoinedChannels,
 		"slack_automation_operator_count":     len(c.Slack.AutomationOperatorUserIDs),
+		"slack_automation_default_timezone":   c.Slack.AutomationDefaultTimezone,
 		"slack_output_channel_count":          len(c.Slack.OutputChannelIDs),
 		"classifier_mode":                     c.Classifier.Mode,
 		"classifier_provider":                 c.Classifier.Provider,

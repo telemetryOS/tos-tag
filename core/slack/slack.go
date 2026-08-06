@@ -88,7 +88,7 @@ type ModeChangeResult struct {
 
 type ModeChangeHandler func(context.Context, ModeChangeRequest) (ModeChangeResult, error)
 
-type AutomationListHandler func(context.Context, automations.Scope) ([]automations.Task, error)
+type AutomationListHandler func(context.Context, automations.Scope) (automations.ListResult, error)
 type AutomationLoadHandler func(context.Context, automations.Scope, automations.Kind, string) (automations.Task, error)
 type AutomationSaveHandler func(context.Context, automations.SaveRequest) (automations.Task, error)
 

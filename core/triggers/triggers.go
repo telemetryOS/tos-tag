@@ -75,6 +75,7 @@ func (f AuthorizerFunc) AuthorizeTrigger(ctx context.Context, subscription Subsc
 
 type Repository interface {
 	PutContext(context.Context, Subscription) (Subscription, error)
+	CreateContext(context.Context, Subscription) (Subscription, error)
 	UpdateContext(context.Context, Subscription, int64) (Subscription, error)
 	GetContext(context.Context, string, string, string, string) (Subscription, error)
 	List(context.Context, string) ([]Subscription, error)
@@ -113,6 +114,26 @@ func (s *Store) PutContext(_ context.Context, subscription Subscription) (Subscr
 		subscription.Version = 1
 		subscription.CreatedAt = now
 	}
+	subscription.UpdatedAt = now
+	s.subscriptions[key] = subscription
+	return subscription, nil
+}
+
+func (s *Store) CreateContext(_ context.Context, subscription Subscription) (Subscription, error) {
+	var err error
+	subscription, err = Normalize(subscription, s.now().UTC())
+	if err != nil {
+		return Subscription{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := subscriptionKey(subscription.OrganizationID, subscription.WorkspaceID, subscription.ChannelID, subscription.ID)
+	if _, exists := s.subscriptions[key]; exists {
+		return Subscription{}, ErrScopeConflict
+	}
+	now := s.now().UTC()
+	subscription.Version = 1
+	subscription.CreatedAt = now
 	subscription.UpdatedAt = now
 	s.subscriptions[key] = subscription
 	return subscription, nil

@@ -45,9 +45,10 @@ influence an answer sent elsewhere.
 - Supports Slack-native exact-action approvals, channel directive modals,
   `/tag-proactive`, `/tag-assist`, and `/tag-off` level commands plus the
   compatible `/tag-mode` change command and ephemeral `/tag-status` Block Kit
-  table. `/tag-automations` lists only the invoking channel's scheduled tasks
-  and opens a channel-locked edit modal. Routines and classifier-gated trigger
-  subscriptions use explicit cron schedules and IANA timezones.
+  table. `/tag-automations` opens a channel-locked chooser for selecting an
+  existing scheduled task or adding a classifier-gated schedule, followed by
+  its editor. Routines and classifier-gated trigger subscriptions use explicit
+  cron schedules and IANA timezones.
 - Records correlated redacted logs, usage, and append-only audit receipts.
 
 ### Verified development posture
@@ -452,12 +453,14 @@ reconciled Slack membership, and whether the channel is public or restricted.
 The command is read-only and includes shortcuts for the four channel controls.
 
 `/tag-automations` manages the current channel's direct routines and
-classifier-gated schedules. When exactly one editable task exists, the command
-opens its Slack modal directly. Otherwise it returns an ephemeral list whose
-Edit buttons open the task modal for instruction, cron, timezone, enabled
-state, and—when applicable—classifier confidence. An existing task's
-workspace/channel identity is immutable; the modal uses its persisted version
-to reject stale edits. Channel members may inspect the list. Configured channel
+classifier-gated schedules. Authorized editors first get a Slack chooser with
+every existing automation plus Add automation; continuing opens the task
+editor for instruction, cron, enabled state, and—when applicable—classifier
+confidence. The timezone is intentionally hidden: existing tasks keep their
+stored timezone and new schedules use
+`TAG__SLACK__AUTOMATION_DEFAULT_TIMEZONE`. An existing task's workspace/channel
+identity is immutable; the modal uses its persisted version to reject stale
+edits. Channel members may inspect the read-only list. Configured channel
 approvers and the Slack users named in
 `TAG__SLACK__AUTOMATION_OPERATOR_USER_IDS` receive Edit controls and may save
 changes; other users get an explicit read-only explanation.
@@ -769,10 +772,10 @@ can also create a directive for any available channel from the management UI.
 channel's policy and directive in an ephemeral response.
 `/tag-automations` is subject to the same enrolled-channel boundary. It lists
 and edits only automations whose durable workspace and channel match the
-invocation; saves are audit-committed and cannot move a task between channels.
-Channel approvers and configured global automation operators may edit. A
-single editable task opens directly in its modal; multiple tasks use the
-ephemeral selection list.
+invocation; authorized editors use a chooser to select one or add another
+classifier-gated schedule. Saves are audit-committed and cannot move a task
+between channels. Channel approvers and configured global automation operators
+may edit; other members receive the ephemeral read-only list.
 
 ### Logging and audit
 

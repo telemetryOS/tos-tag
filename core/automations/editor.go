@@ -1,6 +1,6 @@
 // Package automations exposes channel-bound routine and heartbeat schedules to
-// trusted operator surfaces without allowing an existing task to change its
-// Slack destination.
+// trusted operator surfaces without allowing a task to change its Slack
+// destination.
 package automations
 
 import (
@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/telemetryos/tos-tag/core/audit"
 	"github.com/telemetryos/tos-tag/core/orgconfig"
 	"github.com/telemetryos/tos-tag/core/routines"
+	"github.com/telemetryos/tos-tag/core/sessions"
 	"github.com/telemetryos/tos-tag/core/triggers"
 )
 
@@ -64,18 +66,30 @@ type SaveRequest struct {
 	SourceID      string
 }
 
+type ListResult struct {
+	Tasks           []Task
+	Editable        bool
+	DefaultTimezone string
+}
+
 type Editor struct {
 	routines        routines.Repository
 	triggers        triggers.Repository
+	sessions        sessions.Store
 	scopes          orgconfig.Resolver
 	audit           audit.Appender
 	globalOperators map[string]struct{}
+	defaultTimezone string
 	now             func() time.Time
 }
 
-func NewEditor(routineStore routines.Repository, triggerStore triggers.Repository, scopes orgconfig.Resolver, appender audit.Appender, globalOperatorUserIDs []string) (*Editor, error) {
-	if routineStore == nil || triggerStore == nil || scopes == nil || appender == nil {
-		return nil, errors.New("automation editor requires routine, trigger, scope, and audit stores")
+func NewEditor(routineStore routines.Repository, triggerStore triggers.Repository, sessionStore sessions.Store, scopes orgconfig.Resolver, appender audit.Appender, globalOperatorUserIDs []string, defaultTimezone string) (*Editor, error) {
+	if routineStore == nil || triggerStore == nil || sessionStore == nil || scopes == nil || appender == nil {
+		return nil, errors.New("automation editor requires routine, trigger, session, scope, and audit stores")
+	}
+	defaultTimezone = strings.TrimSpace(defaultTimezone)
+	if _, err := time.LoadLocation(defaultTimezone); err != nil {
+		return nil, errors.New("automation editor default timezone is invalid")
 	}
 	globalOperators := make(map[string]struct{}, len(globalOperatorUserIDs))
 	for _, userID := range globalOperatorUserIDs {
@@ -84,31 +98,32 @@ func NewEditor(routineStore routines.Repository, triggerStore triggers.Repositor
 		}
 		globalOperators[userID] = struct{}{}
 	}
-	return &Editor{routines: routineStore, triggers: triggerStore, scopes: scopes, audit: appender, globalOperators: globalOperators, now: time.Now}, nil
+	return &Editor{routines: routineStore, triggers: triggerStore, sessions: sessionStore, scopes: scopes, audit: appender, globalOperators: globalOperators, defaultTimezone: defaultTimezone, now: time.Now}, nil
 }
 
-func (e *Editor) List(ctx context.Context, scope Scope) ([]Task, error) {
+func (e *Editor) List(ctx context.Context, scope Scope) (ListResult, error) {
 	policy, err := e.authorize(ctx, scope)
 	if err != nil {
-		return nil, err
+		return ListResult{}, err
 	}
 	routineValues, err := e.routines.ListChannel(ctx, scope.OrganizationID, scope.WorkspaceID, scope.ChannelID)
 	if err != nil {
-		return nil, fmt.Errorf("list channel routines: %w", err)
+		return ListResult{}, fmt.Errorf("list channel routines: %w", err)
 	}
 	triggerValues, err := e.triggers.ListChannel(ctx, scope.OrganizationID, scope.WorkspaceID, scope.ChannelID)
 	if err != nil {
-		return nil, fmt.Errorf("list channel trigger subscriptions: %w", err)
+		return ListResult{}, fmt.Errorf("list channel trigger subscriptions: %w", err)
 	}
+	editable := e.canEdit(policy, scope.ActorID)
 	result := make([]Task, 0, len(routineValues)+len(triggerValues))
 	for _, value := range routineValues {
 		task := routineTask(value)
-		task.Editable = e.canEdit(policy, scope.ActorID)
+		task.Editable = editable
 		result = append(result, task)
 	}
 	for _, value := range triggerValues {
 		task := triggerTask(value)
-		task.Editable = e.canEdit(policy, scope.ActorID)
+		task.Editable = editable
 		result = append(result, task)
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -120,7 +135,7 @@ func (e *Editor) List(ctx context.Context, scope Scope) ([]Task, error) {
 		}
 		return result[i].NextRun.Before(result[j].NextRun)
 	})
-	return result, nil
+	return ListResult{Tasks: result, Editable: editable, DefaultTimezone: e.defaultTimezone}, nil
 }
 
 func (e *Editor) Load(ctx context.Context, scope Scope, kind Kind, id string) (Task, error) {
@@ -164,61 +179,95 @@ func (e *Editor) Save(ctx context.Context, request SaveRequest) (Task, error) {
 	if !e.canEdit(policy, request.ActorID) {
 		return Task{}, ErrForbidden
 	}
-	if request.SourceID == "" || request.ID == "" || request.Version <= 0 || request.Instruction == "" || request.Cron == "" || request.Timezone == "" {
+	if request.SourceID == "" || request.ID == "" || request.Version < 0 || request.Instruction == "" || request.Cron == "" || request.Timezone == "" {
+		return Task{}, ErrInvalid
+	}
+	if _, err := time.LoadLocation(request.Timezone); err != nil {
 		return Task{}, ErrInvalid
 	}
 	var saved Task
-	switch request.Kind {
-	case KindRoutine:
-		current, err := e.routines.GetContext(ctx, request.OrganizationID, request.WorkspaceID, request.ChannelID, request.ID)
-		if err != nil {
-			return Task{}, ErrNotFound
-		}
-		if current.Version != request.Version {
-			return Task{}, ErrConflict
-		}
-		if current.Cron != request.Cron || current.Timezone != request.Timezone || current.Interval != 0 {
-			current.NextRun = time.Time{}
-		}
-		current.Input, current.Cron, current.Timezone, current.Interval, current.Enabled = request.Instruction, request.Cron, request.Timezone, 0, request.Enabled
-		value, err := e.routines.UpdateContext(ctx, current, request.Version)
-		if err != nil {
-			if errors.Is(err, routines.ErrUpdateConflict) {
-				return Task{}, ErrConflict
-			}
-			return Task{}, fmt.Errorf("%w: %v", ErrInvalid, err)
-		}
-		saved = routineTask(value)
-	case KindHeartbeat:
-		current, err := e.triggers.GetContext(ctx, request.OrganizationID, request.WorkspaceID, request.ChannelID, request.ID)
-		if err != nil {
-			return Task{}, ErrNotFound
-		}
-		if current.Version != request.Version {
-			return Task{}, ErrConflict
-		}
-		if request.MinConfidence < 0 || request.MinConfidence > 1 {
+	auditType := "automation.updated"
+	if request.Version == 0 {
+		if request.Kind != KindHeartbeat || !validStableID(request.ID) || request.MinConfidence < 0 || request.MinConfidence > 1 {
 			return Task{}, ErrInvalid
 		}
-		if current.Cron != request.Cron || current.Timezone != request.Timezone || current.Interval != 0 {
-			current.NextRun = time.Time{}
+		if _, err := e.routines.GetContext(ctx, request.OrganizationID, request.WorkspaceID, request.ChannelID, request.ID); err == nil {
+			return Task{}, ErrConflict
 		}
-		current.Instruction, current.Cron, current.Timezone, current.Interval = request.Instruction, request.Cron, request.Timezone, 0
-		current.MinConfidence, current.Enabled = request.MinConfidence, request.Enabled
-		value, err := e.triggers.UpdateContext(ctx, current, request.Version)
+		if _, err := e.triggers.GetContext(ctx, request.OrganizationID, request.WorkspaceID, request.ChannelID, request.ID); err == nil {
+			return Task{}, ErrConflict
+		}
+		session, _, err := e.sessions.Resolve(ctx, request.OrganizationID, request.WorkspaceID, request.ChannelID, "automation:"+request.ID)
 		if err != nil {
-			if errors.Is(err, triggers.ErrUpdateConflict) {
+			return Task{}, fmt.Errorf("resolve automation session: %w", err)
+		}
+		value, err := e.triggers.CreateContext(ctx, triggers.Subscription{
+			ID: request.ID, OrganizationID: request.OrganizationID, WorkspaceID: request.WorkspaceID, ChannelID: request.ChannelID,
+			SessionID: session.ID, Generation: session.CurrentGeneration, OwnerID: request.ActorID, Kind: triggers.KindHeartbeat,
+			Instruction: request.Instruction, Cron: request.Cron, Timezone: request.Timezone, ClassifierGate: true,
+			MinConfidence: request.MinConfidence, Enabled: request.Enabled,
+		})
+		if err != nil {
+			if errors.Is(err, triggers.ErrScopeConflict) {
 				return Task{}, ErrConflict
 			}
 			return Task{}, fmt.Errorf("%w: %v", ErrInvalid, err)
 		}
 		saved = triggerTask(value)
-	default:
-		return Task{}, ErrInvalid
+		auditType = "automation.created"
+	} else {
+		switch request.Kind {
+		case KindRoutine:
+			current, err := e.routines.GetContext(ctx, request.OrganizationID, request.WorkspaceID, request.ChannelID, request.ID)
+			if err != nil {
+				return Task{}, ErrNotFound
+			}
+			if current.Version != request.Version {
+				return Task{}, ErrConflict
+			}
+			if current.Cron != request.Cron || current.Timezone != request.Timezone || current.Interval != 0 {
+				current.NextRun = time.Time{}
+			}
+			current.Input, current.Cron, current.Timezone, current.Interval, current.Enabled = request.Instruction, request.Cron, request.Timezone, 0, request.Enabled
+			value, err := e.routines.UpdateContext(ctx, current, request.Version)
+			if err != nil {
+				if errors.Is(err, routines.ErrUpdateConflict) {
+					return Task{}, ErrConflict
+				}
+				return Task{}, fmt.Errorf("%w: %v", ErrInvalid, err)
+			}
+			saved = routineTask(value)
+		case KindHeartbeat:
+			current, err := e.triggers.GetContext(ctx, request.OrganizationID, request.WorkspaceID, request.ChannelID, request.ID)
+			if err != nil {
+				return Task{}, ErrNotFound
+			}
+			if current.Version != request.Version {
+				return Task{}, ErrConflict
+			}
+			if request.MinConfidence < 0 || request.MinConfidence > 1 {
+				return Task{}, ErrInvalid
+			}
+			if current.Cron != request.Cron || current.Timezone != request.Timezone || current.Interval != 0 {
+				current.NextRun = time.Time{}
+			}
+			current.Instruction, current.Cron, current.Timezone, current.Interval = request.Instruction, request.Cron, request.Timezone, 0
+			current.MinConfidence, current.Enabled = request.MinConfidence, request.Enabled
+			value, err := e.triggers.UpdateContext(ctx, current, request.Version)
+			if err != nil {
+				if errors.Is(err, triggers.ErrUpdateConflict) {
+					return Task{}, ErrConflict
+				}
+				return Task{}, fmt.Errorf("%w: %v", ErrInvalid, err)
+			}
+			saved = triggerTask(value)
+		default:
+			return Task{}, ErrInvalid
+		}
 	}
 	_, err = e.audit.Append(ctx, audit.AppendRequest{
 		OrganizationID: request.OrganizationID,
-		Type:           "automation.updated",
+		Type:           auditType,
 		ActorID:        request.ActorID,
 		ResourceID:     string(request.Kind) + "/" + request.ChannelID + "/" + request.ID,
 		Metadata:       map[string]any{"channel_id": request.ChannelID, "automation_kind": string(request.Kind), "enabled": saved.Enabled, "version": saved.Version, "source": "slack_modal"},
@@ -230,6 +279,20 @@ func (e *Editor) Save(ctx context.Context, request SaveRequest) (Task, error) {
 		return Task{}, fmt.Errorf("record automation audit receipt: %w", err)
 	}
 	return saved, nil
+}
+
+func validStableID(value string) bool {
+	if len(value) == 0 || len(value) > 80 || value != strings.TrimSpace(value) {
+		return false
+	}
+	for index, character := range value {
+		lowercase := character >= 'a' && character <= 'z'
+		digit := character >= '0' && character <= '9'
+		if !lowercase && !digit && (character != '-' || index == 0) {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *Editor) authorize(ctx context.Context, scope Scope) (orgconfig.ChannelPolicy, error) {

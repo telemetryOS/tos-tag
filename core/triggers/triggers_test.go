@@ -103,6 +103,18 @@ func TestStoreKeepsSameNamedSubscriptionsChannelScoped(t *testing.T) {
 	}
 }
 
+func TestCreateContextRejectsAnExistingSubscription(t *testing.T) {
+	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	store := NewStore(func() time.Time { return now })
+	subscription := testSubscription(now)
+	if _, err := store.CreateContext(context.Background(), subscription); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateContext(context.Background(), subscription); !errors.Is(err, ErrScopeConflict) {
+		t.Fatalf("duplicate create error=%v", err)
+	}
+}
+
 func TestCronHeartbeatAdvancesInConfiguredTimezone(t *testing.T) {
 	now := time.Date(2026, time.August, 3, 16, 0, 0, 0, time.UTC)
 	store := NewStore(func() time.Time { return now })

@@ -69,11 +69,11 @@ limits which stored messages may enter newly assembled context.
 - `core/slack`: Socket Mode ingress, Block Kit rendering, interactions, the
   `/tag-directive` modal, the `/tag-mode` participation-mode command, and the
   read-only `/tag-status` native table, plus the channel-scoped
-  `/tag-automations` list/editor modal and Slack-native agent thread statuses for
-  admitted full-agent work; durable one-time context bootstrap and proactively
-  paced post-watermark catch-up for direct messages missed while offline.
-- `core/automations`: authorized, audited list/load/save projection across
-  direct routines and classifier-gated schedules; task identity is immutable
+  `/tag-automations` chooser/add/editor modals and Slack-native agent thread
+  statuses for admitted full-agent work; durable one-time context bootstrap and
+  proactively paced post-watermark catch-up for direct messages missed while offline.
+- `core/automations`: authorized, audited list/load/create/save projection
+  across direct routines and classifier-gated schedules; task identity is immutable
   at organization/workspace/channel/name scope.
 - `core/approvals`: exact-action Slack approval/resume.
 - `core/schedule`, `core/routines`, `core/triggers`: standard five-field cron,

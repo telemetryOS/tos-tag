@@ -572,15 +572,19 @@ restricted scope. A directive lookup failure degrades only that row; policy
 lookup fails closed for the entire response.
 
 `/tag-automations` lists direct routines and classifier-gated schedules only
-for the invoking workspace/channel. A single editable task opens its modal
-directly; otherwise ephemeral Block Kit rows provide task selection and Edit
-controls. The modal edits the task instruction, cron, timezone, enabled state,
-and trigger confidence. Modal metadata carries the immutable
-workspace/channel/kind/name identity and current version; load and save
-reauthorize that exact scope and reject stale versions. Listing is available to
-members of the enrolled channel; modal load/save additionally requires the
-actor to be a configured channel approver or an exact user in the global Slack
-automation-operator allowlist. A save is committed to the audit chain.
+for the invoking workspace/channel. Authorized editors always enter through a
+Block Kit chooser that offers every existing task plus Add automation; the
+second modal edits instruction, cron, enabled state, and trigger confidence.
+Timezone is carried in private modal metadata rather than exposed as an input:
+existing tasks retain their stored timezone and new tasks receive the configured
+Slack automation default. New Slack-created tasks are classifier-gated
+schedules with channel-bound sessions and stable names. Modal metadata carries
+the immutable workspace/channel/kind/name identity and current version; load
+and save reauthorize that exact scope and reject stale versions. Listing is
+available to members of the enrolled channel; chooser/load/save additionally
+requires the actor to be a configured channel approver or an exact user in the
+global Slack automation-operator allowlist. Creates and updates are committed
+to the audit chain.
 
 Routines enqueue ordinary reauthorized jobs on a standard five-field cron
 schedule with an explicit IANA timezone. Trigger subscriptions wake on the

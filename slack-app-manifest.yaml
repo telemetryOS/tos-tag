@@ -24,7 +24,7 @@ features:
       usage_hint: Mode, directive, availability, presence, and scope
       should_escape: false
     - command: /tag-automations
-      description: List and edit automated tasks for this channel
+      description: Select, add, or edit automated tasks for this channel
       usage_hint: Opens channel-locked automation controls
       should_escape: false
     - command: /tag-proactive

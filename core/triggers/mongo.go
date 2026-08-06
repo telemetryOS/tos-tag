@@ -48,6 +48,23 @@ func (s *MongoStore) PutContext(ctx context.Context, subscription Subscription) 
 	return saved, err
 }
 
+func (s *MongoStore) CreateContext(ctx context.Context, subscription Subscription) (Subscription, error) {
+	now := s.now().UTC()
+	var err error
+	subscription, err = Normalize(subscription, now)
+	if err != nil {
+		return Subscription{}, err
+	}
+	subscription.Version = 1
+	subscription.CreatedAt = now
+	subscription.UpdatedAt = now
+	_, err = s.db.Collection(models.CollectionEventSubscriptions).InsertOne(ctx, subscription)
+	if mongo.IsDuplicateKeyError(err) {
+		return Subscription{}, ErrScopeConflict
+	}
+	return subscription, err
+}
+
 func (s *MongoStore) UpdateContext(ctx context.Context, subscription Subscription, expectedVersion int64) (Subscription, error) {
 	now := s.now().UTC()
 	var err error

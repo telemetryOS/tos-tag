@@ -26,27 +26,30 @@ import (
 )
 
 const (
-	directiveSlashCommand   = "/tag-directive"
-	directiveCallbackID     = "tos_tag_channel_directive_v1"
-	directivePromptBlockID  = "channel_directive"
-	directivePromptActionID = "prompt"
-	modeSlashCommand        = "/tag-mode"
-	proactiveSlashCommand   = "/tag-proactive"
-	assistSlashCommand      = "/tag-assist"
-	offSlashCommand         = "/tag-off"
-	statusSlashCommand      = "/tag-status"
-	automationsSlashCommand = "/tag-automations"
-	automationCallbackID    = "tos_tag_channel_automation_v1"
-	automationEditActionID  = "tos_tag_automation_edit"
-	automationInstructionID = "automation_instruction"
-	automationCronID        = "automation_cron"
-	automationTimezoneID    = "automation_timezone"
-	automationConfidenceID  = "automation_confidence"
-	automationEnabledID     = "automation_enabled"
-	automationValueActionID = "value"
-	maxSlackInputImages     = 4
-	maxSlackInputImageBytes = 15 << 20
-	maxSlackOutputBytes     = 12 << 20
+	directiveSlashCommand      = "/tag-directive"
+	directiveCallbackID        = "tos_tag_channel_directive_v1"
+	directivePromptBlockID     = "channel_directive"
+	directivePromptActionID    = "prompt"
+	modeSlashCommand           = "/tag-mode"
+	proactiveSlashCommand      = "/tag-proactive"
+	assistSlashCommand         = "/tag-assist"
+	offSlashCommand            = "/tag-off"
+	statusSlashCommand         = "/tag-status"
+	automationsSlashCommand    = "/tag-automations"
+	automationCallbackID       = "tos_tag_channel_automation_v1"
+	automationPickerCallbackID = "tos_tag_automation_picker_v1"
+	automationPickerBlockID    = "automation_picker"
+	automationPickerActionID   = "selection"
+	automationNameID           = "automation_name"
+	automationEditActionID     = "tos_tag_automation_edit"
+	automationInstructionID    = "automation_instruction"
+	automationCronID           = "automation_cron"
+	automationConfidenceID     = "automation_confidence"
+	automationEnabledID        = "automation_enabled"
+	automationValueActionID    = "value"
+	maxSlackInputImages        = 4
+	maxSlackInputImageBytes    = 15 << 20
+	maxSlackOutputBytes        = 12 << 20
 )
 
 type LiveOptions struct {
@@ -418,22 +421,22 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralCommandResponse("Channel automations are not available right now."))
 						continue
 					}
-					tasks, listErr := listAutomations(ctx, automationCommand.Scope)
+					result, listErr := listAutomations(ctx, automationCommand.Scope)
 					if listErr != nil {
 						eventLogger.WithCtx(blackbox.Ctx{"channel_id": automationCommand.ChannelID, "actor_id": automationCommand.ActorID, "error_type": fmt.Sprintf("%T", listErr)}).Warn("Slack channel automations list failed")
 						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralCommandResponse("Channel automations are not available in this channel right now."))
 						continue
 					}
-					if task, ok := singleEditableAutomation(tasks); ok && s.views != nil {
+					if result.Editable && s.views != nil {
 						if ackErr := s.client.AckCtx(ctx, event.Request.EnvelopeID, nil); ackErr != nil {
 							continue
 						}
-						if _, openErr := s.views.OpenViewContext(ctx, automationCommand.TriggerID, automationModal(automationCommand.Scope, task)); openErr != nil {
-							eventLogger.WithCtx(blackbox.Ctx{"channel_id": automationCommand.ChannelID, "automation_id": task.ID, "error_type": fmt.Sprintf("%T", openErr)}).Error("Slack automation modal open failed")
+						if _, openErr := s.views.OpenViewContext(ctx, automationCommand.TriggerID, automationPickerModal(automationCommand.Scope, result)); openErr != nil {
+							eventLogger.WithCtx(blackbox.Ctx{"channel_id": automationCommand.ChannelID, "error_type": fmt.Sprintf("%T", openErr)}).Error("Slack automation picker modal open failed")
 						}
 						continue
 					}
-					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralAutomationResponse(tasks))
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, ephemeralAutomationResponse(result.Tasks))
 					continue
 				}
 				command, eligible, normalizeErr := NormalizeDirectiveCommand(s.options, event.Data)
@@ -474,6 +477,39 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 			case socketmode.EventTypeInteractive:
 				if event.Request == nil {
 					eventLogger.Error("Slack interaction missing request metadata")
+					continue
+				}
+				automationChoice, automationChoiceEligible, automationChoiceErr := NormalizeAutomationPickerSubmission(s.options, event.Data)
+				if automationChoiceErr != nil {
+					eventLogger.WithCtx(blackbox.Ctx{"error_type": fmt.Sprintf("%T", automationChoiceErr)}).Error("Slack automation picker submission rejected")
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, slackapi.NewErrorsViewSubmissionResponse(map[string]string{automationPickerBlockID: "Choose an automation or Add automation."}))
+					continue
+				}
+				if automationChoiceEligible {
+					var task automations.Task
+					if automationChoice.Add {
+						task = automations.Task{Kind: automations.KindHeartbeat, Timezone: automationChoice.Timezone, MinConfidence: .8, Enabled: true}
+					} else {
+						s.mu.Lock()
+						loadAutomation := s.automationLoad
+						s.mu.Unlock()
+						if loadAutomation == nil {
+							_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, slackapi.NewErrorsViewSubmissionResponse(map[string]string{automationPickerBlockID: "Channel automations are unavailable right now."}))
+							continue
+						}
+						var loadErr error
+						task, loadErr = loadAutomation(ctx, automationChoice.Scope, automationChoice.Kind, automationChoice.ID)
+						if loadErr != nil {
+							eventLogger.WithCtx(blackbox.Ctx{"channel_id": automationChoice.ChannelID, "actor_id": automationChoice.ActorID, "error_type": fmt.Sprintf("%T", loadErr)}).Warn("Slack automation picker load failed")
+							_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, slackapi.NewErrorsViewSubmissionResponse(map[string]string{automationPickerBlockID: "That automation is no longer available. Reopen the list and try again."}))
+							continue
+						}
+						if task.Timezone == "" {
+							task.Timezone = automationChoice.Timezone
+						}
+					}
+					modal := automationModal(automationChoice.Scope, task)
+					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, slackapi.NewUpdateViewSubmissionResponse(&modal))
 					continue
 				}
 				automationEdit, automationEditEligible, automationEditErr := NormalizeAutomationEditInteraction(s.options, event.Data)
@@ -521,7 +557,11 @@ func (s *LiveIngress) run(ctx context.Context, handler Handler) {
 					saved, saveErr := saveAutomation(ctx, automationSave)
 					if saveErr != nil {
 						eventLogger.WithCtx(blackbox.Ctx{"channel_id": automationSave.ChannelID, "automation_id": automationSave.ID, "actor_id": automationSave.ActorID, "error_type": fmt.Sprintf("%T", saveErr)}).Error("Slack automation submission persistence failed")
-						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, slackapi.NewErrorsViewSubmissionResponse(map[string]string{automationInstructionID: "The automation was not saved. Reopen the list to refresh it, then try again."}))
+						fieldID := automationInstructionID
+						if automationSave.Version == 0 {
+							fieldID = automationNameID
+						}
+						_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, slackapi.NewErrorsViewSubmissionResponse(map[string]string{fieldID: "The automation was not saved. Reopen the list to refresh it, then try again."}))
 						continue
 					}
 					_ = s.client.AckCtx(ctx, event.Request.EnvelopeID, nil)
@@ -1067,6 +1107,7 @@ func NormalizeDirectiveSubmission(options LiveOptions, data any) (DirectiveConfi
 type automationActionValue struct {
 	Kind automations.Kind `json:"kind"`
 	ID   string           `json:"id"`
+	Add  bool             `json:"add,omitempty"`
 }
 
 type automationEditInteraction struct {
@@ -1082,6 +1123,44 @@ type automationModalMetadata struct {
 	Kind        automations.Kind `json:"kind"`
 	ID          string           `json:"id"`
 	Version     int64            `json:"version"`
+	Timezone    string           `json:"timezone"`
+}
+
+type automationPickerMetadata struct {
+	WorkspaceID string `json:"workspace_id"`
+	ChannelID   string `json:"channel_id"`
+	Timezone    string `json:"timezone"`
+}
+
+type automationPickerSelection struct {
+	automations.Scope
+	Kind     automations.Kind
+	ID       string
+	Add      bool
+	Timezone string
+}
+
+func NormalizeAutomationPickerSubmission(options LiveOptions, data any) (automationPickerSelection, bool, error) {
+	callback, ok, err := normalizeInteractionCallback(data)
+	if err != nil || !ok || callback.Type != slackapi.InteractionTypeViewSubmission || callback.View.CallbackID != automationPickerCallbackID {
+		return automationPickerSelection{}, false, err
+	}
+	if (callback.APIAppID != "" && callback.APIAppID != options.AppID) || callback.Team.ID != options.TeamID || callback.User.ID == "" || callback.View.ID == "" || callback.View.State == nil {
+		return automationPickerSelection{}, false, errors.New("Slack automation picker scope is invalid")
+	}
+	var metadata automationPickerMetadata
+	if err := json.Unmarshal([]byte(callback.View.PrivateMetadata), &metadata); err != nil || metadata.WorkspaceID != options.TeamID || metadata.ChannelID == "" || !validIANATimezone(metadata.Timezone) {
+		return automationPickerSelection{}, false, errors.New("Slack automation picker metadata is invalid")
+	}
+	selected := callback.View.State.Values[automationPickerBlockID][automationPickerActionID].SelectedOption.Value
+	var value automationActionValue
+	if err := json.Unmarshal([]byte(selected), &value); err != nil || (value.Add && (value.ID != "" || value.Kind != "")) || (!value.Add && (value.ID == "" || !validAutomationKind(value.Kind))) {
+		return automationPickerSelection{}, false, errors.New("Slack automation picker selection is invalid")
+	}
+	return automationPickerSelection{
+		Scope: automations.Scope{OrganizationID: options.OrganizationID, WorkspaceID: metadata.WorkspaceID, ChannelID: metadata.ChannelID, ActorID: callback.User.ID},
+		Kind:  value.Kind, ID: value.ID, Add: value.Add, Timezone: metadata.Timezone,
+	}, true, nil
 }
 
 func NormalizeAutomationEditInteraction(options LiveOptions, data any) (automationEditInteraction, bool, error) {
@@ -1118,7 +1197,7 @@ func NormalizeAutomationSubmission(options LiveOptions, data any) (automations.S
 		return automations.SaveRequest{}, false, errors.New("Slack automation submission scope is invalid")
 	}
 	var metadata automationModalMetadata
-	if err := json.Unmarshal([]byte(callback.View.PrivateMetadata), &metadata); err != nil || metadata.WorkspaceID != options.TeamID || metadata.ChannelID == "" || metadata.ID == "" || metadata.Version <= 0 || !validAutomationKind(metadata.Kind) {
+	if err := json.Unmarshal([]byte(callback.View.PrivateMetadata), &metadata); err != nil || metadata.WorkspaceID != options.TeamID || metadata.ChannelID == "" || metadata.Version < 0 || !validAutomationKind(metadata.Kind) || !validIANATimezone(metadata.Timezone) {
 		return automations.SaveRequest{}, false, errors.New("Slack automation modal metadata is invalid")
 	}
 	value := func(blockID string) slackapi.BlockAction {
@@ -1126,8 +1205,11 @@ func NormalizeAutomationSubmission(options LiveOptions, data any) (automations.S
 	}
 	instruction := strings.TrimSpace(value(automationInstructionID).Value)
 	cron := strings.TrimSpace(value(automationCronID).Value)
-	timezone := strings.TrimSpace(value(automationTimezoneID).Value)
-	if instruction == "" || len([]rune(instruction)) > 3000 || cron == "" || len(cron) > 100 || timezone == "" || len(timezone) > 100 {
+	id := metadata.ID
+	if metadata.Version == 0 {
+		id = strings.TrimSpace(value(automationNameID).Value)
+	}
+	if id == "" || instruction == "" || len([]rune(instruction)) > 3000 || cron == "" || len(cron) > 100 {
 		return automations.SaveRequest{}, false, errors.New("Slack automation fields are invalid")
 	}
 	selectedState := value(automationEnabledID).SelectedOption.Value
@@ -1143,8 +1225,8 @@ func NormalizeAutomationSubmission(options LiveOptions, data any) (automations.S
 	}
 	return automations.SaveRequest{
 		Scope: automations.Scope{OrganizationID: options.OrganizationID, WorkspaceID: metadata.WorkspaceID, ChannelID: metadata.ChannelID, ActorID: callback.User.ID},
-		Kind:  metadata.Kind, ID: metadata.ID, Version: metadata.Version, SourceID: callback.View.ID,
-		Instruction: instruction, Cron: cron, Timezone: timezone, MinConfidence: confidence, Enabled: selectedState == "enabled",
+		Kind:  metadata.Kind, ID: id, Version: metadata.Version, SourceID: callback.View.ID,
+		Instruction: instruction, Cron: cron, Timezone: metadata.Timezone, MinConfidence: confidence, Enabled: selectedState == "enabled",
 	}, true, nil
 }
 
@@ -1166,8 +1248,39 @@ func validAutomationKind(kind automations.Kind) bool {
 	return kind == automations.KindRoutine || kind == automations.KindHeartbeat
 }
 
+func validIANATimezone(value string) bool {
+	if value == "" || len(value) > 100 {
+		return false
+	}
+	_, err := time.LoadLocation(value)
+	return err == nil
+}
+
+func automationPickerModal(scope automations.Scope, result automations.ListResult) slackapi.ModalViewRequest {
+	metadata, _ := json.Marshal(automationPickerMetadata{WorkspaceID: scope.WorkspaceID, ChannelID: scope.ChannelID, Timezone: result.DefaultTimezone})
+	addValue, _ := json.Marshal(automationActionValue{Add: true})
+	options := []*slackapi.OptionBlockObject{slackapi.NewOptionBlockObject(string(addValue), slackapi.NewTextBlockObject("plain_text", "Add automation", false, false), slackapi.NewTextBlockObject("plain_text", "Create a classifier-gated schedule", false, false))}
+	const maxExistingOptions = 99
+	for index, task := range result.Tasks {
+		if index >= maxExistingOptions {
+			break
+		}
+		value, _ := json.Marshal(automationActionValue{Kind: task.Kind, ID: task.ID})
+		options = append(options, slackapi.NewOptionBlockObject(string(value), slackapi.NewTextBlockObject("plain_text", boundedText(task.ID, 75), false, false), slackapi.NewTextBlockObject("plain_text", automationKindLabel(task.Kind), false, false)))
+	}
+	selectElement := slackapi.NewOptionsSelectBlockElement(slackapi.OptTypeStatic, slackapi.NewTextBlockObject("plain_text", "Select or add an automation", false, false), automationPickerActionID, options...)
+	blocks := []slackapi.Block{
+		slackapi.NewAlertBlock(slackapi.NewTextBlockObject("plain_text", "Automations are locked to this channel.", false, false), slackapi.AlertBlockOptionLevel(slackapi.AlertLevelInfo), slackapi.AlertBlockOptionBlockID("tos_tag_automation_picker_scope")),
+		slackapi.NewInputBlock(automationPickerBlockID, slackapi.NewTextBlockObject("plain_text", "Automation", false, false), slackapi.NewTextBlockObject("plain_text", "Choose an existing automation to edit, or add another one.", false, false), selectElement),
+	}
+	if len(result.Tasks) > maxExistingOptions {
+		blocks = append(blocks, slackapi.NewContextBlock("tos_tag_automation_picker_limit", slackapi.NewTextBlockObject("mrkdwn", fmt.Sprintf("Showing the first %d of %d existing automations.", maxExistingOptions, len(result.Tasks)), false, false)))
+	}
+	return slackapi.ModalViewRequest{Type: slackapi.VTModal, Title: slackapi.NewTextBlockObject("plain_text", "Channel automations", false, false), Submit: slackapi.NewTextBlockObject("plain_text", "Continue", false, false), Close: slackapi.NewTextBlockObject("plain_text", "Cancel", false, false), Blocks: slackapi.Blocks{BlockSet: blocks}, PrivateMetadata: string(metadata), CallbackID: automationPickerCallbackID}
+}
+
 func automationModal(scope automations.Scope, task automations.Task) slackapi.ModalViewRequest {
-	metadata, _ := json.Marshal(automationModalMetadata{WorkspaceID: scope.WorkspaceID, ChannelID: scope.ChannelID, Kind: task.Kind, ID: task.ID, Version: task.Version})
+	metadata, _ := json.Marshal(automationModalMetadata{WorkspaceID: scope.WorkspaceID, ChannelID: scope.ChannelID, Kind: task.Kind, ID: task.ID, Version: task.Version, Timezone: task.Timezone})
 	plainInput := func(placeholder, initial, actionID string, multiline bool, maxLength int) *slackapi.PlainTextInputBlockElement {
 		element := slackapi.NewPlainTextInputBlockElement(slackapi.NewTextBlockObject("plain_text", placeholder, false, false), actionID)
 		element.InitialValue = initial
@@ -1176,13 +1289,25 @@ func automationModal(scope automations.Scope, task automations.Task) slackapi.Mo
 		element.MaxLength = maxLength
 		return element
 	}
+	versionLabel := "new"
+	if task.Version > 0 {
+		versionLabel = "version " + strconv.FormatInt(task.Version, 10)
+	}
+	name := task.ID
+	if name == "" {
+		name = "New automation"
+	}
 	blocks := []slackapi.Block{
 		slackapi.NewAlertBlock(slackapi.NewTextBlockObject("plain_text", "This task is locked to the channel where you opened it. Saving cannot move it to another channel.", false, false), slackapi.AlertBlockOptionLevel(slackapi.AlertLevelInfo), slackapi.AlertBlockOptionBlockID("tos_tag_automation_scope")),
-		slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", "*"+escapeSlackText(task.ID)+"*\n"+automationKindLabel(task.Kind)+" · version "+strconv.FormatInt(task.Version, 10), false, false), nil, nil),
+		slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", "*"+escapeSlackText(name)+"*\n"+automationKindLabel(task.Kind)+" · "+versionLabel, false, false), nil, nil),
+	}
+	if task.Version == 0 {
+		blocks = append(blocks, slackapi.NewInputBlock(automationNameID, slackapi.NewTextBlockObject("plain_text", "Stable name", false, false), slackapi.NewTextBlockObject("plain_text", "Lowercase letters, numbers, and hyphens; this cannot be changed later.", false, false), plainInput("weekday-management-summary", "", automationValueActionID, false, 80)))
+	}
+	blocks = append(blocks,
 		slackapi.NewInputBlock(automationInstructionID, slackapi.NewTextBlockObject("plain_text", "Automated task", false, false), slackapi.NewTextBlockObject("plain_text", "Describe what Tag should check when this schedule runs.", false, false), plainInput("What should Tag do?", task.Instruction, automationValueActionID, true, 3000)),
 		slackapi.NewInputBlock(automationCronID, slackapi.NewTextBlockObject("plain_text", "Cron schedule", false, false), slackapi.NewTextBlockObject("plain_text", "Five fields: minute, hour, day of month, month, day of week.", false, false), plainInput("0 9 * * 1-5", task.Cron, automationValueActionID, false, 100)),
-		slackapi.NewInputBlock(automationTimezoneID, slackapi.NewTextBlockObject("plain_text", "Timezone", false, false), slackapi.NewTextBlockObject("plain_text", "Use an IANA timezone such as America/Vancouver.", false, false), plainInput("UTC", task.Timezone, automationValueActionID, false, 100)),
-	}
+	)
 	if task.Kind == automations.KindHeartbeat {
 		blocks = append(blocks, slackapi.NewInputBlock(automationConfidenceID, slackapi.NewTextBlockObject("plain_text", "Minimum confidence", false, false), slackapi.NewTextBlockObject("plain_text", "A number from 0 to 1.", false, false), plainInput("0.8", strconv.FormatFloat(task.MinConfidence, 'f', -1, 64), automationValueActionID, false, 4)))
 	}
@@ -1195,7 +1320,11 @@ func automationModal(scope automations.Scope, task automations.Task) slackapi.Mo
 		state.InitialOption = pausedOption
 	}
 	blocks = append(blocks, slackapi.NewInputBlock(automationEnabledID, slackapi.NewTextBlockObject("plain_text", "State", false, false), nil, state))
-	return slackapi.ModalViewRequest{Type: slackapi.VTModal, Title: slackapi.NewTextBlockObject("plain_text", "Channel automation", false, false), Submit: slackapi.NewTextBlockObject("plain_text", "Save changes", false, false), Close: slackapi.NewTextBlockObject("plain_text", "Cancel", false, false), Blocks: slackapi.Blocks{BlockSet: blocks}, PrivateMetadata: string(metadata), CallbackID: automationCallbackID}
+	submitLabel := "Save changes"
+	if task.Version == 0 {
+		submitLabel = "Add automation"
+	}
+	return slackapi.ModalViewRequest{Type: slackapi.VTModal, Title: slackapi.NewTextBlockObject("plain_text", "Channel automation", false, false), Submit: slackapi.NewTextBlockObject("plain_text", submitLabel, false, false), Close: slackapi.NewTextBlockObject("plain_text", "Cancel", false, false), Blocks: slackapi.Blocks{BlockSet: blocks}, PrivateMetadata: string(metadata), CallbackID: automationCallbackID}
 }
 
 func ephemeralAutomationResponse(tasks []automations.Task) map[string]any {
@@ -1240,13 +1369,6 @@ func ephemeralAutomationResponse(tasks []automations.Task) map[string]any {
 		blocks = append(blocks, slackapi.NewContextBlock("tos_tag_automation_limit", slackapi.NewTextBlockObject("mrkdwn", fmt.Sprintf("Showing the first %d of %d tasks.", maxVisible, len(tasks)), false, false)))
 	}
 	return map[string]any{"response_type": "ephemeral", "text": fmt.Sprintf("%d channel automations", len(tasks)), "blocks": blocks}
-}
-
-func singleEditableAutomation(tasks []automations.Task) (automations.Task, bool) {
-	if len(tasks) != 1 || !tasks[0].Editable {
-		return automations.Task{}, false
-	}
-	return tasks[0], true
 }
 
 func automationKindLabel(kind automations.Kind) string {

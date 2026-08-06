@@ -9,6 +9,7 @@ import (
 	"github.com/telemetryos/tos-tag/core/audit"
 	"github.com/telemetryos/tos-tag/core/orgconfig"
 	"github.com/telemetryos/tos-tag/core/routines"
+	"github.com/telemetryos/tos-tag/core/sessions"
 	"github.com/telemetryos/tos-tag/core/triggers"
 	"github.com/telemetryos/tos-tag/models"
 	"github.com/telemetryos/tos-tag/types"
@@ -35,13 +36,13 @@ func TestEditorListsAndUpdatesOnlyTheRequestedChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	appender, _ := audit.NewMemoryAppender([]byte("01234567890123456789012345678901"))
-	editor, err := NewEditor(routineStore, triggerStore, scopes, appender, nil)
+	editor, err := NewEditor(routineStore, triggerStore, sessions.NewMemoryStore(func() time.Time { return now }), scopes, appender, nil, "America/Vancouver")
 	if err != nil {
 		t.Fatal(err)
 	}
 	scope := Scope{OrganizationID: "org", WorkspaceID: "team", ChannelID: "alerts", ActorID: "user"}
 	listed, err := editor.List(context.Background(), scope)
-	if err != nil || len(listed) != 1 || listed[0].Instruction != "Check alerts." {
+	if err != nil || len(listed.Tasks) != 1 || listed.Tasks[0].Instruction != "Check alerts." || listed.DefaultTimezone != "America/Vancouver" {
 		t.Fatalf("listed=%#v err=%v", listed, err)
 	}
 	updated, err := editor.Save(context.Background(), SaveRequest{Scope: scope, Kind: KindHeartbeat, ID: "daily", Instruction: "Check unresolved alerts.", Cron: "30 9 * * *", Timezone: "America/Vancouver", MinConfidence: .9, Enabled: false, Version: saved.Version, SourceID: "view-1"})
@@ -71,14 +72,14 @@ func TestGlobalOperatorCanEditEveryEnrolledChannel(t *testing.T) {
 		}
 	}
 	appender, _ := audit.NewMemoryAppender([]byte("01234567890123456789012345678901"))
-	editor, err := NewEditor(routineStore, triggerStore, scopes, appender, []string{"global-operator"})
+	editor, err := NewEditor(routineStore, triggerStore, sessions.NewMemoryStore(func() time.Time { return now }), scopes, appender, []string{"global-operator"}, "UTC")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, channelID := range []string{"alerts", "operations"} {
 		scope := Scope{OrganizationID: "org", WorkspaceID: "team", ChannelID: channelID, ActorID: "global-operator"}
 		listed, err := editor.List(context.Background(), scope)
-		if err != nil || len(listed) != 1 || !listed[0].Editable {
+		if err != nil || len(listed.Tasks) != 1 || !listed.Editable || !listed.Tasks[0].Editable {
 			t.Fatalf("channel=%s listed=%#v err=%v", channelID, listed, err)
 		}
 		loaded, err := editor.Load(context.Background(), scope, KindRoutine, "daily")
@@ -103,16 +104,48 @@ func TestUnconfiguredUserGetsReadOnlyAutomationList(t *testing.T) {
 		t.Fatal(err)
 	}
 	appender, _ := audit.NewMemoryAppender([]byte("01234567890123456789012345678901"))
-	editor, err := NewEditor(routineStore, triggerStore, scopes, appender, []string{"global-operator"})
+	editor, err := NewEditor(routineStore, triggerStore, sessions.NewMemoryStore(func() time.Time { return now }), scopes, appender, []string{"global-operator"}, "UTC")
 	if err != nil {
 		t.Fatal(err)
 	}
 	scope := Scope{OrganizationID: "org", WorkspaceID: "team", ChannelID: "alerts", ActorID: "viewer"}
 	listed, err := editor.List(context.Background(), scope)
-	if err != nil || len(listed) != 1 || listed[0].Editable {
+	if err != nil || len(listed.Tasks) != 1 || listed.Editable || listed.Tasks[0].Editable {
 		t.Fatalf("listed=%#v err=%v", listed, err)
 	}
 	if _, err := editor.Load(context.Background(), scope, KindRoutine, "daily"); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("read-only user load error=%v", err)
+	}
+}
+
+func TestEditorCreatesAChannelBoundClassifierGatedAutomation(t *testing.T) {
+	now := time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC)
+	routineStore := routines.NewStore()
+	triggerStore := triggers.NewStore(func() time.Time { return now })
+	sessionStore := sessions.NewMemoryStore(func() time.Time { return now })
+	scopes := orgconfig.NewMemory()
+	_, _ = scopes.PutOrganization(context.Background(), models.Organization{PublicID: "org", Name: "Org"})
+	_, _ = scopes.PutWorkspace(context.Background(), models.Workspace{OrganizationID: "org", TeamID: "team", Name: "Team", Enabled: true})
+	_, _ = scopes.PutChannel(context.Background(), orgconfig.ChannelPolicy{OrganizationID: "org", TeamID: "team", ChannelID: "management", Name: "management", Enrolled: true, ParticipationMode: types.ModeAssist, Cooldown: time.Second, MaxResponsesPerHour: 10, MaxConcurrentJobs: 2, MembershipRevision: "m1", MembershipRefreshedAt: now})
+	appender, _ := audit.NewMemoryAppender([]byte("01234567890123456789012345678901"))
+	editor, err := NewEditor(routineStore, triggerStore, sessionStore, scopes, appender, []string{"global-operator"}, "America/Vancouver")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := Scope{OrganizationID: "org", WorkspaceID: "team", ChannelID: "management", ActorID: "global-operator"}
+	listed, err := editor.List(context.Background(), scope)
+	if err != nil || !listed.Editable || len(listed.Tasks) != 0 {
+		t.Fatalf("listed=%#v err=%v", listed, err)
+	}
+	created, err := editor.Save(context.Background(), SaveRequest{Scope: scope, Kind: KindHeartbeat, ID: "weekday-summary", Instruction: "Summarize material management updates.", Cron: "0 17 * * 1-5", Timezone: listed.DefaultTimezone, MinConfidence: .8, Enabled: true, SourceID: "view-new"})
+	if err != nil || created.Version != 1 || created.Timezone != "America/Vancouver" {
+		t.Fatalf("created=%#v err=%v", created, err)
+	}
+	stored, err := triggerStore.GetContext(context.Background(), "org", "team", "management", "weekday-summary")
+	if err != nil || !stored.ClassifierGate || stored.OwnerID != "global-operator" || stored.SessionID == "" || stored.Generation != 1 {
+		t.Fatalf("stored=%#v err=%v", stored, err)
+	}
+	if _, err := editor.Save(context.Background(), SaveRequest{Scope: scope, Kind: KindHeartbeat, ID: "weekday-summary", Instruction: "Duplicate.", Cron: "0 18 * * 1-5", Timezone: listed.DefaultTimezone, MinConfidence: .8, Enabled: true, SourceID: "view-duplicate"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate create error=%v", err)
 	}
 }
