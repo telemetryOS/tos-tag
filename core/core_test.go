@@ -79,6 +79,27 @@ func TestBackgroundScopeAuthorizationUsesSharedParticipationMembershipAndOutputP
 	}
 }
 
+func TestSlackApprovalScopeAllowsAnyAuthenticatedHumanInFreshChannel(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	policy := orgconfig.ChannelPolicy{
+		Enrolled: true, ParticipationMode: types.ModeAssist,
+		BotMembershipKnown: true, BotIsMember: true,
+		MembershipRefreshedAt: now,
+	}
+	for _, userID := range []string{"U_REQUESTER_PEER", "U_OTHER_HUMAN"} {
+		if err := authorizeSlackApprovalScope(policy, now, userID); err != nil {
+			t.Fatalf("authenticated human %q was denied: %v", userID, err)
+		}
+	}
+	if err := authorizeSlackApprovalScope(policy, now, ""); err == nil {
+		t.Fatal("missing Slack identity was authorized")
+	}
+	policy.KillSwitch = true
+	if err := authorizeSlackApprovalScope(policy, now, "U_OTHER_HUMAN"); err == nil {
+		t.Fatal("human bypassed the channel kill switch")
+	}
+}
+
 type failingClassifier struct{}
 
 func (failingClassifier) Decide(context.Context, classifier.Target, types.ContextPackRevision) (types.ClassificationDecision, error) {

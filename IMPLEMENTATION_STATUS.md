@@ -109,6 +109,9 @@ commands, tests, and active documentation have been removed.
   likely-secret fallback, DM-only transport validation, duplicate suppression,
   content-free logging, and cosmetic failure behavior.
 - Slack-native exact-action approval and fresh-worker resume.
+  Any authenticated Slack human other than the original requester may decide
+  the approval; destination scope, expiry, audit, and single-use binding remain
+  enforced.
 - `/tag-directive` Slack modal available to every authenticated workspace user
   for an enrolled, enabled channel, plus management-UI creation, revisioned
   Mongo persistence, and audit.

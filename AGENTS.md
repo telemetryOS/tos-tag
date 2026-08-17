@@ -116,6 +116,9 @@ Current initiative constraints:
   prediction for audit, and recheck the grant immediately before admission.
   Operator-created classifier-gated triggers carry their own explicit grant;
   free-form directives do not silently upgrade a channel to `proactive`.
+- Allow any authenticated Slack human other than the original requester to
+  decide a pending exact-action approval. Keep the action workspace/channel
+  bound, expiring, audited, and single-use; never permit self-approval.
 - Keep normal tests and evals deterministic and network-free. Live Slack tests
   are opt-in and must report their exact scope and evidence separately.
 - Keep classifier tests naturalistic: put expected silence, reaction, placement,

@@ -407,6 +407,16 @@ func TestPrepareToolInvocationValidatesSkillsAndStripsProgressMetadata(t *testin
 	if _, _, err := session.prepareToolInvocation("call-5", "tos_tag_tool", json.RawMessage(`{"skill_names":["linear-issue-manager"],"tool_id":"telemetryos.linear","operation_id":"intake","arguments":["create","--title","Feature","--description","Body","--label","Feature"]}`)); err == nil || !strings.Contains(err.Error(), "bug or feature workflow") {
 		t.Fatalf("unscoped Linear intake error = %v", err)
 	}
+	coerced, coercedForwarded, err := session.prepareToolInvocation("call-5b", "tos_tag_tool", json.RawMessage(`{"skill_names":["feature","linear-issue-manager"],"tool_id":"telemetryos.linear","operation_id":"write","arguments":["create","--title","Feature","--description","Body","--priority","3","--label","Feature"]}`))
+	if err != nil || coerced.OperationID != "intake" || !bytes.Contains(coercedForwarded, []byte(`"operation_id":"intake"`)) {
+		t.Fatalf("Linear ticket create was not routed through intake: invocation=%#v forwarded=%s err=%v", coerced, coercedForwarded, err)
+	}
+	if _, _, err := session.prepareToolInvocation("call-5c", "tos_tag_tool", json.RawMessage(`{"skill_names":["feature","linear-issue-manager"],"tool_id":"telemetryos.linear","operation_id":"write","arguments":["create","feature","Feature"]}`)); err == nil || !strings.Contains(err.Error(), "must use intake arguments") {
+		t.Fatalf("legacy Linear ticket arguments error = %v", err)
+	}
+	if _, _, err := session.prepareToolInvocation("call-5d", "tos_tag_tool", json.RawMessage(`{"skill_names":["linear-issue-manager"],"tool_id":"telemetryos.linear","operation_id":"write","arguments":["create","--title","Bug","--description","Body","--label","Bug"]}`)); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("unscoped generic Linear ticket create error = %v", err)
+	}
 	curds, _, err := session.prepareToolInvocation("call-6", "tos_tag_tool", json.RawMessage(`{"skill_names":["curds"],"tool_id":"media.curds","operation_id":"generate","arguments":["a fox","1:1","auto"]}`))
 	if err != nil || curds.ToolID != "media.curds" || curds.OperationID != "generate" {
 		t.Fatalf("Curds invocation=%#v err=%v", curds, err)

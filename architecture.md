@@ -414,7 +414,9 @@ execution audit receipt without being copied into broad audit listings.
 
 Each operation manifest declares an approval policy. If omitted, the policy is
 risk-based: `write` and `destructive` persist an exact canonical action and
-require Slack-native approval. Admin-risk worker operations are invalid. The
+require Slack-native approval from any authenticated human other than the
+original requester. Destination scope, expiry, audit, and single-use action
+binding still apply. Admin-risk worker operations are invalid. The
 reviewed `telemetryos.linear/intake` operation declares `never` but is accepted
 only with the validated bug/feature workflow and permits only bounded
 create/comment/normalization/suitability arguments. Agent Wiki page read/write

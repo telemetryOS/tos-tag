@@ -229,7 +229,9 @@ attempt-scoped capability and calling the loopback gateway itself. The Codex
 process never receives the capability or connector credentials. Unless the
 reviewed operation explicitly declares `approval: never`, non-read risk must
 suspend for Slack-native approval and later resume a fresh fenced attempt with
-the exact approved action hash. The bounded `telemetryos.linear/intake`
+the exact approved action hash. Any authenticated Slack human other than the
+original requester may decide that approval; destination scope, expiry, audit,
+and single-use binding remain enforced. The bounded `telemetryos.linear/intake`
 operation is one such reviewed exception: the harness requires the `bug` or
 `feature` workflow plus `linear-issue-manager`, and the helper permits only
 create/comment/normalization/suitability arguments.

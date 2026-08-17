@@ -203,15 +203,10 @@ func New(cfg *config.Config, logger *blackbox.Logger) (*Core, error) {
 	approvalStore := approvals.NewMongoStore(db)
 	approvalAuthorizer := approvals.ApproverAuthorizerFunc(func(ctx context.Context, organizationID, workspaceID, channelID, userID string) error {
 		policy, resolveErr := organizationStore.Resolve(ctx, organizationID, workspaceID, channelID)
-		if resolveErr != nil || !authorizedFreshScope(policy, time.Now().UTC()) {
+		if resolveErr != nil {
 			return fmt.Errorf("approval channel policy denied")
 		}
-		for _, allowedUserID := range policy.ApproverUserIDs {
-			if allowedUserID == userID {
-				return nil
-			}
-		}
-		return fmt.Errorf("user is not in the channel approver set")
+		return authorizeSlackApprovalScope(policy, time.Now().UTC(), userID)
 	})
 	approvalCoordinator, err := approvals.NewCoordinator(approvalStore, jobQueue, deliveryQueue, auditChain, approvalAuthorizer, admissionController)
 	if err != nil {
@@ -426,6 +421,16 @@ func validParticipationMode(mode string) bool {
 	default:
 		return false
 	}
+}
+
+func authorizeSlackApprovalScope(policy orgconfig.ChannelPolicy, now time.Time, userID string) error {
+	if !authorizedFreshScope(policy, now) {
+		return fmt.Errorf("approval channel policy denied")
+	}
+	if userID == "" {
+		return fmt.Errorf("Slack approver identity is missing")
+	}
+	return nil
 }
 
 func appendModeChangeAudit(ctx context.Context, appender audit.Appender, request slack.ModeChangeRequest, saved orgconfig.ChannelPolicy, previous string) error {

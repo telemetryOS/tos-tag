@@ -190,7 +190,9 @@ Only mark an item complete when source and verification evidence exist.
 
 - [x] Persist canonical exact-action approvals.
 - [x] Render Slack-native approval blocks and update them after decision.
-- [x] Default non-read risk to an independent allowlisted approver, with
+- [x] Default non-read risk to an independent authenticated Slack human other
+  than the requester, while preserving exact destination scope, expiry, audit,
+  and single-use action binding, with
   source-reviewed per-operation exceptions; bounded bug/feature Linear intake
   and Agent Wiki read/write authoring are trusted without per-action approval,
   generic Linear writes remain gated, recoverable page soft-delete is always

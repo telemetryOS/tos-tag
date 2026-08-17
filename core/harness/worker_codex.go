@@ -843,6 +843,7 @@ func (s *codexWorkerSession) prepareToolInvocation(callID, tool string, argument
 		OperationID string   `json:"operation_id"`
 		Operation   string   `json:"operation"`
 		SkillNames  []string `json:"skill_names"`
+		Arguments   []string `json:"arguments"`
 	}
 	if json.Unmarshal(arguments, &declaration) != nil || len(declaration.SkillNames) == 0 {
 		return declaredToolInvocation{}, nil, errors.New("dynamic tool call must declare its active skills")
@@ -869,6 +870,13 @@ func (s *codexWorkerSession) prepareToolInvocation(callID, tool string, argument
 		}
 		if invocation.ToolID == "telemetryos.linear" && invocation.OperationID == "intake" && (!containsString(validatedSkills, "linear-issue-manager") || (!containsString(validatedSkills, "bug") && !containsString(validatedSkills, "feature"))) {
 			return declaredToolInvocation{}, nil, errors.New("Linear intake requires the bug or feature workflow with linear-issue-manager")
+		}
+		if invocation.ToolID == "telemetryos.linear" && len(declaration.Arguments) > 0 && declaration.Arguments[0] == "create" && (invocation.OperationID == "write" || invocation.OperationID == "intake") {
+			normalizedOperation, err := normalizeLinearTicketCreate(invocation.OperationID, validatedSkills, declaration.Arguments)
+			if err != nil {
+				return declaredToolInvocation{}, nil, err
+			}
+			invocation.OperationID = normalizedOperation
 		}
 		if invocation.ToolID == "media.curds" {
 			if invocation.OperationID != "generate" || !containsString(validatedSkills, "curds") {
@@ -903,11 +911,61 @@ func (s *codexWorkerSession) prepareToolInvocation(callID, tool string, argument
 		return declaredToolInvocation{}, nil, errors.New("dynamic tool arguments are invalid")
 	}
 	delete(forwarded, "skill_names")
+	if invocation.ToolID == "telemetryos.linear" && invocation.OperationID != declaration.OperationID {
+		forwarded["operation_id"] = json.RawMessage(`"` + invocation.OperationID + `"`)
+	}
 	bridgeArguments, err := json.Marshal(forwarded)
 	if err != nil {
 		return declaredToolInvocation{}, nil, errors.New("dynamic tool arguments could not be forwarded")
 	}
 	return invocation, bridgeArguments, nil
+}
+
+func normalizeLinearTicketCreate(operationID string, skillNames, arguments []string) (string, error) {
+	hasBug := containsString(skillNames, "bug")
+	hasFeature := containsString(skillNames, "feature")
+	ticketCreate := hasBug || hasFeature
+	if len(arguments) > 1 && (strings.EqualFold(arguments[1], "bug") || strings.EqualFold(arguments[1], "feature")) {
+		ticketCreate = true
+	}
+	for index := 1; index+1 < len(arguments); index++ {
+		if arguments[index] == "--label" && (arguments[index+1] == "Bug" || arguments[index+1] == "Feature") {
+			ticketCreate = true
+		}
+	}
+	if !ticketCreate {
+		return operationID, nil
+	}
+	if !containsString(skillNames, "linear-issue-manager") {
+		return "", errors.New("Linear ticket creation requires linear-issue-manager")
+	}
+	if hasBug == hasFeature {
+		return "", errors.New("Linear ticket creation must declare exactly one of the bug or feature workflows")
+	}
+	expectedLabel := "Bug"
+	if hasFeature {
+		expectedLabel = "Feature"
+	}
+	hasTitle, hasDescription, hasExpectedLabel := false, false, false
+	for index := 1; index < len(arguments); index++ {
+		switch arguments[index] {
+		case "--title":
+			hasTitle = index+1 < len(arguments) && strings.TrimSpace(arguments[index+1]) != ""
+			index++
+		case "--description":
+			hasDescription = index+1 < len(arguments) && strings.TrimSpace(arguments[index+1]) != ""
+			index++
+		case "--label":
+			if index+1 < len(arguments) && arguments[index+1] == expectedLabel {
+				hasExpectedLabel = true
+			}
+			index++
+		}
+	}
+	if !hasTitle || !hasDescription || !hasExpectedLabel {
+		return "", fmt.Errorf("Linear %s creation must use intake arguments with --title, --description, and --label %s", strings.ToLower(expectedLabel), expectedLabel)
+	}
+	return "intake", nil
 }
 
 func validateCurdsToolArguments(raw json.RawMessage) error {

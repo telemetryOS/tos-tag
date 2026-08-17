@@ -171,7 +171,9 @@ Every reviewed operation declares an exact ID, risk class, approval policy,
 timeout, output limit, permitted environment names, and immutable script hash.
 If approval is omitted, the conservative risk-based default applies: `write`
 and `destructive` suspend and require an independent exact-action Slack
-approval. Admin-risk worker operations are rejected at manifest load and denied
+approval. Any authenticated Slack human other than the requester may approve;
+workspace/channel scope, expiry, audit, and single-use binding remain mandatory.
+Admin-risk worker operations are rejected at manifest load and denied
 again by the executor. Only source-reviewed manifests can opt out. Agent Wiki
 page read/write operations are an explicit `never` exception. The other is
 `telemetryos.linear/intake`: the harness requires validated bug/feature and

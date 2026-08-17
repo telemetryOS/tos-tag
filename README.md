@@ -630,7 +630,10 @@ authority. The reviewed dynamic-tool catalog is the separate allowlist:
 
 Approval is declared by the reviewed operation manifest. The conservative
 default remains risk-based: non-read operations suspend the worker and require
-an independent exact-action Slack approval. Three source-reviewed exceptions are
+an independent exact-action Slack approval. Any authenticated human who can
+interact with the approval card may decide it except the original requester;
+the action remains workspace/channel-bound, expiring, audited, and single-use.
+Three source-reviewed exceptions are
 deliberately narrow: `telemetryos.linear/intake` permits only an explicitly
 requested bug/feature create, evidence comment, feature normalization, and its
 suitability follow-up; Agent Wiki page read/write authoring also executes
@@ -737,7 +740,7 @@ load and operation execution. There is no source-write approval path. Requests
 to implement, edit, fix, refactor, commit, push, merge, or deploy source are
 silently suppressed by the control plane with no Slack reply, reaction, worker,
 or approval flow. A separate explicit request to create a Linear bug or feature
-uses the normal reviewed Linear workflow and approval policy.
+uses the bounded `telemetryos.linear/intake` operation without a second approval.
 When a worker publishes source-derived Wiki content, it passes the body through
 the reviewed typed Wiki operation. The exact body is committed by the audit
 receipt rather than copied into broad audit listings.
