@@ -155,7 +155,10 @@ func TestCompleteObjectGraphConstructionHasNoNetworkSideEffects(t *testing.T) {
 	cfg.Marketplaces.BaseCatalogPath = filepath.Join(".claude-plugin", "marketplace.json")
 	cfg.Marketplaces.BasePlugin = "base"
 	if _, err := os.Stat(cfg.Marketplaces.BaseRoot); err != nil {
-		t.Skipf("tag-agent-skills checkout missing: %v", err)
+		if errors.Is(err, os.ErrNotExist) {
+			t.Skipf("tag-agent-skills checkout missing: %v", err)
+		}
+		t.Fatalf("stat tag-agent-skills checkout: %v", err)
 	}
 	if _, err := New(&cfg, nil); err != nil {
 		t.Fatal(err)
@@ -169,7 +172,10 @@ func TestConfiguredBehavioralPluginsAreAutomaticallyInjected(t *testing.T) {
 		BasePlugin:      "base",
 	}
 	if _, err := os.Stat(cfg.BaseRoot); err != nil {
-		t.Skipf("tag-agent-skills checkout missing: %v", err)
+		if errors.Is(err, os.ErrNotExist) {
+			t.Skipf("tag-agent-skills checkout missing: %v", err)
+		}
+		t.Fatalf("stat tag-agent-skills checkout: %v", err)
 	}
 	available, injected, err := loadBehavioralSkills(cfg)
 	if err != nil {
