@@ -1,11 +1,12 @@
 module github.com/telemetryos/tos-tag
 
-go 1.26
+go 1.27.1
 
 require (
 	github.com/RobertWHurst/blackbox v1.29.0
 	github.com/RobertWHurst/orale v1.11.0
 	github.com/google/uuid v1.6.0
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/slack-go/slack v0.27.0
 	go.mongodb.org/mongo-driver/v2 v2.8.0
 	go.opentelemetry.io/contrib/instrumentation/go.mongodb.org/mongo-driver/v2/mongo/otelmongo v0.0.0-20260731133940-c4725f2810a9
@@ -18,7 +19,6 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/klauspost/compress v1.19.1 // indirect
-	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
