@@ -402,12 +402,13 @@ and concurrency without leaking output into observed-only conversations.
 
 ## Host datastores (arch deployment)
 
-On the `arch` deployment host no database runs in Docker. MongoDB for tos-tag
-is the bare-metal user unit `tos-tag-mongo.service` on `127.0.0.1:27018`
-(see `deploy/arch/README.md`). Never start `docker compose up mongo`, a Mongo
-container, or any other datastore container on that host; add a
-`systemd --user` unit instead. The Compose `mongo` service exists only for the
-disposable container workspace elsewhere.
+On the `arch` deployment host no database runs in Docker and there is exactly
+one MongoDB: the bare-metal user unit `mongodb.service` on `127.0.0.1:27017`
+(rs0, auth enabled; tos-tag is its `tos_tag` database, credentials in the
+ignored `runtime.env`, see `deploy/arch/README.md`). Never start
+`docker compose up mongo`, another mongod, a Mongo container, or any other
+datastore container on that host. The Compose `mongo` service exists only for
+the disposable container workspace elsewhere.
 
 ## Container contract
 

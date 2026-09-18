@@ -13,18 +13,18 @@ export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
 cd "${repository}"
 
-# MongoDB runs bare metal as the user unit `tos-tag-mongo.service` on
-# 127.0.0.1:27018 (no databases in docker on this host). Wait for it.
+# MongoDB is the host's single bare-metal user unit `mongodb.service` on
+# 127.0.0.1:27017 (rs0, auth; credentials live in runtime.env). Wait for it.
 mongo_ready=false
 for _ in $(seq 1 60); do
-  if (exec 3<>/dev/tcp/127.0.0.1/27018) 2>/dev/null; then
+  if (exec 3<>/dev/tcp/127.0.0.1/27017) 2>/dev/null; then
     mongo_ready=true
     break
   fi
   sleep 2
 done
 if [[ "${mongo_ready}" != true ]]; then
-  echo "tos-tag MongoDB (tos-tag-mongo.service, 127.0.0.1:27018) not reachable within 120 seconds" >&2
+  echo "tos-tag MongoDB (mongodb.service, 127.0.0.1:27017) not reachable within 120 seconds" >&2
   exit 1
 fi
 
