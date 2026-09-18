@@ -400,6 +400,15 @@ They must also cover silence for irrelevant traffic, direct social replies,
 model/effort routing, native tables, tool calls, approval/resume when applicable,
 and concurrency without leaking output into observed-only conversations.
 
+## Host datastores (arch deployment)
+
+On the `arch` deployment host no database runs in Docker. MongoDB for tos-tag
+is the bare-metal user unit `tos-tag-mongo.service` on `127.0.0.1:27018`
+(see `deploy/arch/README.md`). Never start `docker compose up mongo`, a Mongo
+container, or any other datastore container on that host; add a
+`systemd --user` unit instead. The Compose `mongo` service exists only for the
+disposable container workspace elsewhere.
+
 ## Container contract
 
 `Dockerfile.dev`, `docker-compose.yml`, and `container/bootstrap-workspace.sh`
